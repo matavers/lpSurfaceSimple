@@ -103,6 +103,7 @@ class MainWindow(QMainWindow):
         self._single_file_mode = False
         self._uRange1 = None
         self._uRange2 = None
+        self._mesh_shared = False
 
         self._proc = None
         self._loaded_files = set()
@@ -125,6 +126,7 @@ class MainWindow(QMainWindow):
         self._console.clear()
         self._uRange1 = None
         self._uRange2 = None
+        self._mesh_shared = False
         self._log("Results cleared.")
 
     def _on_import_output(self):
@@ -210,9 +212,9 @@ class MainWindow(QMainWindow):
         self._btn_auto_id = QPushButton("Auto-Identify")
         self._btn_auto_id.clicked.connect(self._on_auto_identify)
         row_pv.addWidget(self._btn_auto_id)
-        self._btn_save_sel = QPushButton("Extract Selected Faces")
-        self._btn_save_sel.clicked.connect(self._on_save_selection)
-        row_pv.addWidget(self._btn_save_sel)
+        self._btn_split = QPushButton("Split Blade")
+        self._btn_split.clicked.connect(self._on_split_blade)
+        row_pv.addWidget(self._btn_split)
         row_pv.addStretch()
         form.addRow(row_pv)
 
@@ -379,7 +381,7 @@ class MainWindow(QMainWindow):
         self._mode = "ruled" if idx == 0 else "planar"
 
     def _hide_single_controls(self):
-        for w in [self._btn_preview, self._btn_auto_id, self._btn_save_sel, self._cmb_face1, self._cmb_face2]:
+        for w in [self._btn_preview, self._btn_auto_id, self._btn_split, self._cmb_face1, self._cmb_face2]:
             w.setVisible(False)
 
     def _on_toggle_single(self, checked):
@@ -388,7 +390,7 @@ class MainWindow(QMainWindow):
             self._txt_file2.setVisible(False)
             self._btn_preview.setVisible(True)
             self._btn_auto_id.setVisible(True)
-            self._btn_save_sel.setVisible(True)
+            self._btn_split.setVisible(True)
             self._cmb_face1.setVisible(True)
             self._cmb_face2.setVisible(True)
             self._cmb_face1.clear(); self._cmb_face1.addItem("(click Load Preview first)")
@@ -488,31 +490,53 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"[Error] Preview failed: {e}")
 
-    def _on_save_selection(self):
-        f1 = self._cmb_face1.currentData()
-        f2 = self._cmb_face2.currentData()
-        if f1 is None or f2 is None:
-            QMessageBox.warning(self, "Error", "Select two faces first.")
+    def _on_split_blade(self):
+        exe = str(BUILD_EXE)
+        if not os.path.exists(exe):
+            self._log(f"[Error] simple.exe not found: {exe}")
             return
         filepath = self._txt_file1.text()
-        outpath, _ = QFileDialog.getSaveFileName(
-            self, "Save Extracted Faces", filepath.replace(".igs","_extracted.igs").replace(".IGS","_extracted.igs"),
-            "IGES Files (*.igs);;All (*)")
-        if not outpath:
+        if not os.path.exists(filepath):
+            self._log(f"[Error] File not found: {filepath}")
             return
-        exe = str(BUILD_EXE)
-        import subprocess
+
+        faceIdx = self._cmb_face1.currentData()
+        if faceIdx is None:
+            self._log("Please Load Preview or Auto-Identify first")
+            return
+
+        self._log(f"Splitting Face[{faceIdx}]...")
         try:
-            result = subprocess.run(
-                [exe, filepath, '--mode', 'extract-faces',
-                 '--face-idx1', str(f1), '--face-idx2', str(f2),
-                 '--extract-out', outpath],
+            sr = subprocess.run(
+                [exe, filepath, '--mode', 'split-blade', '--face-idx', str(faceIdx)],
                 cwd=str(PROJECT_DIR), capture_output=True, text=True,
                 encoding='utf-8', errors='replace', timeout=30)
-            self._log(f"Extracted faces [{f1},{f2}] to {outpath}")
-            QMessageBox.information(self, "Done", f"Exported: {outpath}")
+            sraw = sr.stdout.strip()
+            s2 = sraw.find('{')
+            if s2 >= 0: sraw = sraw[s2:]
+            sinfo = json.loads(sraw)
+            if sinfo.get('success'):
+                self._uRange1 = (sinfo['pressStart'], sinfo['pressEnd'])
+                self._uRange2 = (sinfo['suctStart'], sinfo['suctEnd'])
+                self._cmb_face1.clear()
+                self._cmb_face2.clear()
+                self._cmb_face1.addItem(
+                    f"Face[{faceIdx}] Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]",
+                    faceIdx)
+                self._cmb_face2.addItem(
+                    f"Face[{faceIdx}] Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]",
+                    faceIdx)
+                self._cmb_face1.setCurrentIndex(0)
+                self._cmb_face2.setCurrentIndex(0)
+                self._log(f"  Edge   U=[{sinfo['edgeStart']:.3f},{sinfo['edgeEnd']:.3f}]")
+                self._log(f"  Peak 1 U={sinfo['uPeak1']:.3f}  Peak 2 U={sinfo['uPeak2']:.3f}")
+                self._log(f"  Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]")
+                self._log(f"  Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]")
+                self._log(f"  Ready - click Run to process")
+            else:
+                self._log(f"  Split failed: {sinfo.get('message','')}")
         except Exception as e:
-            self._log(f"[Error] Extract failed: {e}")
+            self._log(f"[Error] Split failed: {e}")
 
     def _on_auto_identify(self):
         exe = str(BUILD_EXE)
@@ -557,11 +581,12 @@ class MainWindow(QMainWindow):
                         sraw = sraw[si2:]
                     sinfo = json.loads(sraw)
                     if sinfo.get('success'):
-                        self._uRange1 = (sinfo['uSuctStart'], sinfo['uSuctEnd'])
-                        self._uRange2 = (sinfo['uPressStart'], sinfo['uPressEnd'])
-                        self._log(f"  LE u={sinfo['uLE']:.3f}  TE u={sinfo['uTE']:.3f}")
-                        self._log(f"  Suction  U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]")
-                        self._log(f"  Pressure U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]")
+                        self._uRange1 = (sinfo['pressStart'], sinfo['pressEnd'])
+                        self._uRange2 = (sinfo['suctStart'], sinfo['suctEnd'])
+                        self._log(f"  Edge  U=[{sinfo['edgeStart']:.3f},{sinfo['edgeEnd']:.3f}]")
+                        self._log(f"  Peak1 u={sinfo['uPeak1']:.3f}  Peak2 u={sinfo['uPeak2']:.3f}")
+                        self._log(f"  Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]")
+                        self._log(f"  Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]")
                 except Exception:
                     pass
 
@@ -569,10 +594,10 @@ class MainWindow(QMainWindow):
                 self._cmb_face2.clear()
                 if self._uRange1:
                     self._cmb_face1.addItem(
-                        f"Face[{splitFaceIdx}] Suction  U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]",
+                        f"Face[{splitFaceIdx}] Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]",
                         splitFaceIdx)
                     self._cmb_face2.addItem(
-                        f"Face[{splitFaceIdx}] Pressure U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]",
+                        f"Face[{splitFaceIdx}] Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]",
                         splitFaceIdx)
                 else:
                     self._cmb_face1.addItem(f"Face {pi} diag={pd:.1f}mm (pressure)", pi)
@@ -744,6 +769,7 @@ class MainWindow(QMainWindow):
 
     def _load_all_objs(self):
         out_dir = self._out_dir
+        self._mesh_shared = False
         if HAS_PYVISTA:
             self._plotter.disable_render = True
 
@@ -762,9 +788,21 @@ class MainWindow(QMainWindow):
             name = fn.replace('.obj', '')
             self._load_obj(path, name, "ruled")
 
+        mesh_paths = [os.path.normpath(os.path.join(out_dir, fn)) for fn in mesh_files]
+        if len(mesh_paths) == 2:
+            try:
+                s1 = os.path.getsize(mesh_paths[0])
+                s2 = os.path.getsize(mesh_paths[1])
+                if s1 == s2 and s1 > 0:
+                    self._mesh_shared = True
+            except Exception:
+                pass
+
         for fn in mesh_files:
             path = os.path.normpath(os.path.join(out_dir, fn))
             name = fn.replace('.obj', '')
+            if self._mesh_shared and 'blade2' in name:
+                continue
             self._load_obj(path, name, "mesh")
 
         if HAS_PYVISTA:
@@ -819,7 +857,10 @@ class MainWindow(QMainWindow):
             if vis and data_name:
                 if tag == "mesh":
                     blade = int(data_name.replace('blade', ''))
-                    visible_set.add(f"blade{blade}_mesh")
+                    name = f"blade{blade}_mesh"
+                    visible_set.add(name)
+                    if self._mesh_shared and blade == 2:
+                        visible_set.add("blade1_mesh")
                 elif tag == "ruled":
                     visible_set.add(data_name)
             for i in range(node.childCount()):
@@ -828,6 +869,12 @@ class MainWindow(QMainWindow):
         for i in range(self._tree.topLevelItemCount()):
             top = self._tree.topLevelItem(i)
             walk(top, top.checkState(0) == Qt.Checked)
+
+        if self._mesh_shared:
+            for tag in list(visible_set):
+                if tag == "blade2_mesh":
+                    visible_set.discard("blade2_mesh")
+                    visible_set.add("blade1_mesh")
 
         try:
             for a in self._plotter.renderer._actors:

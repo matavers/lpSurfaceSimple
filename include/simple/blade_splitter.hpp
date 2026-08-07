@@ -9,10 +9,15 @@
 namespace simple {
 
 struct BladeSplitResult {
+    double uPeak1 = 0, uPeak2 = 0;
+    double curvPeak1 = 0, curvPeak2 = 0;
+
+    double uEdgeStart = 0, uEdgeEnd = 0;
     double uPressStart = 0, uPressEnd = 0;
     double uSuctStart = 0, uSuctEnd = 0;
-    double uLE = 0, uTE = 0;
-    double leCurv = 0, teCurv = 0;
+
+    double curvPress = 0, curvSuct = 0;
+
     bool success = false;
     std::string message;
 };

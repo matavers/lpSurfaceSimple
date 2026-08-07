@@ -285,12 +285,14 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "{\"faceIndex\":" << fi
                       << ",\"success\":" << (sp.success ? "true" : "false")
-                      << ",\"uLE\":" << sp.uLE
-                      << ",\"uTE\":" << sp.uTE
-                      << ",\"uPressStart\":" << sp.uPressStart
-                      << ",\"uPressEnd\":" << sp.uPressEnd
-                      << ",\"uSuctStart\":" << sp.uSuctStart
-                      << ",\"uSuctEnd\":" << sp.uSuctEnd
+                      << ",\"uPeak1\":" << sp.uPeak1
+                      << ",\"uPeak2\":" << sp.uPeak2
+                      << ",\"edgeStart\":" << sp.uEdgeStart
+                      << ",\"edgeEnd\":" << sp.uEdgeEnd
+                      << ",\"pressStart\":" << sp.uPressStart
+                      << ",\"pressEnd\":" << sp.uPressEnd
+                      << ",\"suctStart\":" << sp.uSuctStart
+                      << ",\"suctEnd\":" << sp.uSuctEnd
                       << ",\"message\":\"" << escapedMsg << "\"}" << std::endl;
             return sp.success ? 0 : 1;
         }
@@ -436,12 +438,16 @@ int main(int argc, char* argv[]) {
         std::vector<std::array<int,3>> mf1, mf2;
         double defl1 = std::max(0.2, (adapt1.LastUParameter() - adapt1.FirstUParameter()
                                     + adapt1.LastVParameter() - adapt1.FirstVParameter()) * 0.01);
-        double defl2 = std::max(0.2, (adapt2.LastUParameter() - adapt2.FirstUParameter()
-                                    + adapt2.LastVParameter() - adapt2.FirstVParameter()) * 0.01);
         generateFaceMesh(face1, defl1, mv1, mf1);
-        generateFaceMesh(face2, defl2, mv2, mf2);
+        if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
+            double defl2 = std::max(0.2, (adapt2.LastUParameter() - adapt2.FirstUParameter()
+                                        + adapt2.LastVParameter() - adapt2.FirstVParameter()) * 0.01);
+            generateFaceMesh(face2, defl2, mv2, mf2);
+            std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
+        } else {
+            mv2 = mv1; mf2 = mf1;
+        }
         std::cout << "  Face 1 mesh: " << mv1.size() << " verts, " << mf1.size() << " tris" << std::endl;
-        std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
 
         std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
         std::string m1Path = outDir + "/blade1_mesh.obj";
