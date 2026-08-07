@@ -493,8 +493,7 @@ class MainWindow(QMainWindow):
                         m, name=f"preview_face_{idx}",
                         color=color, opacity=0.92,
                         smooth_shading=True,
-                        show_edges=True,
-                        edge_color='#444444', line_width=1.8,
+                        show_edges=False,
                         pbr=True, metallic=0.05, roughness=0.4)
                     ctr = m.center
                     labels_pts.append([ctr[0], ctr[1], ctr[2]])
@@ -515,7 +514,8 @@ class MainWindow(QMainWindow):
 
             self._plotter.view_isometric()
             self._plotter.render()
-            self._log("  Preview loaded. Select two faces above.")
+            self._setup_mouse_picking()
+            self._log("  Preview loaded. Click faces or use dropdowns to select.")
 
         except Exception as e:
             self._log(f"[Error] Preview failed: {e}")
@@ -546,17 +546,47 @@ class MainWindow(QMainWindow):
                 if fid in sel:
                     actor.GetProperty().SetColor(HIGHLIGHT_COLOR)
                     actor.GetProperty().SetOpacity(1.0)
-                    actor.GetProperty().SetEdgeColor(0.0, 0.0, 0.0)
-                    actor.GetProperty().SetLineWidth(2.5)
                 else:
                     orig = self._preview_colors.get(fid, [0.7, 0.7, 0.7])
                     actor.GetProperty().SetColor(orig)
                     actor.GetProperty().SetOpacity(0.92)
-                    actor.GetProperty().SetEdgeColor(0.27, 0.27, 0.27)
-                    actor.GetProperty().SetLineWidth(1.8)
             self._plotter.render()
         except Exception:
             pass
+
+    def _setup_mouse_picking(self):
+        if not HAS_PYVISTA or not self._preview_face_ids:
+            return
+        try:
+            import vtk
+        except ImportError:
+            return
+        self._pick_slot = 0
+        self._picker = vtk.vtkPropPicker()
+
+        def on_click(obj, evt):
+            if not self._single_file_mode:
+                return
+            x, y = obj.GetEventPosition()
+            self._picker.Pick(x, y, 0, self._plotter.renderer)
+            actor = self._picker.GetActor()
+            if actor:
+                name = getattr(actor, '_name', '')
+                if name.startswith('preview_face_'):
+                    fid = int(name.rsplit('_', 1)[-1])
+                    self._on_face_picked(fid)
+        self._pick_observer = self._plotter.iren.interactor.AddObserver(
+            "LeftButtonPressEvent", on_click)
+
+    def _on_face_picked(self, fid):
+        slot = self._pick_slot
+        self._pick_slot = 1 - self._pick_slot
+        cmb = self._cmb_face1 if slot == 0 else self._cmb_face2
+        for i in range(cmb.count()):
+            if cmb.itemData(i) == fid:
+                cmb.setCurrentIndex(i)
+                return
+        self._log(f"  Face {fid} not in dropdown")
 
     def _on_split_blade(self):
         exe = str(BUILD_EXE)
