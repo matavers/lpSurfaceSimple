@@ -53,6 +53,17 @@ SEG_COLORS = [
     [0.85, 0.30, 0.50],
 ]
 
+PREVIEW_COLORS = [
+    [0.88, 0.72, 0.53],
+    [0.62, 0.78, 0.88],
+    [0.82, 0.62, 0.72],
+    [0.68, 0.83, 0.63],
+    [0.78, 0.68, 0.83],
+    [0.88, 0.83, 0.58],
+]
+
+HIGHLIGHT_COLOR = [1.0, 0.84, 0.0]
+
 CONSOLE_CSS = """
 QTextEdit {
     background: #1e1e1e; color: #d4d4d4;
@@ -104,6 +115,8 @@ class MainWindow(QMainWindow):
         self._uRange1 = None
         self._uRange2 = None
         self._mesh_shared = False
+        self._preview_colors = {}
+        self._preview_face_ids = set()
 
         self._proc = None
         self._loaded_files = set()
@@ -220,10 +233,12 @@ class MainWindow(QMainWindow):
 
         self._cmb_face1 = QComboBox()
         self._cmb_face1.addItem("(select face)")
+        self._cmb_face1.currentIndexChanged.connect(self._on_face_selection_changed)
         form.addRow("Face for Surface 1:", self._cmb_face1)
 
         self._cmb_face2 = QComboBox()
         self._cmb_face2.addItem("(select face)")
+        self._cmb_face2.currentIndexChanged.connect(self._on_face_selection_changed)
         form.addRow("Face for Surface 2:", self._cmb_face2)
 
         self._hide_single_controls()
@@ -439,6 +454,8 @@ class MainWindow(QMainWindow):
             if not HAS_PYVISTA:
                 return
 
+            self._preview_colors = {}
+            self._preview_face_ids = set()
             labels_pts = []
             labels_text = []
 
@@ -447,7 +464,6 @@ class MainWindow(QMainWindow):
                 u0, u1 = face.get('uMin', 0), face.get('uMax', 0)
                 v0, v1 = face.get('vMin', 0), face.get('vMax', 0)
                 diag = face.get('diag', 0)
-                area = face.get('area', 0)
                 label = f"F{idx}  diag={diag:.1f}mm  UV=[{u0:.2f},{u1:.2f}]x[{v0:.2f},{v1:.2f}]"
                 self._cmb_face1.addItem(label, idx)
                 self._cmb_face2.addItem(label, idx)
@@ -469,17 +485,21 @@ class MainWindow(QMainWindow):
                 if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 100:
                     import pyvista as pv
                     m = pv.read(tmp_path)
-                    color = [((idx * 7 + 1) % 10) / 10,
-                             ((idx * 7 + 3) % 10) / 10,
-                             ((idx * 7 + 5) % 10) / 10]
+                    ci = idx % len(PREVIEW_COLORS)
+                    color = PREVIEW_COLORS[ci]
+                    self._preview_colors[idx] = color
+                    self._preview_face_ids.add(idx)
                     self._plotter.add_mesh(
                         m, name=f"preview_face_{idx}",
-                        color=color, opacity=0.85, show_edges=True,
-                        edge_color='black', line_width=1.5)
+                        color=color, opacity=0.92,
+                        smooth_shading=True,
+                        show_edges=True,
+                        edge_color='#444444', line_width=1.8,
+                        pbr=True, metallic=0.05, roughness=0.4)
                     ctr = m.center
                     labels_pts.append([ctr[0], ctr[1], ctr[2]])
                     labels_text.append(f"F{idx}")
-                    self._log(f"    Face {idx}: diag={diag:.1f}mm U=[{u0:.2f},{u1:.2f}] V=[{v0:.2f},{v1:.2f}] ({m.n_points} pts)")
+                    self._log(f"    Face {idx}: diag={diag:.1f}mm ({m.n_points} pts)")
                 else:
                     self._log(f"    Face {idx}: empty mesh, skipping")
 
@@ -499,6 +519,44 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self._log(f"[Error] Preview failed: {e}")
+
+    def _on_face_selection_changed(self):
+        if not HAS_PYVISTA or not self._preview_colors:
+            return
+        sel = set()
+        d1 = self._cmb_face1.currentData()
+        d2 = self._cmb_face2.currentData()
+        if d1 is not None:
+            sel.add(d1)
+        if d2 is not None:
+            sel.add(d2)
+        try:
+            for fid in self._preview_face_ids:
+                name = f"preview_face_{fid}"
+                actor = None
+                try:
+                    actor = self._plotter.actors.get(name)
+                except Exception:
+                    for a in self._plotter.renderer._actors:
+                        if hasattr(a, '_name') and a._name == name:
+                            actor = a
+                            break
+                if actor is None:
+                    continue
+                if fid in sel:
+                    actor.GetProperty().SetColor(HIGHLIGHT_COLOR)
+                    actor.GetProperty().SetOpacity(1.0)
+                    actor.GetProperty().SetEdgeColor(0.0, 0.0, 0.0)
+                    actor.GetProperty().SetLineWidth(2.5)
+                else:
+                    orig = self._preview_colors.get(fid, [0.7, 0.7, 0.7])
+                    actor.GetProperty().SetColor(orig)
+                    actor.GetProperty().SetOpacity(0.92)
+                    actor.GetProperty().SetEdgeColor(0.27, 0.27, 0.27)
+                    actor.GetProperty().SetLineWidth(1.8)
+            self._plotter.render()
+        except Exception:
+            pass
 
     def _on_split_blade(self):
         exe = str(BUILD_EXE)
@@ -868,6 +926,8 @@ class MainWindow(QMainWindow):
             pass
 
     def _clear_3d(self):
+        self._preview_colors = {}
+        self._preview_face_ids = set()
         if HAS_PYVISTA:
             self._plotter.clear()
             self._plotter.set_background('lightblue')
