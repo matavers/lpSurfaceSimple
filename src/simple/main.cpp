@@ -11,6 +11,7 @@
 #include "simple/ruled_fitter.hpp"
 #include "simple/planar_fitter.hpp"
 #include "simple/blade_identifier.hpp"
+#include "simple/blade_splitter.hpp"
 
 #include <IGESControl_Writer.hxx>
 #include <BRep_Builder.hxx>
@@ -74,7 +75,7 @@ void printUsage() {
     std::cout << "Usage: simple.exe <step_file1> <step_file2> [options]\n"
               << "  step_file1, step_file2 : Path to STEP blade model files\n"
               << "  Options:\n"
-              << "    --mode <ruled|planar|info|face-obj|extract-faces|auto-identify>  Algorithm mode (default: ruled)\n"
+              << "    --mode <ruled|planar|info|face-obj|extract-faces|auto-identify|split-blade>  Algorithm mode (default: ruled)\n"
               << "    --outdir <DIR>          Output directory (default: ./output)\n"
               << "    --face-idx1 <N>         Face index for file 1 (default: auto-pick largest)\n"
               << "    --face-idx2 <N>         Face index for file 2 (default: auto-pick largest)\n"
@@ -247,6 +248,29 @@ int main(int argc, char* argv[]) {
                       << ",\"suctionDiag\":" << sDiag
                       << ",\"message\":\"" << escapedMsg << "\"}" << std::endl;
             return ident.success ? 0 : 1;
+        }
+        // --mode split-blade: detect LE/TE and compute U ranges for pressure/suction
+        if (!stepFile1.empty() && modeStr == "split-blade") {
+            auto r = simple::loadStepFile(stepFile1);
+            if (!r.loaded) { std::cerr << "[Error] " << r.errorMsg << std::endl; return 1; }
+            int fi = (faceIdx1 >= 0 && faceIdx1 < (int)r.faces.size()) ? faceIdx1 : 0;
+            auto sp = simple::splitBladeFaceBySection(r.faces[fi]);
+            std::string escapedMsg = sp.message;
+            for (auto& c : escapedMsg) {
+                if (c == '\n') c = ' ';
+                if (c == '\r') c = ' ';
+                if (c == '"' || c == '\\') c = '\'';
+            }
+            std::cout << "{\"faceIndex\":" << fi
+                      << ",\"success\":" << (sp.success ? "true" : "false")
+                      << ",\"uLE\":" << sp.uLE
+                      << ",\"uTE\":" << sp.uTE
+                      << ",\"uPressStart\":" << sp.uPressStart
+                      << ",\"uPressEnd\":" << sp.uPressEnd
+                      << ",\"uSuctStart\":" << sp.uSuctStart
+                      << ",\"uSuctEnd\":" << sp.uSuctEnd
+                      << ",\"message\":\"" << escapedMsg << "\"}" << std::endl;
+            return sp.success ? 0 : 1;
         }
         // allow single-file: if it has 2 faces, use them directly
         if (!stepFile1.empty() && stepFile2.empty()) {
