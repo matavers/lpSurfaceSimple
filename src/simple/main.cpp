@@ -109,6 +109,8 @@ int main(int argc, char* argv[]) {
     std::string directrixDirsStr1 = "v,v,v", directrixDirsStr2 = "v,v,v";
     int faceIdx1 = -1, faceIdx2 = -1;
     std::string faceOutPath;
+    double uRange1Min = -1, uRange1Max = -1;
+    double uRange2Min = -1, uRange2Max = -1;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -120,6 +122,22 @@ int main(int argc, char* argv[]) {
         else if (arg == "--face-idx" && i + 1 < argc) { faceIdx1 = std::stoi(argv[++i]); }
         else if (arg == "--face-out" && i + 1 < argc) { faceOutPath = argv[++i]; }
         else if (arg == "--extract-out" && i + 1 < argc) { faceOutPath = argv[++i]; }
+        else if (arg == "--u-range1" && i + 1 < argc) {
+            std::string s(argv[++i]);
+            auto comma = s.find(',');
+            if (comma != std::string::npos) {
+                uRange1Min = std::stod(s.substr(0, comma));
+                uRange1Max = std::stod(s.substr(comma + 1));
+            }
+        }
+        else if (arg == "--u-range2" && i + 1 < argc) {
+            std::string s(argv[++i]);
+            auto comma = s.find(',');
+            if (comma != std::string::npos) {
+                uRange2Min = std::stod(s.substr(0, comma));
+                uRange2Max = std::stod(s.substr(comma + 1));
+            }
+        }
         else if (arg == "--nusamples" && i + 1 < argc) { nUSamples = std::stoi(argv[++i]); }
         else if (arg == "--nvsamples" && i + 1 < argc) { nVSamples = std::stoi(argv[++i]); }
         else if (arg == "--numsegments" && i + 1 < argc) { numSegments = std::stoi(argv[++i]); }
@@ -165,6 +183,8 @@ int main(int argc, char* argv[]) {
                 double diag = std::sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1)+(z2-z1)*(z2-z1));
                 double area = (adapt.LastUParameter()-adapt.FirstUParameter())
                             * (adapt.LastVParameter()-adapt.FirstVParameter());
+                int nWires = 0;
+                for (TopExp_Explorer we(r.faces[i], TopAbs_WIRE); we.More(); we.Next()) ++nWires;
                 std::cout << "{\"index\":" << i
                           << ",\"type\":" << (int)adapt.GetType()
                           << ",\"uMin\":" << adapt.FirstUParameter()
@@ -172,7 +192,9 @@ int main(int argc, char* argv[]) {
                           << ",\"vMin\":" << adapt.FirstVParameter()
                           << ",\"vMax\":" << adapt.LastVParameter()
                           << ",\"diag\":" << diag
-                          << ",\"area\":" << area << "}";
+                          << ",\"area\":" << area
+                          << ",\"nWires\":" << nWires
+                          << "}";
             }
             std::cout << "]}" << std::endl;
             return 0;
@@ -348,8 +370,15 @@ int main(int argc, char* argv[]) {
     double u2Min = adapt2.FirstUParameter(), u2Max = adapt2.LastUParameter();
     double v2Min = adapt2.FirstVParameter(), v2Max = adapt2.LastVParameter();
 
-    simple::SurfaceWrapper sw1(surf1, u1Min, u1Max, v1Min, v1Max);
-    simple::SurfaceWrapper sw2(surf2, u2Min, u2Max, v2Min, v2Max);
+    bool wrap1 = (uRange1Min >= 0 && uRange1Max < uRange1Min);
+    bool wrap2 = (uRange2Min >= 0 && uRange2Max < uRange2Min);
+    double u1m = (uRange1Min >= 0) ? uRange1Min : u1Min;
+    double u1M = (uRange1Min >= 0) ? uRange1Max : u1Max;
+    double u2m = (uRange2Min >= 0) ? uRange2Min : u2Min;
+    double u2M = (uRange2Min >= 0) ? uRange2Max : u2Max;
+
+    simple::SurfaceWrapper sw1(surf1, u1m, u1M, v1Min, v1Max, wrap1);
+    simple::SurfaceWrapper sw2(surf2, u2m, u2M, v2Min, v2Max, wrap2);
 
     auto [u1min, u1max] = sw1.paramDomainU();
     auto [v1min, v1max] = sw1.paramDomainV();

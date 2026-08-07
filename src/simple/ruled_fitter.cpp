@@ -11,6 +11,15 @@
 
 namespace simple {
 
+static double evalU(double u0, double u1, double t, bool wrap) {
+    if (!wrap || u0 <= u1)
+        return u0 + (u1 - u0) * t;
+    double rng = (1.0 - u0) + u1;
+    double u = u0 + rng * t;
+    if (u > 1.0) u -= 1.0;
+    return u;
+}
+
 bool exportOBJ(const std::string& path,
                const Vec3Arr& verts, const FaceArr& faces)
 {
@@ -152,10 +161,11 @@ std::pair<double, double> computeError(const SurfaceWrapper& surf,
     double maxDist = 0.0;
     int count = 0;
 
+    bool wrap = surf.isWrapU();
     if (seg.directrixDir == ParamDir::V) {
         for (int i = 0; i < nAlong; ++i) {
             for (int j = 0; j < nAcross; ++j) {
-                double u = uSeg0 + (uSeg1 - uSeg0) * i / (nAlong - 1.0);
+                double u = evalU(uSeg0, uSeg1, i / (nAlong - 1.0), wrap);
                 double v = vSeg0 + (vSeg1 - vSeg0) * j / (nAcross - 1.0);
                 Vec3 surfPt = surf.evaluate(u, v);
                 double bestDist = std::numeric_limits<double>::max();
@@ -178,7 +188,7 @@ std::pair<double, double> computeError(const SurfaceWrapper& surf,
         for (int i = 0; i < nAlong; ++i) {
             for (int j = 0; j < nAcross; ++j) {
                 double v = vSeg0 + (vSeg1 - vSeg0) * i / (nAlong - 1.0);
-                double u = uSeg0 + (uSeg1 - uSeg0) * j / (nAcross - 1.0);
+                double u = evalU(uSeg0, uSeg1, j / (nAcross - 1.0), wrap);
                 Vec3 surfPt = surf.evaluate(u, v);
                 double bestDist = std::numeric_limits<double>::max();
                 int nR = static_cast<int>(seg.curveC0Samples.size());
@@ -215,6 +225,8 @@ void optimizeDirectrices(
     Vec3Arr origC0 = c0Samples;
     Vec3Arr origC1 = c1Samples;
 
+    bool wrap = surf.isWrapU();
+
     for (int i = 0; i < n; ++i) {
         double sumW = 0, sumZ = 0, sumWW = 0, sumZZ = 0, sumWZ = 0;
         Vec3 sumWR(0,0,0), sumZR(0,0,0);
@@ -226,12 +238,12 @@ void optimizeDirectrices(
 
             Vec3 R;
             if (directrixDir == ParamDir::V) {
-                double u = uSeg0 + (uSeg1 - uSeg0) * i / (n - 1.0);
+                double u = evalU(uSeg0, uSeg1, i / (n - 1.0), wrap);
                 double v = vSeg0 + (vSeg1 - vSeg0) * t;
                 R = surf.evaluate(u, v);
             } else {
                 double v = vSeg0 + (vSeg1 - vSeg0) * i / (n - 1.0);
-                double u = uSeg0 + (uSeg1 - uSeg0) * t;
+                double u = evalU(uSeg0, uSeg1, t, wrap);
                 R = surf.evaluate(u, v);
             }
 
@@ -282,6 +294,7 @@ RuledResult fitRuledSegments(const SurfaceWrapper& surf,
 
     auto [uFull0, uFull1] = surf.paramDomainU();
     auto [vFull0, vFull1] = surf.paramDomainV();
+    bool wrap = surf.isWrapU();
 
     for (int seg = 0; seg < numSegments; ++seg) {
         RuledSegment rseg;
@@ -308,8 +321,13 @@ RuledResult fitRuledSegments(const SurfaceWrapper& surf,
         if (ddir == ParamDir::V) {
             rseg.curveC0 = surf.extractIsoCurveV(vSeg0);
             rseg.curveC1 = surf.extractIsoCurveV(vSeg1);
-            rseg.curveC0Samples = sampleCurveRange(rseg.curveC0, uSeg0, uSeg1, nCurveSamples);
-            rseg.curveC1Samples = sampleCurveRange(rseg.curveC1, uSeg0, uSeg1, nCurveSamples);
+            if (wrap && uSeg0 > uSeg1) {
+                rseg.curveC0Samples = sampleCurveRangeWrap(rseg.curveC0, uSeg0, uSeg1, nCurveSamples);
+                rseg.curveC1Samples = sampleCurveRangeWrap(rseg.curveC1, uSeg0, uSeg1, nCurveSamples);
+            } else {
+                rseg.curveC0Samples = sampleCurveRange(rseg.curveC0, uSeg0, uSeg1, nCurveSamples);
+                rseg.curveC1Samples = sampleCurveRange(rseg.curveC1, uSeg0, uSeg1, nCurveSamples);
+            }
         } else {
             rseg.curveC0 = surf.extractIsoCurveU(uSeg0);
             rseg.curveC1 = surf.extractIsoCurveU(uSeg1);

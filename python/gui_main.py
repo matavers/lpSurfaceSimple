@@ -101,6 +101,8 @@ class MainWindow(QMainWindow):
         self._currentVersion = 0
         self._mode = "ruled"
         self._single_file_mode = False
+        self._uRange1 = None
+        self._uRange2 = None
 
         self._proc = None
         self._loaded_files = set()
@@ -121,6 +123,8 @@ class MainWindow(QMainWindow):
         self._loaded_files.clear()
         self._clear_3d()
         self._console.clear()
+        self._uRange1 = None
+        self._uRange2 = None
         self._log("Results cleared.")
 
     def _on_import_output(self):
@@ -537,15 +541,45 @@ class MainWindow(QMainWindow):
                 pd = info.get('pressureDiag', 0)
                 sd = info.get('suctionDiag', 0)
 
+                self._uRange1 = None
+                self._uRange2 = None
+                splitFaceIdx = pi if pd > sd else si
+
+                self._log(f"  Running section-based split on Face[{splitFaceIdx}]...")
+                try:
+                    sr = subprocess.run(
+                        [exe, filepath, '--mode', 'split-blade', '--face-idx', str(splitFaceIdx)],
+                        cwd=str(PROJECT_DIR), capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=30)
+                    sraw = sr.stdout.strip()
+                    si2 = sraw.find('{')
+                    if si2 >= 0:
+                        sraw = sraw[si2:]
+                    sinfo = json.loads(sraw)
+                    if sinfo.get('success'):
+                        self._uRange1 = (sinfo['uSuctStart'], sinfo['uSuctEnd'])
+                        self._uRange2 = (sinfo['uPressStart'], sinfo['uPressEnd'])
+                        self._log(f"  LE u={sinfo['uLE']:.3f}  TE u={sinfo['uTE']:.3f}")
+                        self._log(f"  Suction  U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]")
+                        self._log(f"  Pressure U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]")
+                except Exception:
+                    pass
+
                 self._cmb_face1.clear()
                 self._cmb_face2.clear()
-                self._cmb_face1.addItem(f"Face {pi}  diag={pd:.1f}mm  (pressure)", pi)
-                self._cmb_face2.addItem(f"Face {si}  diag={sd:.1f}mm  (suction)", si)
+                if self._uRange1:
+                    self._cmb_face1.addItem(
+                        f"Face[{splitFaceIdx}] Suction  U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]",
+                        splitFaceIdx)
+                    self._cmb_face2.addItem(
+                        f"Face[{splitFaceIdx}] Pressure U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]",
+                        splitFaceIdx)
+                else:
+                    self._cmb_face1.addItem(f"Face {pi} diag={pd:.1f}mm (pressure)", pi)
+                    self._cmb_face2.addItem(f"Face {si} diag={sd:.1f}mm (suction)", si)
                 self._cmb_face1.setCurrentIndex(0)
                 self._cmb_face2.setCurrentIndex(0)
 
-                self._log(f"  Pressure face[{pi}] diag={pd:.1f}mm")
-                self._log(f"  Suction  face[{si}] diag={sd:.1f}mm")
                 self._log(f"  Auto-running main algorithm...")
                 self._on_run()
             else:
@@ -613,6 +647,10 @@ class MainWindow(QMainWindow):
                 cmd += f' --face-idx1 {f1}'
             if f2 is not None:
                 cmd += f' --face-idx2 {f2}'
+            if self._uRange1:
+                cmd += f' --u-range1 {self._uRange1[0]:.6f},{self._uRange1[1]:.6f}'
+            if self._uRange2:
+                cmd += f' --u-range2 {self._uRange2[0]:.6f},{self._uRange2[1]:.6f}'
         self._log(f"Running: {cmd}")
 
         self._btn_run.setEnabled(False)
