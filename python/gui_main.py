@@ -384,6 +384,16 @@ class MainWindow(QMainWindow):
         for w in [self._btn_preview, self._btn_auto_id, self._btn_split, self._cmb_face1, self._cmb_face2]:
             w.setVisible(False)
 
+    def _lock_face_controls(self):
+        self._cmb_face1.setEnabled(False)
+        self._cmb_face2.setEnabled(False)
+        self._btn_split.setEnabled(False)
+
+    def _unlock_face_controls(self):
+        self._cmb_face1.setEnabled(True)
+        self._cmb_face2.setEnabled(True)
+        self._btn_split.setEnabled(True)
+
     def _on_toggle_single(self, checked):
         self._single_file_mode = checked
         if checked:
@@ -567,46 +577,18 @@ class MainWindow(QMainWindow):
 
                 self._uRange1 = None
                 self._uRange2 = None
-                splitFaceIdx = pi if pd > sd else si
-
-                self._log(f"  Running section-based split on Face[{splitFaceIdx}]...")
-                try:
-                    sr = subprocess.run(
-                        [exe, filepath, '--mode', 'split-blade', '--face-idx', str(splitFaceIdx)],
-                        cwd=str(PROJECT_DIR), capture_output=True, text=True,
-                        encoding='utf-8', errors='replace', timeout=30)
-                    sraw = sr.stdout.strip()
-                    si2 = sraw.find('{')
-                    if si2 >= 0:
-                        sraw = sraw[si2:]
-                    sinfo = json.loads(sraw)
-                    if sinfo.get('success'):
-                        self._uRange1 = (sinfo['pressStart'], sinfo['pressEnd'])
-                        self._uRange2 = (sinfo['suctStart'], sinfo['suctEnd'])
-                        self._log(f"  Edge  U=[{sinfo['edgeStart']:.3f},{sinfo['edgeEnd']:.3f}]")
-                        self._log(f"  Peak1 u={sinfo['uPeak1']:.3f}  Peak2 u={sinfo['uPeak2']:.3f}")
-                        self._log(f"  Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]")
-                        self._log(f"  Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]")
-                except Exception:
-                    pass
 
                 self._cmb_face1.clear()
                 self._cmb_face2.clear()
-                if self._uRange1:
-                    self._cmb_face1.addItem(
-                        f"Face[{splitFaceIdx}] Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]",
-                        splitFaceIdx)
-                    self._cmb_face2.addItem(
-                        f"Face[{splitFaceIdx}] Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]",
-                        splitFaceIdx)
-                else:
-                    self._cmb_face1.addItem(f"Face {pi} diag={pd:.1f}mm (pressure)", pi)
-                    self._cmb_face2.addItem(f"Face {si} diag={sd:.1f}mm (suction)", si)
+                self._cmb_face1.addItem(f"Face {pi} diag={pd:.1f}mm (pressure)", pi)
+                self._cmb_face2.addItem(f"Face {si} diag={sd:.1f}mm (suction)", si)
                 self._cmb_face1.setCurrentIndex(0)
                 self._cmb_face2.setCurrentIndex(0)
 
-                self._log(f"  Auto-running main algorithm...")
-                self._on_run()
+                self._log(f"  Identified {info.get('message','')}")
+                self._log(f"  Pressure face[{pi}] diag={pd:.1f}mm")
+                self._log(f"  Suction  face[{si}] diag={sd:.1f}mm")
+                self._log(f"  Select faces above, optionally Split Blade, then Run.")
             else:
                 self._log(f"  Identification failed: {info.get('message','')}")
                 QMessageBox.warning(self, "Auto-Identify", info.get('message', 'Failed'))
@@ -682,6 +664,7 @@ class MainWindow(QMainWindow):
         self._btn_stop.setEnabled(True)
         self._btn_stop.setStyleSheet(
             "QPushButton{background:#c33;color:white;font-size:18px;padding:8px}")
+        self._lock_face_controls()
 
         self._proc = ProcRunner(cmd, str(PROJECT_DIR))
         self._proc.output_signal.connect(self._on_output)
@@ -894,6 +877,7 @@ class MainWindow(QMainWindow):
         self._btn_stop.setEnabled(False)
         self._btn_stop.setStyleSheet(
             "QPushButton{background:#888;color:#ddd;font-size:18px;padding:8px}")
+        self._unlock_face_controls()
         if code == 0:
             self._log("[Done] Algorithm finished successfully.")
         else:
@@ -915,6 +899,7 @@ class MainWindow(QMainWindow):
         self._btn_stop.setEnabled(False)
         self._btn_stop.setStyleSheet(
             "QPushButton{background:#888;color:#ddd;font-size:18px;padding:8px}")
+        self._unlock_face_controls()
         self._log("[Stopped]")
 
     def closeEvent(self, event):
