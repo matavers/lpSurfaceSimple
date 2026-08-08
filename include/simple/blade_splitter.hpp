@@ -26,7 +26,7 @@ BladeSplitResult splitBladeFaceBySection(
     int numSections = 7,
     int samplesPerSection = 200,
     int smoothingWindow = 7,
-    double peakThresholdRatio = 0.15,
+    double peakThresholdRatio = 0.25,
     double clusterGapRatio = 0.12);
 
 } // namespace simple
