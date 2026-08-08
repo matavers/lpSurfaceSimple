@@ -473,11 +473,6 @@ class MainWindow(QMainWindow):
             if not HAS_PYVISTA:
                 return
 
-        self._preview_colors = {}
-        self._preview_face_ids = set()
-        self._last_picked_fid = None
-        self._split_items = []
-        self._split_face_idx = None
             labels_pts = []
             labels_text = []
 
