@@ -479,6 +479,7 @@ class MainWindow(QMainWindow):
             if not HAS_PYVISTA:
                 return
 
+            self._labels_pts = {}
             labels_pts = []
             labels_text = []
 
@@ -519,6 +520,7 @@ class MainWindow(QMainWindow):
                         show_edges=False,
                         pbr=True, metallic=0.05, roughness=0.4)
                     ctr = m.center
+                    self._labels_pts[idx] = [ctr[0], ctr[1], ctr[2]]
                     labels_pts.append([ctr[0], ctr[1], ctr[2]])
                     labels_text.append(f"F{idx}")
                     self._log(f"    Face {idx}: diag={diag:.1f}mm ({m.n_points} pts)")
@@ -532,7 +534,8 @@ class MainWindow(QMainWindow):
                     text_color='black',
                     shape='rounded_rect', shape_color='white',
                     shape_opacity=0.85, margin=4,
-                    point_size=1, always_visible=True)
+                    point_size=1, always_visible=True,
+                    name='face_labels')
                 self._log(f"  Added {len(labels_pts)} face labels")
 
             self._plotter.view_isometric()
@@ -679,6 +682,7 @@ class MainWindow(QMainWindow):
 
                 self._plotter.render()
                 self._btn_identify.setEnabled(len(self._split_items) >= 2)
+                self._refocus_camera()
                 self._log(f"  Split complete. {len(self._split_items)} regions in list.")
             else:
                 self._log(f"  Split failed: {sinfo.get('message','')}")
@@ -745,6 +749,7 @@ class MainWindow(QMainWindow):
             self._cmb_face1.addItem(f"Face{kept[0]['face_idx']}-split-{kept[0]['sub_idx']} {kept[0]['label']}",
                                     kept[0])
             self._log(f"  Only one side found: {self._cmb_face1.currentText()}")
+        self._refocus_camera()
         self._log(f"  Ready. Click Run to process.")
 
     def _hide_actor(self, name):
@@ -766,6 +771,60 @@ class MainWindow(QMainWindow):
         self._split_items = []
         self._split_list.clear()
         self._btn_identify.setEnabled(False)
+
+    def _update_labels(self):
+        if not HAS_PYVISTA or not hasattr(self, '_labels_pts'):
+            return
+        try:
+            self._plotter.remove_actor('face_labels')
+        except Exception:
+            pass
+        pts = []
+        txt = []
+        for fid in self._preview_face_ids:
+            try:
+                a = self._plotter.actors.get(f"preview_face_{fid}")
+            except Exception:
+                a = None
+            if a is None:
+                continue
+            if not a.GetVisibility():
+                continue
+            if fid in self._labels_pts:
+                pts.append(self._labels_pts[fid])
+                txt.append(f"F{fid}")
+        if pts:
+            self._plotter.add_point_labels(
+                np.array(pts), txt,
+                font_size=14, bold=True,
+                text_color='black',
+                shape='rounded_rect', shape_color='white',
+                shape_opacity=0.85, margin=4,
+                point_size=1, always_visible=True,
+                name='face_labels')
+
+    def _refocus_camera(self):
+        if not HAS_PYVISTA:
+            return
+        import numpy as np
+        all_pts = []
+        try:
+            for name, a in self._plotter.actors.items():
+                if not a.GetVisibility():
+                    continue
+                if hasattr(a, 'GetMapper') and a.GetMapper():
+                    inp = a.GetMapper().GetInput()
+                    if inp and hasattr(inp, 'GetPoints') and inp.GetPoints():
+                        pts = inp.GetPoints()
+                        for k in range(pts.GetNumberOfPoints()):
+                            all_pts.append(pts.GetPoint(k))
+        except Exception:
+            pass
+        if all_pts:
+            arr = np.array(all_pts)
+            ctr = arr.mean(axis=0)
+            self._plotter.camera.SetFocalPoint(ctr[0], ctr[1], ctr[2])
+            self._plotter.render()
 
     def _on_auto_identify(self):
         exe = str(BUILD_EXE)
@@ -813,6 +872,8 @@ class MainWindow(QMainWindow):
                 for fid in self._preview_face_ids:
                     if fid not in blade_set:
                         self._hide_actor(f"preview_face_{fid}")
+                self._update_labels()
+                self._refocus_camera()
                 self._last_picked_fid = pi if pd > sd else si
                 self._log(f"  Non-blade faces hidden. Click a blade face, then Split.")
             else:
