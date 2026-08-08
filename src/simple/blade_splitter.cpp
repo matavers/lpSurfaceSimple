@@ -5,18 +5,71 @@
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
 #include <GeomAdaptor_Curve.hxx>
-#include <BRepLProp_SLProps.hxx>
 
 #include <algorithm>
 #include <cmath>
 #include <sstream>
 #include <numeric>
+#include <set>
 
 namespace simple {
 
+static double curveCurv(const GeomAdaptor_Curve& gac, double t) {
+    gp_Pnt p; gp_Vec d1, d2;
+    gac.D2(t, p, d1, d2);
+    double m = d1.Magnitude();
+    return m > 1e-10 ? d1.Crossed(d2).Magnitude() / (m * m * m) : 0.0;
+}
+
+struct CProfile {
+    std::vector<double> sm;
+    double dMin, dMax, dRange;
+};
+
+static CProfile buildProfile(Handle(Geom_BSplineSurface)& surf,
+    double uMin, double uMax, double vMin, double vMax,
+    int nSec, int nPts, int hw, bool alongU)
+{
+    CProfile cp;
+    cp.dMin = alongU ? uMin : vMin;
+    cp.dMax = alongU ? uMax : vMax;
+    cp.dRange = cp.dMax - cp.dMin;
+
+    double v0 = alongU ? vMin : uMin, v1 = alongU ? vMax : uMax;
+    double vr = v1 - v0, vm = vr * 0.08;
+    nSec = std::max(3, nSec); nPts = std::max(50, nPts);
+
+    cp.sm.resize(nPts, 0.0);
+    std::vector<int> cnt(nPts, 0);
+
+    for (int si = 0; si < nSec; ++si) {
+        double vh = v0 + vm + (vr - 2 * vm) * si / (nSec - 1);
+        Handle(Geom_Curve) crv = alongU ? surf->VIso(vh) : surf->UIso(vh);
+        if (crv.IsNull()) continue;
+        GeomAdaptor_Curve gac(crv);
+        double t0 = gac.FirstParameter(), t1 = gac.LastParameter();
+        for (int i = 0; i < nPts; ++i) {
+            double t = t0 + (t1 - t0) * i / (nPts - 1);
+            cp.sm[i] += curveCurv(gac, t);
+            cnt[i]++;
+        }
+    }
+    for (int i = 0; i < nPts; ++i)
+        if (cnt[i] > 0) cp.sm[i] /= cnt[i];
+
+    std::vector<double> tmp = cp.sm;
+    hw /= 2;
+    for (int i = 0; i < nPts; ++i) {
+        double s = 0; int c = 0;
+        for (int j = std::max(0, i - hw); j < std::min(nPts, i + hw + 1); ++j)
+            { s += tmp[j]; ++c; }
+        cp.sm[i] = c > 0 ? s / c : 0;
+    }
+    return cp;
+}
+
 BladeSplitResult splitBladeFaceBySection(
-    const TopoDS_Face& face, int numSections, int samplesPerSection,
-    int smoothingWindow, double peakThresholdRatio, double clusterGapRatio)
+    const TopoDS_Face& face, int nSec, int nPts, int hw, double, double)
 {
     BladeSplitResult result;
     std::ostringstream log;
@@ -28,153 +81,106 @@ BladeSplitResult splitBladeFaceBySection(
 
     double uMin = adapt.FirstUParameter(), uMax = adapt.LastUParameter();
     double vMin = adapt.FirstVParameter(), vMax = adapt.LastVParameter();
-    double uRange = uMax - uMin, vRange = vMax - vMin;
 
-    if (vRange < 1e-6) { result.message = "V range too small"; return result; }
+    auto cpU = buildProfile(surf, uMin, uMax, vMin, vMax, nSec, nPts, hw, true);
+    auto cpV = buildProfile(surf, uMin, uMax, vMin, vMax, nSec, nPts, hw, false);
 
-    int nSec = std::max(3, numSections);
-    double vMargin = vRange * 0.08;
-    std::vector<double> vHeights;
-    for (int i = 0; i < nSec; ++i)
-        vHeights.push_back(vMin + vMargin + (vRange - 2.0 * vMargin) * i / (nSec - 1));
-
-    struct Peak { double u; double curv; };
-    std::vector<Peak> allPeaks;
-    int ns = std::max(50, samplesPerSection);
-
-    for (double vh : vHeights) {
-        Handle(Geom_Curve) curve = surf->VIso(vh);
-        if (curve.IsNull()) continue;
-        GeomAdaptor_Curve gac(curve);
-
-        std::vector<double> curvProfile(ns);
-        for (int i = 0; i < ns; ++i) {
-            double t = gac.FirstParameter() + (gac.LastParameter() - gac.FirstParameter()) * i / (ns - 1);
-            gp_Pnt p; gp_Vec d1, d2;
-            gac.D2(t, p, d1, d2);
-            double m = d1.Magnitude();
-            curvProfile[i] = (m > 1e-10) ? d1.Crossed(d2).Magnitude() / (m * m * m) : 0;
-        }
-
-        int hw = smoothingWindow / 2;
-        std::vector<double> sm(ns);
-        for (int i = 0; i < ns; ++i) {
-            double s = 0; int c = 0;
-            for (int j = std::max(0, i - hw); j < std::min(ns, i + hw + 1); ++j) { s += curvProfile[j]; ++c; }
-            sm[i] = c > 0 ? s / c : 0;
-        }
-
-        double maxC = *std::max_element(sm.begin(), sm.end());
-        if (maxC < 1e-12) continue;
-
-        for (int i = 1; i < ns - 1; ++i)
-            if (sm[i] > sm[i - 1] && sm[i] > sm[i + 1] && sm[i] > maxC * peakThresholdRatio)
-                allPeaks.push_back({gac.FirstParameter() + (gac.LastParameter() - gac.FirstParameter()) * i / (ns - 1), sm[i]});
-    }
-
-    log << "  Found " << allPeaks.size() << " peaks across " << vHeights.size() << " sections";
-    if (allPeaks.empty()) { result.message = log.str(); return result; }
-
-    std::vector<double> uVals;
-    for (auto& p : allPeaks) uVals.push_back(p.u);
-    std::sort(uVals.begin(), uVals.end());
-
-    double gap = uRange * clusterGapRatio;
-    std::vector<std::vector<double>> clusters;
-    std::vector<double> cur; cur.push_back(uVals[0]);
-    for (size_t i = 1; i < uVals.size(); ++i) {
-        if (uVals[i] - uVals[i - 1] < gap) cur.push_back(uVals[i]);
-        else { clusters.push_back(cur); cur.clear(); cur.push_back(uVals[i]); }
-    }
-    clusters.push_back(cur);
-
-    std::vector<double> means, curvs;
-    for (auto& cl : clusters) {
-        double m = 0; for (double v : cl) m += v; m /= cl.size(); means.push_back(m);
-        double cs = 0; int cc = 0;
-        for (auto& p : allPeaks) if (std::abs(p.u - m) < gap) { cs += p.curv; ++cc; }
-        curvs.push_back(cc > 0 ? cs / cc : 0);
-    }
-
-    std::vector<int> idx(clusters.size());
-    std::iota(idx.begin(), idx.end(), 0);
-    std::sort(idx.begin(), idx.end(), [&](int a, int b) { return curvs[a] > curvs[b]; });
-
-    double maxCC = curvs[idx[0]], minCC = curvs[idx.back()];
-    double curvThreshold = (maxCC + minCC) * 0.6;
-
-    std::vector<double> keeMeans, keeCurvs;
-    for (int k = 0; k < (int)clusters.size(); ++k) {
-        int ci = idx[k];
-        if (curvs[ci] >= curvThreshold) {
-            keeMeans.push_back(means[ci]);
-            keeCurvs.push_back(curvs[ci]);
-        }
-    }
-    if (keeMeans.empty()) { keeMeans.push_back(means[idx[0]]); keeCurvs.push_back(curvs[idx[0]]); }
-
-    log << "\n  Keeping " << keeMeans.size() << "/" << clusters.size()
-        << " clusters (curv >= " << curvThreshold << " mid=" << (maxCC + minCC) / 2 << ")";
-
-    std::vector<int> order(keeMeans.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](int a, int b) { return keeMeans[a] < keeMeans[b]; });
-
-    std::vector<double> bp = {uMin};
-    for (int o : order) bp.push_back(keeMeans[o]);
-    bp.push_back(uMax);
-
-    auto regionCurv = [&](double us, double ue) -> double {
-        double sum = 0; int cnt = 0;
-        for (double vh : vHeights) {
-            Handle(Geom_Curve) curve = surf->VIso(vh);
-            if (curve.IsNull()) continue;
-            GeomAdaptor_Curve gac(curve);
-            int nr = std::max(10, (int)((ue - us) / uRange * 30));
-            for (int i = 0; i < nr; ++i) {
-                double u = us + (ue - us) * (i + 1) / (nr + 1.0);
-                gp_Pnt p; gp_Vec d1, d2;
-                gac.D2(u, p, d1, d2);
-                double m = d1.Magnitude();
-                if (m > 1e-10) sum += d1.Crossed(d2).Magnitude() / (m * m * m);
-                ++cnt;
-            }
-        }
-        return cnt > 0 ? sum / cnt : 0;
+    auto featCount = [](const CProfile& cp) {
+        double mx = *std::max_element(cp.sm.begin(), cp.sm.end());
+        double mn = *std::min_element(cp.sm.begin(), cp.sm.end());
+        double th = (mx - mn) * 0.1;
+        int c = 0, n = (int)cp.sm.size();
+        for (int i = 2; i < n - 2; ++i)
+            if (cp.sm[i] > cp.sm[i-1] && cp.sm[i] > cp.sm[i+1] && cp.sm[i] > mn + th) ++c;
+        return c;
     };
 
-    std::vector<SplitRegion> regions;
+    int fU = featCount(cpU), fV = featCount(cpV);
+    bool alongU = fU >= fV;
+    auto& cp = alongU ? cpU : cpV;
+
+    log << "  Direction: " << (alongU ? "U" : "V")
+        << " (peaks U=" << fU << " V=" << fV << ")";
+    log << " range [" << cp.dMin << "," << cp.dMax << "]";
+
+    double mxC = *std::max_element(cp.sm.begin(), cp.sm.end());
+    double mnC = *std::min_element(cp.sm.begin(), cp.sm.end());
+    double rng = mxC - mnC;
+    if (rng < 1e-12) { result.message = log.str(); return result; }
+
+    int N = (int)cp.sm.size();
+    double th = mnC + rng * 0.2;
+
+    std::vector<std::pair<double, double>> peaksWithCurv;
+    for (int i = 2; i < N - 2; ++i) {
+        if (cp.sm[i] > cp.sm[i-1] && cp.sm[i] > cp.sm[i+1] &&
+            cp.sm[i] > cp.sm[i-2] && cp.sm[i] > cp.sm[i+2] && cp.sm[i] > th) {
+            double u = cp.dMin + cp.dRange * i / (N - 1);
+            if (peaksWithCurv.empty() || (u - peaksWithCurv.back().first) > cp.dRange * 0.04)
+                peaksWithCurv.push_back({u, cp.sm[i]});
+        }
+    }
+
+    log << "\n  " << peaksWithCurv.size() << " raw peaks";
+
+    if (peaksWithCurv.size() > 3) {
+        std::sort(peaksWithCurv.begin(), peaksWithCurv.end(),
+            [](auto& a, auto& b) { return a.second > b.second; });
+        double maxC = peaksWithCurv[0].second;
+        double keepTh = maxC * 0.65;
+        std::vector<std::pair<double, double>> strong;
+        for (auto& p : peaksWithCurv)
+            if (p.second >= keepTh) strong.push_back(p);
+        if (strong.size() >= 2) peaksWithCurv = strong;
+        else peaksWithCurv.resize(std::min(2, (int)peaksWithCurv.size()));
+    }
+    std::sort(peaksWithCurv.begin(), peaksWithCurv.end(),
+        [](auto& a, auto& b) { return a.first < b.first; });
+
+    log << "\n  " << peaksWithCurv.size() << " significant peaks";
+    for (auto& p : peaksWithCurv) log << " u=" << p.first;
+
+    std::vector<double> bp = {cp.dMin};
+    for (auto& p : peaksWithCurv) bp.push_back(p.first);
+    bp.push_back(cp.dMax);
+
+    auto regCurv = [&](double a, double b) {
+        int is = std::max(0, (int)((a - cp.dMin) / cp.dRange * (N - 1)));
+        int ie = std::min(N - 1, (int)((b - cp.dMin) / cp.dRange * (N - 1)));
+        double s = 0; int c = 0;
+        for (int i = is; i <= ie; ++i) { s += cp.sm[i]; ++c; }
+        return c > 0 ? s / c : 0;
+    };
+
+    std::vector<SplitRegion> regs;
     for (size_t i = 0; i + 1 < bp.size(); ++i) {
-        SplitRegion r;
-        r.uStart = bp[i]; r.uEnd = bp[i + 1];
-        r.avgCurv = regionCurv(r.uStart, r.uEnd);
-        regions.push_back(r);
+        SplitRegion r; r.uStart = bp[i]; r.uEnd = bp[i+1];
+        r.avgCurv = regCurv(r.uStart, r.uEnd);
+        regs.push_back(r);
     }
 
-    int n = (int)regions.size();
-    std::vector<int> ri(n);
-    std::iota(ri.begin(), ri.end(), 0);
-    std::sort(ri.begin(), ri.end(), [&](int a, int b) { return regions[a].avgCurv > regions[b].avgCurv; });
-
-    for (int i = 0; i < n; ++i) {
-        int r = ri[i];
-        double len = regions[r].uEnd - regions[r].uStart;
-        if (i < 2 && len < uRange * 0.15)
-            regions[r].label = "edge";
-        else if (regions[r].avgCurv >= regions[ri[n / 2]].avgCurv)
-            regions[r].label = "suction";
+    int n = (int)regs.size();
+    double regMax = regs[0].avgCurv, regMin = regs[0].avgCurv;
+    for (auto& r : regs) {
+        if (r.avgCurv > regMax) regMax = r.avgCurv;
+        if (r.avgCurv < regMin) regMin = r.avgCurv;
+    }
+    double regMed = (regMax + regMin) * 0.5;
+    for (auto& r : regs) {
+        double len = r.uEnd - r.uStart;
+        if (len < cp.dRange * 0.15 && r.avgCurv > regMed)
+            r.label = "edge";
+        else if (r.avgCurv >= regMed)
+            r.label = "suction";
         else
-            regions[r].label = "pressure";
+            r.label = "pressure";
     }
 
-    for (auto& r : regions)
-        if (r.label.empty()) r.label = "pressure";
-
-    result.regions = regions;
+    result.regions = regs;
     result.success = true;
-    for (auto& r : regions)
-        log << "\n  [" << r.uStart << "," << r.uEnd << "] len=" << (r.uEnd - r.uStart)
-            << " C=" << r.avgCurv << " " << r.label;
+    for (auto& r : regs)
+        log << "\n  [" << r.uStart << "," << r.uEnd << "] len="
+            << (r.uEnd - r.uStart) << " C=" << r.avgCurv << " " << r.label;
     result.message = log.str();
     return result;
 }
