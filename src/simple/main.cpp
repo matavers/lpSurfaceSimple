@@ -271,7 +271,7 @@ int main(int argc, char* argv[]) {
                       << ",\"message\":\"" << escapedMsg << "\"}" << std::endl;
             return ident.success ? 0 : 1;
         }
-        // --mode split-blade: detect LE/TE and compute U ranges for pressure/suction
+        // --mode split-blade: detect curvature peaks and split into dynamic regions
         if (!stepFile1.empty() && modeStr == "split-blade") {
             auto r = simple::loadStepFile(stepFile1);
             if (!r.loaded) { std::cerr << "[Error] " << r.errorMsg << std::endl; return 1; }
@@ -285,16 +285,51 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "{\"faceIndex\":" << fi
                       << ",\"success\":" << (sp.success ? "true" : "false")
-                      << ",\"uPeak1\":" << sp.uPeak1
-                      << ",\"uPeak2\":" << sp.uPeak2
-                      << ",\"edgeStart\":" << sp.uEdgeStart
-                      << ",\"edgeEnd\":" << sp.uEdgeEnd
-                      << ",\"pressStart\":" << sp.uPressStart
-                      << ",\"pressEnd\":" << sp.uPressEnd
-                      << ",\"suctStart\":" << sp.uSuctStart
-                      << ",\"suctEnd\":" << sp.uSuctEnd
-                      << ",\"message\":\"" << escapedMsg << "\"}" << std::endl;
+                      << ",\"regions\":[";
+            for (size_t i = 0; i < sp.regions.size(); ++i) {
+                if (i > 0) std::cout << ",";
+                std::cout << "{\"uStart\":" << sp.regions[i].uStart
+                          << ",\"uEnd\":" << sp.regions[i].uEnd
+                          << ",\"avgCurv\":" << sp.regions[i].avgCurv
+                          << ",\"label\":\"" << sp.regions[i].label << "\"}";
+            }
+            std::cout << "],\"message\":\"" << escapedMsg << "\"}" << std::endl;
             return sp.success ? 0 : 1;
+        }
+        // --mode face-obj-range: export partial face mesh for a U sub-range
+        if (!stepFile1.empty() && modeStr == "face-obj-range" && !faceOutPath.empty()) {
+            auto r = simple::loadStepFile(stepFile1);
+            if (!r.loaded) { std::cerr << "[Error] " << r.errorMsg << std::endl; return 1; }
+            int fi = (faceIdx1 >= 0 && faceIdx1 < (int)r.faces.size()) ? faceIdx1 : 0;
+            BRepAdaptor_Surface ad(r.faces[fi], true);
+            if (ad.GetType() != GeomAbs_BSplineSurface) { std::cerr << "[Error] Face not BSpline" << std::endl; return 1; }
+            Handle(Geom_BSplineSurface) s = ad.BSpline();
+            if (s.IsNull()) s = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(r.faces[fi]));
+            double us = uRange1Min, ue = uRange1Max;
+            if (us < 0) { us = ad.FirstUParameter(); }
+            if (ue < 0) { ue = ad.LastUParameter(); }
+            if (us > ue) std::swap(us, ue);
+            double vs = ad.FirstVParameter(), ve = ad.LastVParameter();
+            int ru = 40, rv = 20;
+            Vec3Arr verts; FaceArr faces;
+            for (int i = 0; i <= ru; ++i) {
+                double u = us + (ue - us) * i / ru;
+                for (int j = 0; j <= rv; ++j) {
+                    double v = vs + (ve - vs) * j / rv;
+                    gp_Pnt p = s->Value(u, v);
+                    verts.push_back(Vec3(p.X(), p.Y(), p.Z()));
+                }
+            }
+            for (int i = 0; i < ru; ++i) {
+                for (int j = 0; j < rv; ++j) {
+                    int a = i * (rv + 1) + j;
+                    faces.push_back({a, a + 1, a + rv + 1});
+                    faces.push_back({a + 1, a + rv + 2, a + rv + 1});
+                }
+            }
+            exportOBJ(faceOutPath, verts, faces);
+            std::cout << "wrote " << faceOutPath << std::endl;
+            return 0;
         }
         // allow single-file: if it has 2 faces, use them directly
         if (!stepFile1.empty() && stepFile2.empty()) {

@@ -1,12 +1,7 @@
 #include "simple/blade_splitter.hpp"
 
 #include <BRepAdaptor_Surface.hxx>
-#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
-#include <BRepTools.hxx>
-#include <Bnd_Box.hxx>
-#include <BRepBndLib.hxx>
-
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
 #include <GeomAdaptor_Curve.hxx>
@@ -15,7 +10,6 @@
 #include <cmath>
 #include <sstream>
 #include <numeric>
-#include <map>
 
 namespace simple {
 
@@ -23,7 +17,9 @@ BladeSplitResult splitBladeFaceBySection(
     const TopoDS_Face& face,
     int numSections,
     int samplesPerSection,
-    int smoothingWindow)
+    int smoothingWindow,
+    double peakThresholdRatio,
+    double clusterGapRatio)
 {
     BladeSplitResult result;
     std::ostringstream log;
@@ -44,20 +40,11 @@ BladeSplitResult splitBladeFaceBySection(
 
     double uMin = adapt.FirstUParameter(), uMax = adapt.LastUParameter();
     double vMin = adapt.FirstVParameter(), vMax = adapt.LastVParameter();
-    double uRange = uMax - uMin;
     double vRange = vMax - vMin;
-
-    bool isPeriodic = surf->IsUPeriodic();
-    gp_Pnt p0 = adapt.Value(uMin, vMin + vRange * 0.5);
-    gp_Pnt p1 = adapt.Value(uMax, vMin + vRange * 0.5);
-    double closureDist = p0.Distance(p1);
-
-    log << "Surface U=[" << uMin << "," << uMax << "] V=[" << vMin << "," << vMax << "]"
-        << " periodic=" << (isPeriodic ? "yes" : "no")
-        << " closureDist=" << closureDist;
+    double uRange = uMax - uMin;
 
     if (vRange < 1e-6) {
-        result.message = "V range too small for sections";
+        result.message = "V range too small";
         return result;
     }
 
@@ -75,13 +62,12 @@ BladeSplitResult splitBladeFaceBySection(
         if (curve.IsNull()) continue;
 
         GeomAdaptor_Curve gac(curve);
-        double cMin = gac.FirstParameter(), cMax = gac.LastParameter();
         int ns = std::max(50, samplesPerSection);
 
         std::vector<std::pair<double, double>> cp;
         cp.reserve(ns);
         for (int i = 0; i < ns; ++i) {
-            double t = cMin + (cMax - cMin) * i / (ns - 1);
+            double t = gac.FirstParameter() + (gac.LastParameter() - gac.FirstParameter()) * i / (ns - 1);
             gp_Pnt p; gp_Vec d1, d2;
             gac.D2(t, p, d1, d2);
             double curv = 0.0;
@@ -103,7 +89,7 @@ BladeSplitResult splitBladeFaceBySection(
 
         double maxCurv = *std::max_element(smoothed.begin(), smoothed.end());
         if (maxCurv < 1e-12) continue;
-        double threshold = maxCurv * 0.15;
+        double threshold = maxCurv * peakThresholdRatio;
 
         std::vector<PeakInfo> peaks;
         for (int i = 1; i < ns - 1; ++i) {
@@ -112,13 +98,10 @@ BladeSplitResult splitBladeFaceBySection(
                 peaks.push_back({cp[i].first, smoothed[i], vh});
             }
         }
-        std::sort(peaks.begin(), peaks.end(),
-            [](const PeakInfo& a, const PeakInfo& b) { return a.curv > b.curv; });
-        int take = std::min(3, (int)peaks.size());
-        for (int k = 0; k < take; ++k) allPeaks.push_back(peaks[k]);
+        for (auto& p : peaks) allPeaks.push_back(p);
     }
 
-    log << "\n  Found " << allPeaks.size() << " curvature peaks across "
+    log << "  Found " << allPeaks.size() << " curvature peaks across "
         << vHeights.size() << " sections";
 
     if (allPeaks.empty()) {
@@ -130,23 +113,22 @@ BladeSplitResult splitBladeFaceBySection(
     for (auto& pk : allPeaks) uVals.push_back(pk.u);
     std::sort(uVals.begin(), uVals.end());
 
-    double gapThreshold = uRange * 0.15;
+    double gapThreshold = uRange * clusterGapRatio;
     std::vector<std::vector<double>> clusters;
     std::vector<double> curCluster;
     curCluster.push_back(uVals[0]);
     for (size_t i = 1; i < uVals.size(); ++i) {
         if (uVals[i] - uVals[i - 1] < gapThreshold)
             curCluster.push_back(uVals[i]);
-        else { clusters.push_back(curCluster); curCluster.clear(); curCluster.push_back(uVals[i]); }
+        else {
+            clusters.push_back(curCluster);
+            curCluster.clear();
+            curCluster.push_back(uVals[i]);
+        }
     }
     clusters.push_back(curCluster);
 
     log << "\n  Clustered into " << clusters.size() << " groups";
-
-    if (clusters.size() < 2) {
-        result.message = log.str() + " -- need at least 2 curvature peak clusters";
-        return result;
-    }
 
     std::vector<double> clusterMeans, clusterCurvs;
     for (auto& cl : clusters) {
@@ -158,43 +140,37 @@ BladeSplitResult splitBladeFaceBySection(
         clusterCurvs.push_back(curvCnt > 0 ? curvSum / curvCnt : 0);
     }
 
-    if (clusters.size() > 2) {
-        std::vector<int> idx(clusters.size());
-        std::iota(idx.begin(), idx.end(), 0);
-        std::sort(idx.begin(), idx.end(),
-            [&](int a, int b) { return clusterCurvs[a] > clusterCurvs[b]; });
-        clusters = {clusters[idx[0]], clusters[idx[1]]};
-        clusterMeans = {clusterMeans[idx[0]], clusterMeans[idx[1]]};
-        clusterCurvs = {clusterCurvs[idx[0]], clusterCurvs[idx[1]]};
-        log << "\n  Keeping top 2 clusters by curvature";
-    }
+    double maxClusterCurv = *std::max_element(clusterCurvs.begin(), clusterCurvs.end());
+    double curvThreshold = maxClusterCurv * 0.25;
 
-    result.uPeak1 = clusterMeans[0];
-    result.uPeak2 = clusterMeans[1];
-    result.curvPeak1 = clusterCurvs[0];
-    result.curvPeak2 = clusterCurvs[1];
-    if (result.uPeak1 > result.uPeak2) {
-        std::swap(result.uPeak1, result.uPeak2);
-        std::swap(result.curvPeak1, result.curvPeak2);
-    }
+    std::vector<int> keptIdx;
+    for (int k = 0; k < (int)clusters.size(); ++k)
+        if (clusterCurvs[k] > curvThreshold) keptIdx.push_back(k);
 
-    double up1 = result.uPeak1, up2 = result.uPeak2;
-    double len1 = up1;
-    double len2 = up2 - up1;
-    double len3 = uMax - up2;
+    if (keptIdx.empty())
+        for (int k = 0; k < (int)clusters.size(); ++k) keptIdx.push_back(k);
 
-    log << "\n  Peak1 u=" << up1 << " curv=" << result.curvPeak1;
-    log << "\n  Peak2 u=" << up2 << " curv=" << result.curvPeak2;
+    std::sort(keptIdx.begin(), keptIdx.end(), [&](int a, int b) {
+        return clusterMeans[a] < clusterMeans[b];
+    });
 
-    auto computeRegionCurv = [&](double us, double ue, const std::vector<double>& vh) -> double {
+    log << "\n  Kept " << keptIdx.size() << "/" << clusters.size()
+        << " clusters above curv " << curvThreshold;
+
+    std::vector<double> boundaries = {uMin};
+    for (int k : keptIdx) boundaries.push_back(clusterMeans[k]);
+    boundaries.push_back(uMax);
+    std::sort(boundaries.begin(), boundaries.end());
+
+    auto computeCurv = [&](double us, double ue) -> double {
         double sum = 0; int cnt = 0;
-        for (double v : vh) {
+        for (double v : vHeights) {
             Handle(Geom_Curve) curve = surf->VIso(v);
             if (curve.IsNull()) continue;
             GeomAdaptor_Curve gac(curve);
-            int ns = std::max(10, (int)((ue - us) / uRange * 30));
-            for (int i = 0; i < ns; ++i) {
-                double u = us + (ue - us) * (i + 1) / (ns + 1.0);
+            int ns2 = std::max(8, (int)((ue - us) / uRange * 30));
+            for (int i = 0; i < ns2; ++i) {
+                double u = us + (ue - us) * (i + 1) / (ns2 + 1.0);
                 gp_Pnt p; gp_Vec d1, d2;
                 gac.D2(u, p, d1, d2);
                 double cv = 0, m = d1.Magnitude();
@@ -205,73 +181,49 @@ BladeSplitResult splitBladeFaceBySection(
         return cnt > 0 ? sum / cnt : 0;
     };
 
-    double curvReg1 = computeRegionCurv(0, up1, vHeights);
-    double curvReg2 = computeRegionCurv(up1, up2, vHeights);
-    double curvReg3 = computeRegionCurv(up2, uMax, vHeights);
-
-    log << "\n  Region [0," << up1 << "] len=" << len1 << " avgCurv=" << curvReg1;
-    log << "\n  Region [" << up1 << "," << up2 << "] len=" << len2 << " avgCurv=" << curvReg2;
-    log << "\n  Region [" << up2 << "," << uMax << "] len=" << len3 << " avgCurv=" << curvReg3;
-
-    int edgeIdx = 0;
-    if (curvReg1 >= curvReg2 && curvReg1 >= curvReg3) edgeIdx = 0;
-    else if (curvReg2 >= curvReg3) edgeIdx = 1;
-    else edgeIdx = 2;
-
-    int sideA = -1, sideB = -1;
-    for (int k = 0; k < 3; ++k) {
-        if (k == edgeIdx) continue;
-        if (sideA < 0) sideA = k; else sideB = k;
+    std::vector<SplitRegion> regions;
+    for (size_t i = 0; i + 1 < boundaries.size(); ++i) {
+        SplitRegion r;
+        r.uStart = boundaries[i];
+        r.uEnd = boundaries[i + 1];
+        r.avgCurv = computeCurv(r.uStart, r.uEnd);
+        r.label = "";
+        regions.push_back(r);
     }
 
-    double curvSegs[3] = {curvReg1, curvReg2, curvReg3};
-    double lens[3] = {len1, len2, len3};
+    std::vector<int> idx(regions.size());
+    std::iota(idx.begin(), idx.end(), 0);
+    std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+        return regions[a].avgCurv > regions[b].avgCurv;
+    });
 
-    if (curvSegs[sideA] < 0 && curvSegs[sideB] > 0) {}
-    else if (curvSegs[sideB] < 0 && curvSegs[sideA] > 0) { std::swap(sideA, sideB); }
+    double maxC = regions[idx[0]].avgCurv;
+    double minC = regions[idx.back()].avgCurv;
 
-    double pressU0, pressU1, suctU0, suctU1;
-    if (curvSegs[sideA] >= curvSegs[sideB]) {
-        suctU0 = (sideA == 0) ? 0.0 : (sideA == 1 ? up1 : up2);
-        suctU1 = (sideA == 0) ? up1 : (sideA == 1 ? up2 : uMax);
-        pressU0 = (sideB == 0) ? 0.0 : (sideB == 1 ? up1 : up2);
-        pressU1 = (sideB == 0) ? up1 : (sideB == 1 ? up2 : uMax);
-    } else {
-        pressU0 = (sideA == 0) ? 0.0 : (sideA == 1 ? up1 : up2);
-        pressU1 = (sideA == 0) ? up1 : (sideA == 1 ? up2 : uMax);
-        suctU0 = (sideB == 0) ? 0.0 : (sideB == 1 ? up1 : up2);
-        suctU1 = (sideB == 0) ? up1 : (sideB == 1 ? up2 : uMax);
-    }
-    std::string pressLabel = "pressure", suctLabel = "suction";
-
-    if (pressU0 > pressU1) {
-        std::swap(pressU0, pressU1);
-        if (pressU0 < up1 && pressU1 > up2) { pressLabel = "suction"; suctLabel = "pressure"; }
-    }
-    if (suctU0 > suctU1) {
-        std::swap(suctU0, suctU1);
-        if (suctU0 < up1 && suctU1 > up2) { suctLabel = "pressure"; pressLabel = "suction"; }
+    for (int i = 0; i < (int)idx.size(); ++i) {
+        int ri = idx[i];
+        double len = regions[ri].uEnd - regions[ri].uStart;
+        if (i == 0 && regions[ri].avgCurv > maxC * 0.5)
+            regions[ri].label = "edge";
+        else if (regions[ri].avgCurv >= (maxC + minC) * 0.5)
+            regions[ri].label = "suction";
+        else
+            regions[ri].label = "pressure";
     }
 
-    result.uPressStart = pressU0;
-    result.uPressEnd = pressU1;
-    result.uSuctStart = suctU0;
-    result.uSuctEnd = suctU1;
-    result.curvPress = curvSegs[sideA];
-    result.curvSuct = curvSegs[sideB];
+    for (auto& r : regions)
+        if (r.label.empty())
+            r.label = "pressure";
 
-    result.uEdgeStart = (edgeIdx == 0) ? 0.0 : (edgeIdx == 1 ? up1 : up2);
-    result.uEdgeEnd = (edgeIdx == 0) ? up1 : (edgeIdx == 1 ? up2 : uMax);
-
+    result.regions = regions;
     result.success = true;
-    log << "\n  Edge    U=[" << result.uEdgeStart << "," << result.uEdgeEnd << "]"
-        << " (" << lens[edgeIdx] << ")";
-    log << "\n  " << pressLabel << " U=[" << result.uPressStart
-        << "," << result.uPressEnd << "] curv=" << result.curvPress;
-    log << "\n  " << suctLabel << " U=[" << result.uSuctStart
-        << "," << result.uSuctEnd << "] curv=" << result.curvSuct;
-    result.message = log.str();
 
+    for (auto& r : regions) {
+        log << "\n  [" << r.uStart << "," << r.uEnd << "] len="
+            << (r.uEnd - r.uStart) << " curv=" << r.avgCurv
+            << " -> " << r.label;
+    }
+    result.message = log.str();
     return result;
 }
 

@@ -243,6 +243,21 @@ class MainWindow(QMainWindow):
 
         self._hide_single_controls()
 
+        split_label = QLabel("Split Results")
+        form.addRow(split_label)
+        self._split_list = QListWidget()
+        self._split_list.setMaximumHeight(120)
+        self._split_list.itemDoubleClicked.connect(self._on_split_item_double_clicked)
+        form.addRow(self._split_list)
+
+        id_bar = QHBoxLayout()
+        self._btn_identify = QPushButton("Identify Pressure/Suction")
+        self._btn_identify.clicked.connect(self._on_identify)
+        self._btn_identify.setEnabled(False)
+        id_bar.addWidget(self._btn_identify)
+        id_bar.addStretch()
+        form.addRow(id_bar)
+
         row3 = QHBoxLayout()
         self._txt_outdir = QLineEdit(self._out_dir)
         row3.addWidget(self._txt_outdir)
@@ -396,7 +411,9 @@ class MainWindow(QMainWindow):
         self._mode = "ruled" if idx == 0 else "planar"
 
     def _hide_single_controls(self):
-        for w in [self._btn_preview, self._btn_auto_id, self._btn_split, self._cmb_face1, self._cmb_face2]:
+        for w in [self._btn_preview, self._btn_auto_id, self._btn_split,
+                  self._cmb_face1, self._cmb_face2,
+                  self._split_list, self._btn_identify]:
             w.setVisible(False)
 
     def _lock_face_controls(self):
@@ -418,6 +435,8 @@ class MainWindow(QMainWindow):
             self._btn_split.setVisible(True)
             self._cmb_face1.setVisible(True)
             self._cmb_face2.setVisible(True)
+            self._split_list.setVisible(True)
+            self._btn_identify.setVisible(True)
             self._cmb_face1.clear(); self._cmb_face1.addItem("(click Load Preview first)")
             self._cmb_face2.clear(); self._cmb_face2.addItem("(click Load Preview first)")
         else:
@@ -454,8 +473,11 @@ class MainWindow(QMainWindow):
             if not HAS_PYVISTA:
                 return
 
-            self._preview_colors = {}
-            self._preview_face_ids = set()
+        self._preview_colors = {}
+        self._preview_face_ids = set()
+        self._last_picked_fid = None
+        self._split_items = []
+        self._split_face_idx = None
             labels_pts = []
             labels_text = []
 
@@ -579,6 +601,7 @@ class MainWindow(QMainWindow):
             "LeftButtonPressEvent", on_click)
 
     def _on_face_picked(self, fid):
+        self._last_picked_fid = fid
         slot = self._pick_slot
         self._pick_slot = 1 - self._pick_slot
         cmb = self._cmb_face1 if slot == 0 else self._cmb_face2
@@ -586,7 +609,6 @@ class MainWindow(QMainWindow):
             if cmb.itemData(i) == fid:
                 cmb.setCurrentIndex(i)
                 return
-        self._log(f"  Face {fid} not in dropdown")
 
     def _on_split_blade(self):
         exe = str(BUILD_EXE)
@@ -598,9 +620,9 @@ class MainWindow(QMainWindow):
             self._log(f"[Error] File not found: {filepath}")
             return
 
-        faceIdx = self._cmb_face1.currentData()
+        faceIdx = self._last_picked_fid
         if faceIdx is None:
-            self._log("Please Load Preview or Auto-Identify first")
+            self._log("Click a face in 3D view first, then Split Blade")
             return
 
         self._log(f"Splitting Face[{faceIdx}]...")
@@ -614,27 +636,135 @@ class MainWindow(QMainWindow):
             if s2 >= 0: sraw = sraw[s2:]
             sinfo = json.loads(sraw)
             if sinfo.get('success'):
-                self._uRange1 = (sinfo['pressStart'], sinfo['pressEnd'])
-                self._uRange2 = (sinfo['suctStart'], sinfo['suctEnd'])
-                self._cmb_face1.clear()
-                self._cmb_face2.clear()
-                self._cmb_face1.addItem(
-                    f"Face[{faceIdx}] Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]",
-                    faceIdx)
-                self._cmb_face2.addItem(
-                    f"Face[{faceIdx}] Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]",
-                    faceIdx)
-                self._cmb_face1.setCurrentIndex(0)
-                self._cmb_face2.setCurrentIndex(0)
-                self._log(f"  Edge   U=[{sinfo['edgeStart']:.3f},{sinfo['edgeEnd']:.3f}]")
-                self._log(f"  Peak 1 U={sinfo['uPeak1']:.3f}  Peak 2 U={sinfo['uPeak2']:.3f}")
-                self._log(f"  Pressure U=[{self._uRange1[0]:.3f},{self._uRange1[1]:.3f}]")
-                self._log(f"  Suction  U=[{self._uRange2[0]:.3f},{self._uRange2[1]:.3f}]")
-                self._log(f"  Ready - click Run to process")
+                regions = sinfo['regions']
+                self._log(f"  Got {len(regions)} regions from Face[{faceIdx}]")
+
+                self._hide_actor(f"preview_face_{faceIdx}")
+
+                self._split_list.clear()
+                self._split_items = []
+                self._split_face_idx = faceIdx
+
+                for k, reg in enumerate(regions):
+                    us = reg['uStart']
+                    ue = reg['uEnd']
+                    label = reg.get('label', '')
+                    name = f"split_{faceIdx}_{k}"
+                    sub_path = os.path.join(tempfile.gettempdir(), f"simple_split_{faceIdx}_{k}.obj")
+                    subprocess.run(
+                        [exe, filepath, '--mode', 'face-obj-range',
+                         '--face-idx', str(faceIdx),
+                         '--u-range1', f'{us},{ue}',
+                         '--face-out', sub_path],
+                        cwd=str(PROJECT_DIR), capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=15)
+                    if os.path.exists(sub_path) and os.path.getsize(sub_path) > 100:
+                        import pyvista as pv
+                        m = pv.read(sub_path)
+                        ci = k % len(PREVIEW_COLORS)
+                        color = PREVIEW_COLORS[ci]
+                        self._plotter.add_mesh(
+                            m, name=name, color=color, opacity=0.92,
+                            smooth_shading=True, show_edges=False,
+                            pbr=True, metallic=0.05, roughness=0.4)
+                        self._split_items.append({
+                            "face_idx": faceIdx, "sub_idx": k,
+                            "u_start": us, "u_end": ue,
+                            "label": label, "name": name
+                        })
+                        item_text = f"Face{faceIdx}-split-{k}  {label}"
+                        self._split_list.addItem(item_text)
+                        self._log(f"    [{k}] U=[{us:.3f},{ue:.3f}] {label}")
+
+                self._plotter.render()
+                self._btn_identify.setEnabled(len(self._split_items) >= 2)
+                self._log(f"  Split complete. {len(self._split_items)} regions in list.")
             else:
                 self._log(f"  Split failed: {sinfo.get('message','')}")
         except Exception as e:
             self._log(f"[Error] Split failed: {e}")
+
+    def _on_split_item_double_clicked(self, item):
+        idx = self._split_list.row(item)
+        if 0 <= idx < len(self._split_items):
+            name = self._split_items[idx].get('name', '')
+            try:
+                for fid in self._preview_face_ids:
+                    pname = f"preview_face_{fid}"
+                    try:
+                        a = self._plotter.actors.get(pname)
+                    except Exception:
+                        a = None
+                    if a:
+                        a.SetVisibility(False)
+                for a in self._plotter.renderer._actors:
+                    if hasattr(a, '_name') and a._name == name:
+                        a.GetProperty().SetColor(HIGHLIGHT_COLOR)
+                        a.GetProperty().SetOpacity(1.0)
+                    elif hasattr(a, '_name') and a._name.startswith('split_'):
+                        orig = self._preview_colors.get(fid, [0.7, 0.7, 0.7])
+                        a.GetProperty().SetColor(orig)
+                        a.GetProperty().SetOpacity(0.92)
+                self._plotter.render()
+            except Exception:
+                pass
+
+    def _on_identify(self):
+        if not self._split_items:
+            return
+        self._log("Identifying pressure/suction from split regions...")
+        curv_data = [(i, si['label'], si.get('u_start', 0), si.get('u_end', 1))
+                     for i, si in enumerate(self._split_items)]
+        max_c = float('-inf')
+        best_i = -1
+        for c in curv_data:
+            if c[2] + c[3] > max_c:
+                max_c = c[2] + c[3]
+        for i, label, us, ue in curv_data:
+            if label == 'edge':
+                self._hide_actor(self._split_items[i]['name'])
+            elif label == 'suction':
+                self._split_items[i]['label'] = 'suction'
+            elif label == 'pressure':
+                self._split_items[i]['label'] = 'pressure'
+        self._cmb_face1.clear()
+        self._cmb_face2.clear()
+        kept = []
+        for si in self._split_items:
+            if si['label'] in ('suction', 'pressure'):
+                kept.append(si)
+        if len(kept) >= 2:
+            self._cmb_face1.addItem(f"Face{kept[0]['face_idx']}-split-{kept[0]['sub_idx']} {kept[0]['label']}",
+                                    kept[0])
+            self._cmb_face2.addItem(f"Face{kept[1]['face_idx']}-split-{kept[1]['sub_idx']} {kept[1]['label']}",
+                                    kept[1])
+            self._log(f"  Surface 1: {self._cmb_face1.currentText()}")
+            self._log(f"  Surface 2: {self._cmb_face2.currentText()}")
+        elif len(kept) == 1:
+            self._cmb_face1.addItem(f"Face{kept[0]['face_idx']}-split-{kept[0]['sub_idx']} {kept[0]['label']}",
+                                    kept[0])
+            self._log(f"  Only one side found: {self._cmb_face1.currentText()}")
+        self._log(f"  Ready. Click Run to process.")
+
+    def _hide_actor(self, name):
+        try:
+            a = self._plotter.actors.get(name)
+        except Exception:
+            a = None
+        if a:
+            a.SetVisibility(False)
+            return
+        for a in self._plotter.renderer._actors:
+            if hasattr(a, '_name') and a._name == name:
+                a.SetVisibility(False)
+                return
+
+    def _clear_split_results(self):
+        for si in self._split_items:
+            self._hide_actor(si['name'])
+        self._split_items = []
+        self._split_list.clear()
+        self._btn_identify.setEnabled(False)
 
     def _on_auto_identify(self):
         exe = str(BUILD_EXE)
@@ -677,6 +807,13 @@ class MainWindow(QMainWindow):
                 self._log(f"  Pressure face[{pi}] diag={pd:.1f}mm")
                 self._log(f"  Suction  face[{si}] diag={sd:.1f}mm")
                 self._log(f"  Select faces above, optionally Split Blade, then Run.")
+
+                blade_set = {pi, si}
+                for fid in self._preview_face_ids:
+                    if fid not in blade_set:
+                        self._hide_actor(f"preview_face_{fid}")
+                self._last_picked_fid = pi if pd > sd else si
+                self._log(f"  Non-blade faces hidden. Click a blade face, then Split.")
             else:
                 self._log(f"  Identification failed: {info.get('message','')}")
                 QMessageBox.warning(self, "Auto-Identify", info.get('message', 'Failed'))
@@ -739,13 +876,21 @@ class MainWindow(QMainWindow):
             f1 = self._cmb_face1.currentData()
             f2 = self._cmb_face2.currentData()
             if f1 is not None:
-                cmd += f' --face-idx1 {f1}'
+                if isinstance(f1, dict):
+                    cmd += f' --face-idx1 {f1["face_idx"]}'
+                    cmd += f' --u-range1 {f1["u_start"]:.6f},{f1["u_end"]:.6f}'
+                else:
+                    cmd += f' --face-idx1 {f1}'
+                    if self._uRange1:
+                        cmd += f' --u-range1 {self._uRange1[0]:.6f},{self._uRange1[1]:.6f}'
             if f2 is not None:
-                cmd += f' --face-idx2 {f2}'
-            if self._uRange1:
-                cmd += f' --u-range1 {self._uRange1[0]:.6f},{self._uRange1[1]:.6f}'
-            if self._uRange2:
-                cmd += f' --u-range2 {self._uRange2[0]:.6f},{self._uRange2[1]:.6f}'
+                if isinstance(f2, dict):
+                    cmd += f' --face-idx2 {f2["face_idx"]}'
+                    cmd += f' --u-range2 {f2["u_start"]:.6f},{f2["u_end"]:.6f}'
+                else:
+                    cmd += f' --face-idx2 {f2}'
+                    if self._uRange2:
+                        cmd += f' --u-range2 {self._uRange2[0]:.6f},{self._uRange2[1]:.6f}'
         self._log(f"Running: {cmd}")
 
         self._btn_run.setEnabled(False)
@@ -958,6 +1103,10 @@ class MainWindow(QMainWindow):
     def _clear_3d(self):
         self._preview_colors = {}
         self._preview_face_ids = set()
+        self._last_picked_fid = None
+        self._split_items = []
+        self._split_list.clear()
+        self._btn_identify.setEnabled(False)
         if HAS_PYVISTA:
             self._plotter.clear()
             self._plotter.set_background('lightblue')

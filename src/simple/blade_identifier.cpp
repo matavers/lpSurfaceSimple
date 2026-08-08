@@ -139,6 +139,11 @@ BladeIdentifyResult identifyBladeSurfaces(
         }
         double curv = (curvDef > 0) ? curvSum / curvDef : 0.0;
 
+        if (std::abs(curv) < 1e-4) {
+            log << "\n  skip face[" << r.index << "] near-flat (curv=" << curv << ")";
+            continue;
+        }
+
         CandidateInfo ci;
         ci.originalIndex = r.index;
         ci.diag3D = r.diag;
@@ -152,7 +157,17 @@ BladeIdentifyResult identifyBladeSurfaces(
     }
 
     if (candidates.size() < 2) {
-        log << "\n  need at least 2 candidates after size filter";
+        if (candidates.size() == 1) {
+            log << "\n  (single blade candidate — needs splitting)";
+            result.pressureFaceIndex = candidates[0].originalIndex;
+            result.suctionFaceIndex = candidates[0].originalIndex;
+            result.success = true;
+            result.pressureLabel = "blade";
+            result.suctionLabel = "blade";
+            result.message = log.str();
+            return result;
+        }
+        log << "\n  need at least 1 candidate";
         result.message = log.str();
         return result;
     }
