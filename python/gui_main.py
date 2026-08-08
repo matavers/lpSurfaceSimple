@@ -243,20 +243,25 @@ class MainWindow(QMainWindow):
 
         self._hide_single_controls()
 
+        from PyQt5.QtWidgets import QListWidget, QWidget
+        self._split_panel = QWidget()
+        sp_layout = QVBoxLayout(self._split_panel)
+        sp_layout.setContentsMargins(0, 0, 0, 0)
         split_label = QLabel("Split Results")
-        form.addRow(split_label)
+        sp_layout.addWidget(split_label)
         self._split_list = QListWidget()
         self._split_list.setMaximumHeight(120)
         self._split_list.itemDoubleClicked.connect(self._on_split_item_double_clicked)
-        form.addRow(self._split_list)
-
+        sp_layout.addWidget(self._split_list)
         id_bar = QHBoxLayout()
         self._btn_identify = QPushButton("Identify Pressure/Suction")
         self._btn_identify.clicked.connect(self._on_identify)
         self._btn_identify.setEnabled(False)
         id_bar.addWidget(self._btn_identify)
         id_bar.addStretch()
-        form.addRow(id_bar)
+        sp_layout.addLayout(id_bar)
+        form.addRow(self._split_panel)
+        self._split_panel.setVisible(False)
 
         row3 = QHBoxLayout()
         self._txt_outdir = QLineEdit(self._out_dir)
@@ -412,9 +417,10 @@ class MainWindow(QMainWindow):
 
     def _hide_single_controls(self):
         for w in [self._btn_preview, self._btn_auto_id, self._btn_split,
-                  self._cmb_face1, self._cmb_face2,
-                  self._split_list, self._btn_identify]:
+                  self._cmb_face1, self._cmb_face2]:
             w.setVisible(False)
+        if hasattr(self, '_split_panel'):
+            self._split_panel.setVisible(False)
 
     def _lock_face_controls(self):
         self._cmb_face1.setEnabled(False)
@@ -435,8 +441,8 @@ class MainWindow(QMainWindow):
             self._btn_split.setVisible(True)
             self._cmb_face1.setVisible(True)
             self._cmb_face2.setVisible(True)
-            self._split_list.setVisible(True)
-            self._btn_identify.setVisible(True)
+            if hasattr(self, '_split_panel'):
+                self._split_panel.setVisible(True)
             self._cmb_face1.clear(); self._cmb_face1.addItem("(click Load Preview first)")
             self._cmb_face2.clear(); self._cmb_face2.addItem("(click Load Preview first)")
         else:
