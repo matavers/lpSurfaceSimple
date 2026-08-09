@@ -19,6 +19,7 @@ struct BladeSplitResult {
     std::vector<SplitRegion> regions;
     bool success = false;
     std::string message;
+    char splitDir = 'U';  // 'U' or 'V'
 };
 
 BladeSplitResult splitBladeFaceBySection(

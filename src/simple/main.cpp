@@ -111,6 +111,8 @@ int main(int argc, char* argv[]) {
     std::string faceOutPath;
     double uRange1Min = -1, uRange1Max = -1;
     double uRange2Min = -1, uRange2Max = -1;
+    double vRange1Min = -1, vRange1Max = -1;
+    double vRange2Min = -1, vRange2Max = -1;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg(argv[i]);
@@ -136,6 +138,22 @@ int main(int argc, char* argv[]) {
             if (comma != std::string::npos) {
                 uRange2Min = std::stod(s.substr(0, comma));
                 uRange2Max = std::stod(s.substr(comma + 1));
+            }
+        }
+        else if (arg == "--v-range1" && i + 1 < argc) {
+            std::string s(argv[++i]);
+            auto comma = s.find(',');
+            if (comma != std::string::npos) {
+                vRange1Min = std::stod(s.substr(0, comma));
+                vRange1Max = std::stod(s.substr(comma + 1));
+            }
+        }
+        else if (arg == "--v-range2" && i + 1 < argc) {
+            std::string s(argv[++i]);
+            auto comma = s.find(',');
+            if (comma != std::string::npos) {
+                vRange2Min = std::stod(s.substr(0, comma));
+                vRange2Max = std::stod(s.substr(comma + 1));
             }
         }
         else if (arg == "--nusamples" && i + 1 < argc) { nUSamples = std::stoi(argv[++i]); }
@@ -285,6 +303,7 @@ int main(int argc, char* argv[]) {
             }
             std::cout << "{\"faceIndex\":" << fi
                       << ",\"success\":" << (sp.success ? "true" : "false")
+                      << ",\"dir\":\"" << sp.splitDir << "\""
                       << ",\"regions\":[";
             for (size_t i = 0; i < sp.regions.size(); ++i) {
                 if (i > 0) std::cout << ",";
@@ -413,9 +432,13 @@ int main(int argc, char* argv[]) {
     double u1M = (uRange1Min >= 0) ? uRange1Max : u1Max;
     double u2m = (uRange2Min >= 0) ? uRange2Min : u2Min;
     double u2M = (uRange2Min >= 0) ? uRange2Max : u2Max;
+    double v1m = (vRange1Min >= 0) ? vRange1Min : v1Min;
+    double v1M = (vRange1Min >= 0) ? vRange1Max : v1Max;
+    double v2m = (vRange2Min >= 0) ? vRange2Min : v2Min;
+    double v2M = (vRange2Min >= 0) ? vRange2Max : v2Max;
 
-    simple::SurfaceWrapper sw1(surf1, u1m, u1M, v1Min, v1Max, wrap1);
-    simple::SurfaceWrapper sw2(surf2, u2m, u2M, v2Min, v2Max, wrap2);
+    simple::SurfaceWrapper sw1(surf1, u1m, u1M, v1m, v1M, wrap1);
+    simple::SurfaceWrapper sw2(surf2, u2m, u2M, v2m, v2M, wrap2);
 
     auto [u1min, u1max] = sw1.paramDomainU();
     auto [v1min, v1max] = sw1.paramDomainV();

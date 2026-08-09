@@ -639,9 +639,10 @@ class MainWindow(QMainWindow):
             s2 = sraw.find('{')
             if s2 >= 0: sraw = sraw[s2:]
             sinfo = json.loads(sraw)
-            if sinfo.get('success'):
+                    if sinfo.get('success'):
                 regions = sinfo['regions']
-                self._log(f"  Got {len(regions)} regions from Face[{faceIdx}]")
+                splitDir = sinfo.get('dir', 'U')
+                self._log(f"  Got {len(regions)} regions from Face[{faceIdx}] dir={splitDir}")
 
                 self._hide_actor(f"preview_face_{faceIdx}")
 
@@ -674,7 +675,8 @@ class MainWindow(QMainWindow):
                         self._split_items.append({
                             "face_idx": faceIdx, "sub_idx": k,
                             "u_start": us, "u_end": ue,
-                            "label": label, "name": name
+                            "label": label, "name": name,
+                            "dir": splitDir
                         })
                         item_text = f"Face{faceIdx}-split-{k}  {label}"
                         self._split_list.addItem(item_text)
@@ -940,7 +942,8 @@ class MainWindow(QMainWindow):
             if f1 is not None:
                 if isinstance(f1, dict):
                     cmd += f' --face-idx1 {f1["face_idx"]}'
-                    cmd += f' --u-range1 {f1["u_start"]:.6f},{f1["u_end"]:.6f}'
+                    rkey1 = '--v-range1' if f1.get('dir') == 'V' else '--u-range1'
+                    cmd += f' {rkey1} {f1["u_start"]:.6f},{f1["u_end"]:.6f}'
                 else:
                     cmd += f' --face-idx1 {f1}'
                     if self._uRange1:
@@ -948,7 +951,8 @@ class MainWindow(QMainWindow):
             if f2 is not None:
                 if isinstance(f2, dict):
                     cmd += f' --face-idx2 {f2["face_idx"]}'
-                    cmd += f' --u-range2 {f2["u_start"]:.6f},{f2["u_end"]:.6f}'
+                    rkey2 = '--v-range2' if f2.get('dir') == 'V' else '--u-range2'
+                    cmd += f' {rkey2} {f2["u_start"]:.6f},{f2["u_end"]:.6f}'
                 else:
                     cmd += f' --face-idx2 {f2}'
                     if self._uRange2:
