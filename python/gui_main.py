@@ -648,6 +648,12 @@ class MainWindow(QMainWindow):
                 self._split_list.clear()
                 self._split_items = []
                 self._split_face_idx = faceIdx
+                bp_set = set()
+                for reg in regions:
+                    us = reg['uStart']; ue = reg['uEnd']
+                    if us > 0.001: bp_set.add(us)
+                    if ue < 0.999: bp_set.add(ue)
+                bp_list = sorted(bp_set)
 
                 for k, reg in enumerate(regions):
                     us = reg['uStart']
@@ -670,8 +676,7 @@ class MainWindow(QMainWindow):
                         color = PREVIEW_COLORS[ci]
                         self._plotter.add_mesh(
                             m, name=name, color=color, opacity=0.92,
-                            smooth_shading=True,
-                            show_edges=True, edge_color='black', line_width=2.0,
+                            smooth_shading=True, show_edges=False,
                             pbr=True, metallic=0.05, roughness=0.4)
                         self._split_items.append({
                             "face_idx": faceIdx, "sub_idx": k,
@@ -687,6 +692,23 @@ class MainWindow(QMainWindow):
                 self._btn_identify.setEnabled(len(self._split_items) >= 2)
                 self._refocus_camera()
                 self._log(f"  Split complete. {len(self._split_items)} regions in list.")
+
+                for bnd in bp_list:
+                    bnd_path = os.path.join(tempfile.gettempdir(),
+                        f"simple_bnd_{faceIdx}_{bnd:.4f}.obj".replace('.','_'))
+                    subprocess.run(
+                        [exe, filepath, '--mode', 'iso-curve',
+                         '--face-idx', str(faceIdx),
+                         '--u-range1', f'{bnd},{bnd}',
+                         '--face-out', bnd_path],
+                        cwd=str(PROJECT_DIR), capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=10)
+                    if os.path.exists(bnd_path) and os.path.getsize(bnd_path) > 100:
+                        import pyvista as pv
+                        bl = pv.read(bnd_path)
+                        self._plotter.add_mesh(
+                            bl, name=f"bnd_{faceIdx}_{bnd:.4f}",
+                            color='red', line_width=3, render_lines_as_tubes=True)
             else:
                 self._log(f"  Split failed: {sinfo.get('message','')}")
         except Exception as e:

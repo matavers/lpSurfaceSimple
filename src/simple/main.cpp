@@ -18,6 +18,8 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Tool.hxx>
 #include <GeomConvert.hxx>
+#include <GeomAdaptor_Curve.hxx>
+#include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
 #include <TopExp_Explorer.hxx>
 #include <BRepBndLib.hxx>
@@ -352,6 +354,33 @@ int main(int argc, char* argv[]) {
                 }
             }
             exportOBJ(faceOutPath, verts, faces);
+            std::cout << "wrote " << faceOutPath << std::endl;
+            return 0;
+        }
+        // --mode iso-curve: extract iso-parametric curve as OBJ polyline
+        if (!stepFile1.empty() && modeStr == "iso-curve" && !faceOutPath.empty()) {
+            auto r = simple::loadStepFile(stepFile1);
+            if (!r.loaded) { std::cerr << "[Error] " << r.errorMsg << std::endl; return 1; }
+            int fi = (faceIdx1 >= 0 && faceIdx1 < (int)r.faces.size()) ? faceIdx1 : 0;
+            BRepAdaptor_Surface ad(r.faces[fi], true);
+            Handle(Geom_BSplineSurface) s = ad.BSpline();
+            if (s.IsNull()) s = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(r.faces[fi]));
+            if (s.IsNull()) { std::cerr << "[Error] No BSpline" << std::endl; return 1; }
+            double paramF = (uRange1Min >= 0) ? uRange1Min : 0.5;
+            Handle(Geom_Curve) curve = s->UIso(paramF);
+            if (curve.IsNull()) { std::cerr << "[Error] Null iso-curve" << std::endl; return 1; }
+            GeomAdaptor_Curve gac(curve);
+            double t0 = gac.FirstParameter(), t1 = gac.LastParameter();
+            int nP = 200;
+            std::ofstream out(faceOutPath);
+            out << std::fixed << std::setprecision(6);
+            for (int i = 0; i < nP; ++i) {
+                double t = t0 + (t1 - t0) * i / (nP - 1);
+                gp_Pnt p; gac.D0(t, p);
+                out << "v " << p.X() << " " << p.Y() << " " << p.Z() << "\n";
+            }
+            for (int i = 0; i < nP - 1; ++i)
+                out << "l " << (i+1) << " " << (i+2) << "\n";
             std::cout << "wrote " << faceOutPath << std::endl;
             return 0;
         }
