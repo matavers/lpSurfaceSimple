@@ -89,10 +89,11 @@ def build():
              "  [平面模式]     PCA最佳拟合平面  → 平面四边形     + 描述JSON导出\n"
              "→ 误差CSV报告 → 元数据JSON摘要")
 
-    heading(d, "1.3 两种模式", H2_SZ)
+    heading(d, "1.3 三种调用模式", H2_SZ)
     tbl(d, ["模式", "DLL 函数", "描述"],
-        [["直纹面逼近", "ruled_surface_fitting", "将曲面沿参数域分段，每段用双准线+rib优化的直纹面拟合"],
-         ["平面逼近",   "plane_surface_fitting", "将曲面沿参数域分段，每段用PCA最佳拟合平面逼近"]])
+        [["全自动（新增）", "pressure_ruled_fitting / pressure_plane_fitting / suction_ruled_fitting / suction_plane_fitting", "单文件输入 → 自动识别叶片面 → 弦向分割叶盆/叶背 → 拟合"],
+         ["直纹面逼近", "ruled_surface_fitting", "双文件输入，手动选面，分段直纹面拟合"],
+         ["平面逼近",   "plane_surface_fitting", "双文件输入，手动选面，分段 PCA 平面拟合"]])
 
     heading(d, "1.4 直纹面算法原理", H2_SZ)
     para(d, "对于每段子曲面，在参数域裁剪范围 [uSeg0, uSeg1] × [vSeg0, vSeg1] 内：")
@@ -120,19 +121,42 @@ def build():
     # ═══ §2 ═══
     heading(d, "2. 接口函数", H1_SZ)
 
-    heading(d, "2.1 ruled_surface_fitting — 直纹面逼近", H2_SZ)
+    heading(d, "2.1 pressure_ruled_fitting — 叶盆直纹面逼近（全自动）", H2_SZ)
+    code(d, "RULED_API RuledFittingResult* pressure_ruled_fitting(\n"
+             "    const RuledConfig* config);")
+    para(d, "全自动单文件处理：加载STEP/IGES → 自动识别叶片面 → 弦向截面法分割叶盆/叶背 → 叶盆V区直纹面拟合 → OBJ网格+NURBS参数TXT导出。调用方仅需提供stepFile1（模型文件路径）和outputDir，无需手动指定 faceIdx 或 V-range。")
+
+    heading(d, "2.2 pressure_plane_fitting — 叶盆平面逼近（全自动）", H2_SZ)
+    code(d, "RULED_API RuledFittingResult* pressure_plane_fitting(\n"
+             "    const PlanarConfig* config);")
+    para(d, "同 pressure_ruled_fitting，使用平面逼近模式。内部自动完成识别→分割→叶盆平面PCA拟合。")
+
+    heading(d, "2.3 suction_ruled_fitting — 叶背直纹面逼近（全自动）", H2_SZ)
+    code(d, "RULED_API RuledFittingResult* suction_ruled_fitting(\n"
+             "    const RuledConfig* config);")
+    para(d, "全自动叶背侧直纹面拟合。")
+
+    heading(d, "2.4 suction_plane_fitting — 叶背平面逼近（全自动）", H2_SZ)
+    code(d, "RULED_API RuledFittingResult* suction_plane_fitting(\n"
+             "    const PlanarConfig* config);")
+    para(d, "全自动叶背侧平面拟合。")
+
+    heading(d, "2.5 ruled_surface_fitting — 直纹面逼近（手动模式）", H2_SZ)
     code(d, "RULED_API RuledFittingResult* ruled_surface_fitting(\n"
              "    const RuledConfig* config);")
-    para(d, "执行完整直纹面拟合管线：加载STEP/IGES文件 → 面裁剪 → V/U方向等距分段 → 等参线准线提取 → rib最小二乘优化 → OBJ网格+NURBS参数TXT导出。")
+    para(d, "执行完整直纹面拟合管线：加载两个STEP/IGES文件 → 面裁剪 → V/U方向等距分段 → 等参线准线提取 → rib最小二乘优化 → OBJ网格+NURBS参数TXT导出。需要调用方指定stepFile1、stepFile2和可选的faceIdx。")
 
-    heading(d, "2.2 plane_surface_fitting — 平面逼近", H2_SZ)
+    heading(d, "2.6 plane_surface_fitting — 平面逼近（手动模式）", H2_SZ)
     code(d, "RULED_API RuledFittingResult* plane_surface_fitting(\n"
              "    const PlanarConfig* config);")
-    para(d, "执行完整平面拟合管线：加载STEP/IGES文件 → 面裁剪 → V/U方向等距分段 → PCA最佳拟合平面 → OBJ网格+平面描述JSON导出。每段的拟合平面由其质心 centroid 和单位法向量 normal 定义，平面方程为 normal·(x−centroid)=0。")
+    para(d, "执行完整平面拟合管线：加载两个STEP/IGES文件 → 面裁剪 → V/U方向等距分段 → PCA最佳拟合平面 → OBJ网格+平面描述JSON导出。")
 
-    heading(d, "2.3 free_result", H2_SZ)
+    heading(d, "2.7 free_result", H2_SZ)
     code(d, "RULED_API void free_result(RuledFittingResult* result);")
-    para(d, "释放上述两个函数分配的内存。")
+    para(d, "释放上述函数分配的内存。")
+
+    heading(d, "2B. 自动处理流水线（新增）", H2_SZ)
+    para(d, "4个新函数内部自动执行以下流水线：加载文件 → 法向聚类识别叶片面+曲率过滤平面端盖 → 弦向等参线(UIso)曲率峰检测+边界曲率阈值跨越 → V=[v1,v2]叶盆/叶背区间提取 → 直纹面/平面分段拟合 → 导出。输出以 pressure_* / suction_* 前缀命名。调用方仅需提供 stepFile1 + outputDir。无需指定 faceIdx 或 UV-range。")
 
     # ═══ §3 ═══
     heading(d, "3. 参数结构体", H1_SZ)
@@ -365,6 +389,12 @@ def build():
     code(d, '{\n  "mode": "ruled",\n  "files": ["Blade-raw1.STEP", "Blade-raw2.STEP"],\n'
              '  "surfaces": [{"name":"Blade-1","segments":[{"index":0,"maxErr":0.064,...}]}]\n}')
     para(d, "注意：可视化 UI 仅加载 .obj 文件用于 3D 渲染。.txt、.json 和 .csv 文件不会被 UI 读取，仅供外部数据分析使用。")
+
+    # ═══ §10 ═══
+    heading(d, "10. 变更记录", H1_SZ)
+    tbl(d, ["版本", "日期", "变更"],
+        [["v2.0", "2026-08-09", "新增4个全自动函数：pressure_ruled_fitting、pressure_plane_fitting、suction_ruled_fitting、suction_plane_fitting。单文件输入自动完成识别→分割→拟合。"],
+         ["v1.0", "2026-07", "初始版本：ruled_surface_fitting、plane_surface_fitting 双文件手动模式。"]])
 
     # ── Save ──
     d.save(OUT_PATH)
