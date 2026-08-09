@@ -693,23 +693,22 @@ class MainWindow(QMainWindow):
                 self._refocus_camera()
                 self._log(f"  Split complete. {len(self._split_items)} regions in list.")
 
-                for bnd in bp_list:
-                    bnd_str = f"{bnd:.4f}".replace('.','_')
-                    bnd_path = os.path.join(tempfile.gettempdir(),
-                        f"simple_bnd_{faceIdx}_{bnd_str}.obj")
-                    subprocess.run(
-                        [exe, filepath, '--mode', 'iso-curve',
-                         '--face-idx', str(faceIdx),
-                         '--u-range1', f'{bnd},{bnd}',
-                         '--face-out', bnd_path],
-                        cwd=str(PROJECT_DIR), capture_output=True, text=True,
-                        encoding='utf-8', errors='replace', timeout=10)
-                    if os.path.exists(bnd_path) and os.path.getsize(bnd_path) > 100:
-                        import pyvista as pv
-                        bl = pv.read(bnd_path)
-                        self._plotter.add_mesh(
-                            bl, name=f"bnd_{faceIdx}_{bnd_str}",
-                            color='red', line_width=3)
+                guide_path = os.path.join(tempfile.gettempdir(),
+                    f"simple_guide_{faceIdx}.obj")
+                subprocess.run(
+                    [exe, filepath, '--mode', 'iso-curve',
+                     '--face-idx', str(faceIdx),
+                     '--v-range1', '0.5,0.5',
+                     '--face-out', guide_path],
+                    cwd=str(PROJECT_DIR), capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=10)
+                if os.path.exists(guide_path) and os.path.getsize(guide_path) > 100:
+                    import pyvista as pv
+                    gl = pv.read(guide_path)
+                    self._plotter.add_mesh(
+                        gl, name=f"guide_{faceIdx}",
+                        color='blue', line_width=5, opacity=0.8)
+                    self._log("  Blue line = span direction (root-to-tip guide)")
                 self._plotter.render()
             else:
                 self._log(f"  Split failed: {sinfo.get('message','')}")

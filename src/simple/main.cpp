@@ -367,7 +367,9 @@ int main(int argc, char* argv[]) {
             if (s.IsNull()) s = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(r.faces[fi]));
             if (s.IsNull()) { std::cerr << "[Error] No BSpline" << std::endl; return 1; }
             double paramF = (uRange1Min >= 0) ? uRange1Min : 0.5;
-            Handle(Geom_Curve) curve = s->UIso(paramF);
+            bool useVIso = (vRange1Min >= 0);
+            double vParam = useVIso ? vRange1Min : 0.5;
+            Handle(Geom_Curve) curve = useVIso ? s->VIso(vParam) : s->UIso(paramF);
             if (curve.IsNull()) { std::cerr << "[Error] Null iso-curve" << std::endl; return 1; }
             GeomAdaptor_Curve gac(curve);
             double t0 = gac.FirstParameter(), t1 = gac.LastParameter();
