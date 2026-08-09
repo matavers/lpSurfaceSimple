@@ -22,12 +22,13 @@ CAD文件导入(STEP/IGES) → 面裁剪域提取 → 参数域等距分段 →
 → 误差CSV报告 → 元数据JSON摘要
 ```
 
-### 1.3 两种模式
+### 1.3 三种调用模式
 
 | 模式 | DLL 函数 | 描述 |
 |------|---------|------|
-| 直纹面逼近 | `ruled_surface_fitting` | 将曲面沿参数域分段，每段用双准线+rib优化的直纹面拟合 |
-| 平面逼近 | `plane_surface_fitting` | 将曲面沿参数域分段，每段用PCA最佳拟合平面逼近 |
+| **全自动（新增）** | `pressure_ruled_fitting` / `pressure_plane_fitting` / `suction_ruled_fitting` / `suction_plane_fitting` | 单文件输入 → 自动识别叶片面 → 弦向分割叶盆/叶背 → 拟合 |
+| 直纹面逼近 | `ruled_surface_fitting` | 双文件输入，手动选面，分段直纹面拟合 |
+| 平面逼近 | `plane_surface_fitting` | 双文件输入，手动选面，分段 PCA 平面拟合 |
 
 ### 1.4 直纹面算法原理
 
@@ -62,29 +63,82 @@ CAD文件导入(STEP/IGES) → 面裁剪域提取 → 参数域等距分段 →
 
 ## 2. 接口函数
 
-### 2.1 `ruled_surface_fitting` — 直纹面逼近
+### 2.1 `pressure_ruled_fitting` — 叶盆直纹面逼近
+
+```c
+RULED_API RuledFittingResult* pressure_ruled_fitting(const RuledConfig* config);
+```
+
+**全自动单文件处理**：加载 STEP/IGES → 自动识别叶片面 → 弦向截面法分割叶盆/叶背 → 叶盆 V 区直纹面拟合 → OBJ 网格 + NURBS 参数 TXT 导出。
+
+调用方仅需提供 `stepFile1`（模型文件路径）和 `outputDir`（输出目录），无需手动指定 faceIdx 或 V-range。
+
+### 2.2 `pressure_plane_fitting` — 叶盆平面逼近
+
+```c
+RULED_API RuledFittingResult* pressure_plane_fitting(const PlanarConfig* config);
+```
+
+同 `pressure_ruled_fitting`，但使用平面逼近模式。内部自动完成识别→分割→叶盆平面 PCA 拟合。
+
+### 2.3 `suction_ruled_fitting` — 叶背直纹面逼近
+
+```c
+RULED_API RuledFittingResult* suction_ruled_fitting(const RuledConfig* config);
+```
+
+全自动叶背侧直纹面拟合。内部自动完成识别→分割→叶背 V 区直纹面拟合。
+
+### 2.4 `suction_plane_fitting` — 叶背平面逼近
+
+```c
+RULED_API RuledFittingResult* suction_plane_fitting(const PlanarConfig* config);
+```
+
+全自动叶背侧平面拟合。内部自动完成识别→分割→叶背 V 区 PCA 平面拟合。
+
+### 2.5 `ruled_surface_fitting` — 直纹面逼近（手动模式）
 
 ```c
 RULED_API RuledFittingResult* ruled_surface_fitting(const RuledConfig* config);
 ```
 
-执行完整直纹面拟合管线：加载 STEP/IGES 文件 → 面裁剪 → V/U 方向等距分段 → 等参线准线提取 → rib 最小二乘优化 → OBJ 网格 + NURBS 参数 TXT 导出。
+执行完整直纹面拟合管线：加载两个 STEP/IGES 文件 → 面裁剪 → V/U 方向等距分段 → 等参线准线提取 → rib 最小二乘优化 → OBJ 网格 + NURBS 参数 TXT 导出。
 
-### 2.2 `plane_surface_fitting` — 平面逼近
+需要调用方指定 `stepFile1`、`stepFile2` 和可选的 `faceIdx`。
+
+### 2.6 `plane_surface_fitting` — 平面逼近（手动模式）
 
 ```c
 RULED_API RuledFittingResult* plane_surface_fitting(const PlanarConfig* config);
 ```
 
-执行完整平面拟合管线：加载 STEP/IGES 文件 → 面裁剪 → V/U 方向等距分段 → PCA 最佳拟合平面 → OBJ 网格 + 平面描述 JSON 导出。每段拟合平面由其质心 `centroid` 和单位法向量 `normal` 定义，平面方程 `normal · (x − centroid) = 0`。
+执行完整平面拟合管线：加载两个 STEP/IGES 文件 → 面裁剪 → V/U 方向等距分段 → PCA 最佳拟合平面 → OBJ 网格 + 平面描述 JSON 导出。
 
-### 2.3 `free_result`
+### 2.7 `free_result`
 
 ```c
 RULED_API void free_result(RuledFittingResult* result);
 ```
 
-释放上述两个函数分配的内存。
+释放上述函数分配的内存。
+
+---
+
+## 2B. 自动处理流水线（新增）
+
+4 个新函数内部自动执行以下流水线：
+
+```
+加载文件 → 法向聚类识别叶片面 + 曲率过滤平面端盖
+    → 弦向等参线(UIso)曲率峰检测 + 边界曲率阈值跨越
+    → V=[v1,v2] 叶盆/叶背区间提取
+    → 直纹面/平面分段拟合 → 导出
+```
+
+输出以 `pressure_*` / `suction_*` 前缀命名。调用方仅需提供 `stepFile1` + `outputDir`。无需指定 faceIdx 或 UV-range。
+
+---
 
 ---
 
@@ -417,3 +471,12 @@ Blade-1,0,0,ruled,0.06369,0.13380
 ```
 
 > **注意**：可视化 UI 仅加载 `.obj` 文件用于 3D 渲染。`.txt`、`.json` 和 `.csv` 文件不会被 UI 读取，仅供外部数据分析使用。
+
+---
+
+## 10. 变更记录
+
+| 版本 | 日期 | 变更 |
+|------|------|------|
+| v2.0 | 2026-08-09 | 新增 4 个全自动函数：`pressure_ruled_fitting`、`pressure_plane_fitting`、`suction_ruled_fitting`、`suction_plane_fitting`。单文件输入自动完成识别→分割→拟合。 |
+| v1.0 | 2026-07 | 初始版本：`ruled_surface_fitting`、`plane_surface_fitting` 双文件手动模式。 |

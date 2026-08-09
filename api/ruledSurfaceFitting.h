@@ -80,8 +80,16 @@ typedef struct {
 
 /* ─── API functions ────────────────────────────────────────── */
 
+/* Legacy: two-file input, manual face selection */
 RULED_API RuledFittingResult* ruled_surface_fitting(const RuledConfig* config);
 RULED_API RuledFittingResult* plane_surface_fitting(const PlanarConfig* config);
+
+/* New: single-file auto blade processing (auto-identify + split + fit) */
+RULED_API RuledFittingResult* pressure_ruled_fitting(const RuledConfig* config);
+RULED_API RuledFittingResult* pressure_plane_fitting(const PlanarConfig* config);
+RULED_API RuledFittingResult* suction_ruled_fitting(const RuledConfig* config);
+RULED_API RuledFittingResult* suction_plane_fitting(const PlanarConfig* config);
+
 RULED_API void free_result(RuledFittingResult* result);
 
 #ifdef __cplusplus
