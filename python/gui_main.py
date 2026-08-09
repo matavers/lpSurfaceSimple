@@ -553,9 +553,9 @@ class MainWindow(QMainWindow):
         d1 = self._cmb_face1.currentData()
         d2 = self._cmb_face2.currentData()
         if d1 is not None:
-            sel.add(d1)
+            sel.add(d1 if not isinstance(d1, dict) else d1.get('face_idx', -1))
         if d2 is not None:
-            sel.add(d2)
+            sel.add(d2 if not isinstance(d2, dict) else d2.get('face_idx', -1))
         try:
             for fid in self._preview_face_ids:
                 name = f"preview_face_{fid}"
