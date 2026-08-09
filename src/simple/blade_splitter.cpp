@@ -94,17 +94,14 @@ BladeSplitResult splitBladeFaceBySection(
         return c;
     };
 
-    int pU = countPeaks(cpU), pV = countPeaks(cpV);
-
     double rngU = *std::max_element(cpU.sm.begin(), cpU.sm.end())
                 - *std::min_element(cpU.sm.begin(), cpU.sm.end());
     double rngV = *std::max_element(cpV.sm.begin(), cpV.sm.end())
                 - *std::min_element(cpV.sm.begin(), cpV.sm.end());
+    int pU = countPeaks(cpU), pV = countPeaks(cpV);
 
-    bool alongU = rngU >= rngV && pU >= 2;
-    if (pV >= 2 && rngV * 2 > rngU) alongU = false;
-
-    auto& cp = alongU ? cpU : cpV;
+    bool alongU = false;
+    auto& cp = cpV;
 
     log << "  Direction:" << (alongU ? "U" : "V")
         << " rngU=" << rngU << " rngV=" << rngV

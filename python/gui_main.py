@@ -639,11 +639,10 @@ class MainWindow(QMainWindow):
             s2 = sraw.find('{')
             if s2 >= 0: sraw = sraw[s2:]
             sinfo = json.loads(sraw)
-                    if sinfo.get('success'):
+            if sinfo.get('success'):
                 regions = sinfo['regions']
                 splitDir = sinfo.get('dir', 'U')
                 self._log(f"  Got {len(regions)} regions from Face[{faceIdx}] dir={splitDir}")
-
                 self._hide_actor(f"preview_face_{faceIdx}")
 
                 self._split_list.clear()
