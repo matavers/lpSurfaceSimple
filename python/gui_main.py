@@ -694,8 +694,9 @@ class MainWindow(QMainWindow):
                 self._log(f"  Split complete. {len(self._split_items)} regions in list.")
 
                 for bnd in bp_list:
+                    bnd_str = f"{bnd:.4f}".replace('.','_')
                     bnd_path = os.path.join(tempfile.gettempdir(),
-                        f"simple_bnd_{faceIdx}_{bnd:.4f}.obj".replace('.','_'))
+                        f"simple_bnd_{faceIdx}_{bnd_str}.obj")
                     subprocess.run(
                         [exe, filepath, '--mode', 'iso-curve',
                          '--face-idx', str(faceIdx),
