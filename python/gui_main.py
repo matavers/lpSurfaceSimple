@@ -661,11 +661,14 @@ class MainWindow(QMainWindow):
                     label = reg.get('label', '')
                     name = f"split_{faceIdx}_{k}"
                     sub_path = os.path.join(tempfile.gettempdir(), f"simple_split_{faceIdx}_{k}.obj")
+                    if splitDir == 'V':
+                        args = ['--u-range1', '0.25,0.75', '--v-range1', f'{us},{ue}']
+                    else:
+                        args = ['--u-range1', f'{us},{ue}', '--v-range1', '0.25,0.75']
                     subprocess.run(
                         [exe, filepath, '--mode', 'face-obj-range',
                          '--face-idx', str(faceIdx),
-                         '--u-range1', f'{us},{ue}',
-                         '--v-range1', '0.25,0.75',
+                         *args,
                          '--face-out', sub_path],
                         cwd=str(PROJECT_DIR), capture_output=True, text=True,
                         encoding='utf-8', errors='replace', timeout=15)

@@ -25,18 +25,19 @@ BladeSplitResult splitBladeFaceBySection(
 
     double uMin = adapt.FirstUParameter(), uMax = adapt.LastUParameter();
     double vMin = adapt.FirstVParameter(), vMax = adapt.LastVParameter();
-    double vRng = vMax - vMin, uRng = uMax - uMin;
-    if (vRng < 1e-6) { result.message = "V too small"; return result; }
+    double uRng = uMax - uMin, vRng = vMax - vMin;
+    if (uRng < 1e-6) { result.message = "U too small"; return result; }
 
     nSec = std::max(3, nSec); nPts = std::max(50, nPts);
-    double vm = vRng * 0.08;
-    std::vector<double> vH;
-    for (int i = 0; i < nSec; ++i) vH.push_back(vMin + vm + (vRng - 2*vm) * i / (nSec-1));
+    double um = uRng * 0.08;
+    std::vector<double> uH;
+    for (int i = 0; i < nSec; ++i)
+        uH.push_back(uMin + um + (uRng - 2*um) * i / (nSec-1));
 
     std::vector<double> cv(nPts, 0.0);
     std::vector<int> ct(nPts, 0);
-    for (double vh : vH) {
-        Handle(Geom_Curve) c = surf->VIso(vh);
+    for (double uh : uH) {
+        Handle(Geom_Curve) c = surf->UIso(uh);
         if (c.IsNull()) continue;
         GeomAdaptor_Curve gac(c);
         double t0 = gac.FirstParameter(), t1 = gac.LastParameter();
@@ -52,7 +53,7 @@ BladeSplitResult splitBladeFaceBySection(
     for (int i = 0; i < nPts; ++i) if (ct[i] > 0) cv[i] /= ct[i];
 
     std::vector<double> sm(nPts);
-    int h = hw / 2;
+    int h = 1;
     for (int i = 0; i < nPts; ++i) {
         double s = 0; int c = 0;
         for (int j = std::max(0,i-h); j < std::min(nPts,i+h+1); ++j) { s += cv[j]; ++c; }
@@ -61,22 +62,36 @@ BladeSplitResult splitBladeFaceBySection(
 
     double mx = *std::max_element(sm.begin(), sm.end());
     double mn = *std::min_element(sm.begin(), sm.end());
+    log << " maxC=" << mx;
 
-    std::vector<double> bp = {uMin};
+    std::vector<double> bp = {vMin};
     for (int i = 2; i < nPts - 2; ++i) {
-        if (sm[i] > sm[i-1] && sm[i] > sm[i+1] && sm[i] > mn + (mx-mn)*0.08) {
-            double u = uMin + uRng * i / (nPts - 1);
-            if (bp.empty() || u - bp.back() > uRng * 0.015) bp.push_back(u);
+        if (sm[i] > sm[i-1] && sm[i] > sm[i+1] &&
+            sm[i] > sm[i-2] && sm[i] > sm[i+2] && sm[i] > mn + (mx-mn)*0.05) {
+            double v = vMin + vRng * i / (nPts - 1);
+            if (bp.empty() || v - bp.back() > vRng * 0.005) bp.push_back(v);
         }
     }
-    bp.push_back(uMax);
+    bp.push_back(vMax);
+
+    double edgeTh = mx * 0.15;
+    if (sm[0] > edgeTh && sm[0] > sm[1] && sm[0] > sm[2]) {
+        int cut = 0;
+        for (int i = 1; i < nPts; ++i) if (sm[i] < edgeTh) { cut = i; break; }
+        if (cut > 0) bp.insert(bp.begin() + 1, vMin + vRng * cut / (nPts - 1));
+    }
+    if (sm[nPts-1] > edgeTh && sm[nPts-1] > sm[nPts-2] && sm[nPts-1] > sm[nPts-3]) {
+        int cut = nPts - 1;
+        for (int i = nPts - 2; i >= 0; --i) if (sm[i] < edgeTh) { cut = i; break; }
+        if (cut < nPts - 1) bp.insert(bp.end() - 1, vMin + vRng * cut / (nPts - 1));
+    }
 
     auto rc = [&](double a, double b) {
-        int is = std::max(0, (int)((a-uMin)/uRng*(nPts-1)));
-        int ie = std::min(nPts-1, (int)((b-uMin)/uRng*(nPts-1)));
-        double s = 0; int c = 0;
+        int is = std::max(0, (int)((a-vMin)/vRng*(nPts-1)));
+        int ie = std::min(nPts-1, (int)((b-vMin)/vRng*(nPts-1)));
+        double s = 0;
         for (int i=is;i<=ie;++i) s+=sm[i];
-        return std::max(1,ie-is+1) > 0 ? s/std::max(1,ie-is+1) : 0.0;
+        return s / std::max(1, ie-is+1);
     };
 
     std::vector<SplitRegion> regs;
@@ -91,7 +106,7 @@ BladeSplitResult splitBladeFaceBySection(
 
     for (auto& r : regs) {
         double L = r.uEnd - r.uStart;
-        if (L < uRng * 0.10) r.label = "edge";
+        if (L < vRng * 0.08) r.label = "edge";
         else if (r.avgCurv >= rMed) r.label = "suction";
         else r.label = "pressure";
     }
@@ -104,11 +119,31 @@ BladeSplitResult splitBladeFaceBySection(
         } else mr.push_back(r);
     }
 
+    if (mr.size() == 3 && mr[1].label == "pressure" && mr[1].uEnd - mr[1].uStart > vRng * 0.6) {
+        SplitRegion side = mr[1];
+        mr.erase(mr.begin() + 1);
+        double mid = (side.uStart + side.uEnd) * 0.5;
+        SplitRegion r1, r2;
+        r1.uStart = side.uStart; r1.uEnd = mid;
+        r2.uStart = mid; r2.uEnd = side.uEnd;
+        int is = std::max(0, (int)((side.uStart-vMin)/vRng*(nPts-1)));
+        int im = std::max(0, (int)((mid-vMin)/vRng*(nPts-1)));
+        int ie = std::min(nPts-1, (int)((side.uEnd-vMin)/vRng*(nPts-1)));
+        double s1=0,s2=0;int c1=0,c2=0;
+        for(int i=is;i<im;i++){s1+=sm[i];c1++;}
+        for(int i=im;i<=ie;i++){s2+=sm[i];c2++;}
+        r1.avgCurv=c1>0?s1/c1:0; r2.avgCurv=c2>0?s2/c2:0;
+        r1.label=(r1.avgCurv>=r2.avgCurv)?"suction":"pressure";
+        r2.label=(r1.label=="suction")?"pressure":"suction";
+        mr.insert(mr.begin() + 1, r1);
+        mr.insert(mr.begin() + 2, r2);
+    }
+
     result.regions = mr;
     result.success = true;
-    result.splitDir = 'U';
+    result.splitDir = 'V';
     for (auto& r : mr)
-        log << "\n  U[" << r.uStart << "," << r.uEnd << "] L="
+        log << "\n  V[" << r.uStart << "," << r.uEnd << "] L="
             << (r.uEnd-r.uStart) << " C=" << r.avgCurv << " " << r.label;
     result.message = log.str();
     return result;
