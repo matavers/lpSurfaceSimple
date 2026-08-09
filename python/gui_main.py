@@ -708,8 +708,9 @@ class MainWindow(QMainWindow):
                         import pyvista as pv
                         bl = pv.read(bnd_path)
                         self._plotter.add_mesh(
-                            bl, name=f"bnd_{faceIdx}_{bnd:.4f}",
-                            color='red', line_width=3, render_lines_as_tubes=True)
+                            bl, name=f"bnd_{faceIdx}_{bnd_str}",
+                            color='red', line_width=3)
+                self._plotter.render()
             else:
                 self._log(f"  Split failed: {sinfo.get('message','')}")
         except Exception as e:
