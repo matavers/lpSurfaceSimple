@@ -655,10 +655,11 @@ class MainWindow(QMainWindow):
                     label = reg.get('label', '')
                     name = f"split_{faceIdx}_{k}"
                     sub_path = os.path.join(tempfile.gettempdir(), f"simple_split_{faceIdx}_{k}.obj")
+                    rkey = '--v-range1' if splitDir == 'V' else '--u-range1'
                     subprocess.run(
                         [exe, filepath, '--mode', 'face-obj-range',
                          '--face-idx', str(faceIdx),
-                         '--u-range1', f'{us},{ue}',
+                         rkey, f'{us},{ue}',
                          '--face-out', sub_path],
                         cwd=str(PROJECT_DIR), capture_output=True, text=True,
                         encoding='utf-8', errors='replace', timeout=15)
@@ -669,7 +670,8 @@ class MainWindow(QMainWindow):
                         color = PREVIEW_COLORS[ci]
                         self._plotter.add_mesh(
                             m, name=name, color=color, opacity=0.92,
-                            smooth_shading=True, show_edges=False,
+                            smooth_shading=True,
+                            show_edges=True, edge_color='black', line_width=2.0,
                             pbr=True, metallic=0.05, roughness=0.4)
                         self._split_items.append({
                             "face_idx": faceIdx, "sub_idx": k,

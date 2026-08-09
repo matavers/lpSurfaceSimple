@@ -315,7 +315,7 @@ int main(int argc, char* argv[]) {
             std::cout << "],\"message\":\"" << escapedMsg << "\"}" << std::endl;
             return sp.success ? 0 : 1;
         }
-        // --mode face-obj-range: export partial face mesh for a U sub-range
+        // --mode face-obj-range: export partial face mesh (U-range or V-range restriction)
         if (!stepFile1.empty() && modeStr == "face-obj-range" && !faceOutPath.empty()) {
             auto r = simple::loadStepFile(stepFile1);
             if (!r.loaded) { std::cerr << "[Error] " << r.errorMsg << std::endl; return 1; }
@@ -324,12 +324,17 @@ int main(int argc, char* argv[]) {
             if (ad.GetType() != GeomAbs_BSplineSurface) { std::cerr << "[Error] Face not BSpline" << std::endl; return 1; }
             Handle(Geom_BSplineSurface) s = ad.BSpline();
             if (s.IsNull()) s = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(r.faces[fi]));
-            double us = uRange1Min, ue = uRange1Max;
-            if (us < 0) { us = ad.FirstUParameter(); }
-            if (ue < 0) { ue = ad.LastUParameter(); }
-            if (us > ue) std::swap(us, ue);
+
+            double us = ad.FirstUParameter(), ue = ad.LastUParameter();
             double vs = ad.FirstVParameter(), ve = ad.LastVParameter();
-            int ru = 40, rv = 20;
+            bool restrictU = (uRange1Min >= 0);
+            bool restrictV = (vRange1Min >= 0);
+
+            if (restrictU) { us = uRange1Min; ue = uRange1Max; if (us > ue) std::swap(us, ue); }
+            if (restrictV) { vs = vRange1Min; ve = vRange1Max; if (vs > ve) std::swap(vs, ve); }
+
+            int ru = restrictU ? 30 : 60;
+            int rv = restrictV ? 30 : 15;
             Vec3Arr verts; FaceArr faces;
             for (int i = 0; i <= ru; ++i) {
                 double u = us + (ue - us) * i / ru;

@@ -74,8 +74,9 @@ BladeSplitResult splitBladeFaceBySection(
     auto rc = [&](double a, double b) {
         int is = std::max(0, (int)((a-uMin)/uRng*(nPts-1)));
         int ie = std::min(nPts-1, (int)((b-uMin)/uRng*(nPts-1)));
-        double s = 0; for (int i=is;i<=ie;++i)s+=sm[i];
-        return s/std::max(1,ie-is+1);
+        double s = 0; int c = 0;
+        for (int i=is;i<=ie;++i) s+=sm[i];
+        return std::max(1,ie-is+1) > 0 ? s/std::max(1,ie-is+1) : 0.0;
     };
 
     std::vector<SplitRegion> regs;
@@ -103,14 +104,11 @@ BladeSplitResult splitBladeFaceBySection(
         } else mr.push_back(r);
     }
 
-    for (auto& r : mr) if (r.label.empty()) r.label = "pressure";
-
     result.regions = mr;
     result.success = true;
     result.splitDir = 'U';
-    log << "  maxC=" << mx << "  rawReg=" << regs.size() << " merged=" << mr.size();
     for (auto& r : mr)
-        log << "\n  [" << r.uStart << "," << r.uEnd << "] L="
+        log << "\n  U[" << r.uStart << "," << r.uEnd << "] L="
             << (r.uEnd-r.uStart) << " C=" << r.avgCurv << " " << r.label;
     result.message = log.str();
     return result;
