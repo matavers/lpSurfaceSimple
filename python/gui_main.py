@@ -1017,8 +1017,8 @@ class MainWindow(QMainWindow):
             self._log(f"[GUI] Detected file: {fn}")
 
             if fn == 'meta.json':
-                self._build_tree()
                 self._load_meta(path)
+                self._build_tree()
         except Exception as e:
             self._log(f"[GUI Error] _on_file_written: {e}")
 
@@ -1066,7 +1066,10 @@ class MainWindow(QMainWindow):
                 self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
                 self._log(f"  Mode: {self._mode}")
             for s in meta.get("surfaces", []):
-                self._log(f"  {s['name']}: {len(s.get('segments',[]))} segments")
+                ns = len(s.get('segments', []))
+                if ns > self._numSegments:
+                    self._numSegments = ns
+                self._log(f"  {s['name']}: {ns} segments")
                 for seg in s.get('segments', []):
                     self._log(
                         f"    Seg {seg['index']}: maxErr={seg['maxError']:.4f}, "
