@@ -1019,6 +1019,7 @@ class MainWindow(QMainWindow):
             if fn == 'meta.json':
                 self._load_meta(path)
                 self._build_tree()
+                self._apply_visibility()
         except Exception as e:
             self._log(f"[GUI Error] _on_file_written: {e}")
 

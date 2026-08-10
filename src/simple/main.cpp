@@ -544,15 +544,10 @@ int main(int argc, char* argv[]) {
 
         // Mesh + export
         std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
-        Vec3Arr mv1, mv2;
-        std::vector<std::array<int,3>> mf1, mf2;
-        double defl1 = std::max(0.2, (adapt1.LastUParameter() - adapt1.FirstUParameter()
-                                    + adapt1.LastVParameter() - adapt1.FirstVParameter()) * 0.01);
-        generateFaceMesh(face1, defl1, mv1, mf1);
+        Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
+        sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
         if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
-            double defl2 = std::max(0.2, (adapt2.LastUParameter() - adapt2.FirstUParameter()
-                                        + adapt2.LastVParameter() - adapt2.FirstVParameter()) * 0.01);
-            generateFaceMesh(face2, defl2, mv2, mf2);
+            sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
             std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
         } else { mv2 = mv1; mf2 = mf1; }
         std::cout << "  Face 1 mesh: " << mv1.size() << " verts, " << mf1.size() << " tris" << std::endl;
@@ -634,15 +629,10 @@ int main(int argc, char* argv[]) {
         }
 
         std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
-        Vec3Arr mv1, mv2;
-        std::vector<std::array<int,3>> mf1, mf2;
-        double defl1 = std::max(0.2, (adapt1.LastUParameter() - adapt1.FirstUParameter()
-                                    + adapt1.LastVParameter() - adapt1.FirstVParameter()) * 0.01);
-        generateFaceMesh(face1, defl1, mv1, mf1);
+        Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
+        sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
         if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
-            double defl2 = std::max(0.2, (adapt2.LastUParameter() - adapt2.FirstUParameter()
-                                        + adapt2.LastVParameter() - adapt2.FirstVParameter()) * 0.01);
-            generateFaceMesh(face2, defl2, mv2, mf2);
+            sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
             std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
         } else {
             mv2 = mv1; mf2 = mf1;
@@ -721,14 +711,9 @@ int main(int argc, char* argv[]) {
         }
 
         std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
-        Vec3Arr mv1, mv2;
-        std::vector<std::array<int,3>> mf1, mf2;
-        double defl1 = std::max(0.2, (adapt1.LastUParameter() - adapt1.FirstUParameter()
-                                    + adapt1.LastVParameter() - adapt1.FirstVParameter()) * 0.01);
-        double defl2 = std::max(0.2, (adapt2.LastUParameter() - adapt2.FirstUParameter()
-                                    + adapt2.LastVParameter() - adapt2.FirstVParameter()) * 0.01);
-        generateFaceMesh(face1, defl1, mv1, mf1);
-        generateFaceMesh(face2, defl2, mv2, mf2);
+        Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
+        sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
+        sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
         std::cout << "  Face 1 mesh: " << mv1.size() << " verts, " << mf1.size() << " tris" << std::endl;
         std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
 
