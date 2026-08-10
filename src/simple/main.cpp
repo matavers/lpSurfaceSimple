@@ -77,7 +77,7 @@ void printUsage() {
     std::cout << "Usage: simple.exe <step_file1> <step_file2> [options]\n"
               << "  step_file1, step_file2 : Path to STEP blade model files\n"
               << "  Options:\n"
-              << "    --mode <ruled|planar|info|face-obj|extract-faces|auto-identify|split-blade>  Algorithm mode (default: ruled)\n"
+              << "    --mode <ruled|planar|planar-adaptive|info|face-obj|extract-faces|auto-identify|split-blade>  Algorithm mode (default: ruled)\n"
               << "    --outdir <DIR>          Output directory (default: ./output)\n"
               << "    --face-idx1 <N>         Face index for file 1 (default: auto-pick largest)\n"
               << "    --face-idx2 <N>         Face index for file 2 (default: auto-pick largest)\n"
@@ -170,6 +170,7 @@ int main(int argc, char* argv[]) {
     }
 
     bool isPlanar = (modeStr == "planar");
+    bool isAdaptivePlanar = (modeStr == "planar-adaptive");
 
     auto writePlaneTXT = [](const std::string& path, const Vec3& c, const Vec3& n,
                             const Vec3Arr& corners) {
@@ -504,6 +505,111 @@ int main(int argc, char* argv[]) {
         std::cout << "  Directrix dirs: ";
         for (auto d : dd1) std::cout << (int)d; std::cout << " / ";
         for (auto d : dd2) std::cout << (int)d; std::cout << std::endl;
+    }
+
+    if (isAdaptivePlanar) {
+        if (isPlanar) {} // suppress unused warning
+
+        auto rr1 = simple::fitRuledSegments(sw1, numSegments, sd1, dd1,
+                                             nUSamples, nVSamples, 0, "Blade-1");
+        auto rr2 = simple::fitRuledSegments(sw2, numSegments, sd2, dd2,
+                                             nUSamples, nVSamples, 0, "Blade-2");
+
+        std::vector<double> targets1(numSegments), targets2(numSegments);
+        for (int i = 0; i < numSegments && i < (int)rr1.segments.size(); ++i)
+            targets1[i] = rr1.segments[i].rmsError * 3.0;
+        for (int i = 0; i < numSegments && i < (int)rr2.segments.size(); ++i)
+            targets2[i] = rr2.segments[i].rmsError * 3.0;
+
+        std::cout << "[Step 3] Adaptive planar fitting (target = ruled error density)..." << std::endl;
+        std::cout << "  Target densities:";
+        for (auto t : targets1) std::cout << " " << t;
+        std::cout << " /";
+        for (auto t : targets2) std::cout << " " << t;
+        std::cout << std::endl;
+
+        auto pr1 = simple::fitPlanarSegmentsAdaptive(sw1, targets1, numSegments, sd1,
+                                                      nUSamples, nVSamples, 6, "Blade-1");
+        auto pr2 = simple::fitPlanarSegmentsAdaptive(sw2, targets2, numSegments, sd2,
+                                                      nUSamples, nVSamples, 6, "Blade-2");
+
+        for (const auto& res : {pr1, pr2}) {
+            std::cout << "  " << res.name << " " << res.segments.size() << " segments:" << std::endl;
+            for (const auto& seg : res.segments) {
+                std::cout << "    Segment " << seg.segmentIndex
+                          << "  maxError=" << std::fixed << std::setprecision(5) << seg.maxError
+                          << "  rmsError=" << seg.rmsError << std::endl;
+            }
+        }
+
+        // Mesh + export
+        std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
+        Vec3Arr mv1, mv2;
+        std::vector<std::array<int,3>> mf1, mf2;
+        double defl1 = std::max(0.2, (adapt1.LastUParameter() - adapt1.FirstUParameter()
+                                    + adapt1.LastVParameter() - adapt1.FirstVParameter()) * 0.01);
+        generateFaceMesh(face1, defl1, mv1, mf1);
+        if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
+            double defl2 = std::max(0.2, (adapt2.LastUParameter() - adapt2.FirstUParameter()
+                                        + adapt2.LastVParameter() - adapt2.FirstVParameter()) * 0.01);
+            generateFaceMesh(face2, defl2, mv2, mf2);
+            std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
+        } else { mv2 = mv1; mf2 = mf1; }
+        std::cout << "  Face 1 mesh: " << mv1.size() << " verts, " << mf1.size() << " tris" << std::endl;
+
+        std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
+        std::string m1Path = outDir + "/blade1_mesh.obj";
+        std::string m2Path = outDir + "/blade2_mesh.obj";
+        simple::exportOBJ(m1Path, mv1, mf1);
+        std::cout << "  wrote " << m1Path << std::endl;
+        simple::exportOBJ(m2Path, mv2, mf2);
+        std::cout << "  wrote " << m2Path << std::endl;
+
+        for (int bi = 0; bi < 2; ++bi) {
+            auto& pr = (bi==0)?pr1:pr2;
+            std::string pfx = (bi==0)?"blade1":"blade2";
+            for (auto& seg : pr.segments) {
+                std::string sp = outDir + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + ".obj";
+                simple::exportOBJ(sp, seg.meshVerts, seg.meshFaces);
+                std::string dp = outDir + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + "_desc.txt";
+                writePlaneTXT(dp, seg.centroid, seg.normal, seg.meshVerts);
+            }
+        }
+
+        // Error CSV + meta
+        std::ofstream errOut(outDir + "/errors.csv");
+        errOut << "surface,version,segment,mode,maxError,rmsError\n";
+        for (int bi = 0; bi < 2; ++bi) {
+            auto& pr = (bi==0)?pr1:pr2;
+            std::string name = (bi==0)?"Blade-1":"Blade-2";
+            for (auto& seg : pr.segments)
+                errOut << name << ",0," << seg.segmentIndex
+                       << ",planar-adaptive," << seg.maxError << "," << seg.rmsError << "\n";
+        }
+        errOut.close();
+        std::cout << "  wrote " << outDir << "/errors.csv" << std::endl;
+
+        std::ofstream metaOut(outDir + "/meta.json");
+        metaOut << "{\"mode\":\"planar-adaptive\",\"files\":[\"" << stepFile1 << "\",\"" << stepFile2 << "\"],"
+                << "\"surfaces\":[";
+        for (int bi = 0; bi < 2; ++bi) {
+            if (bi) metaOut << ",";
+            auto& pr = (bi==0)?pr1:pr2;
+            std::string name = (bi==0)?"Blade-1":"Blade-2";
+            metaOut << "{\"name\":\"" << name << "\",\"numSegments\":" << pr.segments.size()
+                    << ",\"segments\":[";
+            for (size_t j = 0; j < pr.segments.size(); ++j) {
+                if (j) metaOut << ",";
+                metaOut << "{\"index\":" << pr.segments[j].segmentIndex
+                        << ",\"maxErr\":" << pr.segments[j].maxError
+                        << ",\"rmsErr\":" << pr.segments[j].rmsError << "}";
+            }
+            metaOut << "]}";
+        }
+        metaOut << "]}";
+        std::cout << "  wrote " << outDir << "/meta.json" << std::endl;
+        std::cout << "[Done] All files exported to " << outDir << std::endl;
+        return 0;
     }
 
     if (isPlanar) {

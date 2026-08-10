@@ -29,6 +29,14 @@ PlanarResult fitPlanarSegments(const SurfaceWrapper& surf,
                                 int version,
                                 const std::string& name);
 
+PlanarResult fitPlanarSegmentsAdaptive(const SurfaceWrapper& surf,
+                                       const std::vector<double>& targetDensity,
+                                       int initSegments,
+                                       ParamDir splitDir,
+                                       int nSamplesU, int nSamplesV,
+                                       int maxDepth,
+                                       const std::string& name);
+
 bool exportPlanarOBJs(const std::string& outDir,
                        const std::vector<PlanarResult>& results);
 
