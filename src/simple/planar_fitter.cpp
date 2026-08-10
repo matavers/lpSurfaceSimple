@@ -75,16 +75,26 @@ PlanarResult fitPlanarSegments(const SurfaceWrapper& surf,
         }
         double rmsErr = std::sqrt(sumSq / pts.size());
 
-        Vec3 corners[4] = {
-            surf.evaluate(uSeg0, vSeg0),
-            surf.evaluate(uSeg1, vSeg0),
-            surf.evaluate(uSeg1, vSeg1),
-            surf.evaluate(uSeg0, vSeg1)
-        };
         Vec3Arr meshVerts;
-        for (int i = 0; i < 4; ++i) {
-            double d = normal.dot(corners[i] - c);
-            meshVerts.push_back(corners[i] - d * normal);
+        FaceArr meshFaces;
+        int gr = 8, gc = 8;
+        for (int i = 0; i <= gr; ++i) {
+            double t = (double)i / gr;
+            double u = uSeg0 + (uSeg1 - uSeg0) * t;
+            for (int j = 0; j <= gc; ++j) {
+                double s = (double)j / gc;
+                double v = vSeg0 + (vSeg1 - vSeg0) * s;
+                Vec3 pt = surf.evaluate(u, v);
+                double d = normal.dot(pt - c);
+                meshVerts.push_back(pt - d * normal);
+            }
+        }
+        for (int i = 0; i < gr; ++i) {
+            for (int j = 0; j < gc; ++j) {
+                int a = i * (gc + 1) + j;
+                meshFaces.push_back({a, a + 1, a + gc + 1});
+                meshFaces.push_back({a + 1, a + gc + 2, a + gc + 1});
+            }
         }
 
         PlanarSegment rseg;
@@ -92,7 +102,7 @@ PlanarResult fitPlanarSegments(const SurfaceWrapper& surf,
         rseg.centroid = c;
         rseg.normal = normal;
         rseg.meshVerts = meshVerts;
-        rseg.meshFaces = {{0, 1, 2}, {0, 2, 3}};
+        rseg.meshFaces = meshFaces;
         rseg.maxError = maxErr;
         rseg.rmsError = rmsErr;
 
@@ -139,20 +149,32 @@ static PlanarSegment fitSinglePlane(const SurfaceWrapper& surf,
     }
     double rmsErr = std::sqrt(sumSq / pts.size());
 
-    Vec3 corners[4] = {
-        surf.evaluate(u0, v0), surf.evaluate(u1, v0),
-        surf.evaluate(u1, v1), surf.evaluate(u0, v1)
-    };
     Vec3Arr mv;
-    for (int i = 0; i < 4; ++i) {
-        double d = n.dot(corners[i] - c);
-        mv.push_back(corners[i] - d * n);
+    FaceArr mf;
+    int gr = 8, gc = 8;
+    for (int i = 0; i <= gr; ++i) {
+        double t = (double)i / gr;
+        double u = u0 + (u1 - u0) * t;
+        for (int j = 0; j <= gc; ++j) {
+            double s = (double)j / gc;
+            double v = v0 + (v1 - v0) * s;
+            Vec3 pt = surf.evaluate(u, v);
+            double d = n.dot(pt - c);
+            mv.push_back(pt - d * n);
+        }
+    }
+    for (int i = 0; i < gr; ++i) {
+        for (int j = 0; j < gc; ++j) {
+            int a = i * (gc + 1) + j;
+            mf.push_back({a, a + 1, a + gc + 1});
+            mf.push_back({a + 1, a + gc + 2, a + gc + 1});
+        }
     }
 
     seg.centroid = c;
     seg.normal = n;
     seg.meshVerts = mv;
-    seg.meshFaces = {{0, 1, 2}, {0, 2, 3}};
+    seg.meshFaces = mf;
     seg.maxError = maxErr;
     seg.rmsError = rmsErr;
     return seg;
