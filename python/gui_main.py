@@ -1145,7 +1145,7 @@ class MainWindow(QMainWindow):
                 else:
                     sidx = int(re.search(r'(?:seg|plane)(\d+)', name).group(1))
                 color = SEG_COLORS[sidx % 3]
-                opacity = 0.55 if "plane" in name else 0.35
+                opacity = 0.80 if "plane" in name else 0.35
                 self._plotter.add_mesh(
                     m, name=name, color=color, opacity=opacity,
                     show_edges=True, edge_color='dimgray')
