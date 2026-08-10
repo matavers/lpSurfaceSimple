@@ -413,7 +413,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_mode_changed(self, idx):
-        self._mode = "ruled" if idx == 0 else "planar"
+        self._mode = "ruled" if idx == 0 else "planar-adaptive"
 
     def _hide_single_controls(self):
         for w in [self._btn_preview, self._btn_auto_id, self._btn_split,
@@ -1025,8 +1025,8 @@ class MainWindow(QMainWindow):
     def _build_tree(self):
         self._tree.clear()
 
-        seg_label = "Plane Seg" if self._mode == "planar" else "Ruled Seg"
-        seg_prefix = "plane" if self._mode == "planar" else "seg"
+        seg_label = "Plane Seg" if self._mode.startswith("planar") else "Ruled Seg"
+        seg_prefix = "plane" if self._mode.startswith("planar") else "seg"
 
         for bi in range(2):
             blade_name = f"Surface {bi + 1}"
@@ -1063,7 +1063,7 @@ class MainWindow(QMainWindow):
                 meta = json.load(f)
             if "mode" in meta:
                 self._mode = meta["mode"]
-                self._cmb_mode.setCurrentIndex(0 if self._mode == "ruled" else 1)
+                self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
                 self._log(f"  Mode: {self._mode}")
             for s in meta.get("surfaces", []):
                 self._log(f"  {s['name']}: {len(s.get('segments',[]))} segments")
