@@ -510,28 +510,31 @@ int main(int argc, char* argv[]) {
     if (isAdaptivePlanar) {
         if (isPlanar) {} // suppress unused warning
 
-        auto rr1 = simple::fitRuledSegments(sw1, numSegments, sd1, dd1,
+        int refSegs = std::max(3, numSegments);
+        auto rr1 = simple::fitRuledSegments(sw1, refSegs, sd1, dd1,
                                              nUSamples, nVSamples, 0, "Blade-1");
-        auto rr2 = simple::fitRuledSegments(sw2, numSegments, sd2, dd2,
+        auto rr2 = simple::fitRuledSegments(sw2, refSegs, sd2, dd2,
                                              nUSamples, nVSamples, 0, "Blade-2");
 
-        std::vector<double> targets1(numSegments), targets2(numSegments);
-        for (int i = 0; i < numSegments && i < (int)rr1.segments.size(); ++i)
-            targets1[i] = rr1.segments[i].rmsError * 3.0;
-        for (int i = 0; i < numSegments && i < (int)rr2.segments.size(); ++i)
-            targets2[i] = rr2.segments[i].rmsError * 3.0;
+        std::vector<double> targets1(refSegs), targets2(refSegs);
+        for (int i = 0; i < refSegs && i < (int)rr1.segments.size(); ++i)
+            targets1[i] = rr1.segments[i].rmsError * 1.5;
+        for (int i = 0; i < refSegs && i < (int)rr2.segments.size(); ++i)
+            targets2[i] = rr2.segments[i].rmsError * 1.5;
 
-        std::cout << "[Step 3] Adaptive planar fitting (target = ruled error density)..." << std::endl;
-        std::cout << "  Target densities:";
+        int initSegs = 10;
+        std::cout << "[Step 3] Adaptive planar fitting init=" << initSegs
+                  << " (ref=" << refSegs << " ruled segments)" << std::endl;
+        std::cout << "  Target (rms*1.5):";
         for (auto t : targets1) std::cout << " " << t;
         std::cout << " /";
         for (auto t : targets2) std::cout << " " << t;
         std::cout << std::endl;
 
-        auto pr1 = simple::fitPlanarSegmentsAdaptive(sw1, targets1, numSegments, sd1,
-                                                      nUSamples, nVSamples, 6, "Blade-1");
-        auto pr2 = simple::fitPlanarSegmentsAdaptive(sw2, targets2, numSegments, sd2,
-                                                      nUSamples, nVSamples, 6, "Blade-2");
+        auto pr1 = simple::fitPlanarSegmentsAdaptive(sw1, targets1, initSegs, sd1,
+                                                       nUSamples, nVSamples, 6, "Blade-1");
+        auto pr2 = simple::fitPlanarSegmentsAdaptive(sw2, targets2, initSegs, sd2,
+                                                       nUSamples, nVSamples, 6, "Blade-2");
 
         for (const auto& res : {pr1, pr2}) {
             std::cout << "  " << res.name << " " << res.segments.size() << " segments:" << std::endl;
