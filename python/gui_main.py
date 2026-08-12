@@ -109,6 +109,7 @@ class MainWindow(QMainWindow):
         self._nSamplesU = 50
         self._nSamplesV = 10
         self._numSegments = 3
+        self._surfaceSegCounts = [3, 3]
         self._currentVersion = 0
         self._mode = "ruled"
         self._single_file_mode = False
@@ -1050,7 +1051,7 @@ class MainWindow(QMainWindow):
             ver_node.setExpanded(True)
             bnode.addChild(ver_node)
 
-            for seg in range(self._numSegments):
+            for seg in range(self._surfaceSegCounts[bi]):
                 seg_item = QTreeWidgetItem([f"{seg_label} {seg + 1}"])
                 seg_item.setFlags(seg_item.flags() | Qt.ItemIsUserCheckable)
                 seg_item.setCheckState(0, Qt.Checked)
@@ -1066,8 +1067,10 @@ class MainWindow(QMainWindow):
                 self._mode = meta["mode"]
                 self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
                 self._log(f"  Mode: {self._mode}")
-            for s in meta.get("surfaces", []):
+            for i, s in enumerate(meta.get("surfaces", [])):
                 ns = len(s.get('segments', []))
+                if i < 2:
+                    self._surfaceSegCounts[i] = max(ns, self._surfaceSegCounts[i])
                 if ns > self._numSegments:
                     self._numSegments = ns
                 self._log(f"  {s['name']}: {ns} segments")
