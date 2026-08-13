@@ -33,62 +33,6 @@ bool exportOBJ(const std::string& path,
     return true;
 }
 
-bool exportErrorsCSV(const std::string& path,
-                     const std::vector<RuledResult>& results)
-{
-    std::ofstream out(path);
-    if (!out) return false;
-    out << "surface,version,segment,splitDir,directrixDir,maxError,rmsError\n";
-    out << std::fixed << std::setprecision(6);
-    for (const auto& res : results) {
-        for (const auto& seg : res.segments) {
-            out << res.name << "," << res.version << ","
-                << seg.segmentIndex << ","
-                << (int)res.splitDir << ","
-                << (int)seg.directrixDir << ","
-                << seg.maxError << "," << seg.rmsError << "\n";
-        }
-    }
-    return true;
-}
-
-bool exportMetaJSON(const std::string& path,
-                    const std::string& file1, const std::string& file2,
-                    const std::vector<RuledResult>& results)
-{
-    auto jsonSafe = [](std::string s) {
-        for (char& c : s) { if (c == '\\') c = '/'; if (c == '"') c = '\''; }
-        return s;
-    };
-    std::ofstream out(path);
-    if (!out) return false;
-    out << "{\n";
-    out << "  \"files\": [\"" << jsonSafe(file1) << "\", \"" << jsonSafe(file2) << "\"],\n";
-    out << "  \"surfaces\": [\n";
-    for (size_t i = 0; i < results.size(); ++i) {
-        out << "    {\n";
-        out << "      \"name\": \"" << results[i].name << "\",\n";
-        out << "      \"version\": " << results[i].version << ",\n";
-        out << "      \"splitDir\": " << (int)results[i].splitDir << ",\n";
-        out << "      \"numSegments\": " << results[i].segments.size() << ",\n";
-        out << "      \"segments\": [\n";
-        for (size_t j = 0; j < results[i].segments.size(); ++j) {
-            out << "        { \"index\": " << results[i].segments[j].segmentIndex
-                << ", \"directrixDir\": " << (int)results[i].segments[j].directrixDir
-                << ", \"maxError\": " << results[i].segments[j].maxError
-                << ", \"rmsError\": " << results[i].segments[j].rmsError << " }";
-            if (j + 1 < results[i].segments.size()) out << ",";
-            out << "\n";
-        }
-        out << "      ]\n";
-        out << "    }";
-        if (i + 1 < results.size()) out << ",";
-        out << "\n";
-    }
-    out << "  ]\n}\n";
-    return true;
-}
-
 bool exportCurveParamsTXT(const std::string& path,
                           const Handle(Geom_BSplineCurve)& curveC0,
                           const Handle(Geom_BSplineCurve)& curveC1,
@@ -123,7 +67,7 @@ bool exportCurveParamsTXT(const std::string& path,
     out << "\n";
     writeCurve("C1", curveC1);
     out << "\n[mapping]\n";
-    out << "description = identity, C0(u) and C1(u) share same U-parameterization from surface iso-curves\n";
+    out << "description = identity, C0(u) and C1(u) share same parameterization from surface iso-curves\n";
     return true;
 }
 
@@ -155,60 +99,42 @@ Vec3Arr generateRuledMesh(const Vec3Arr& c0Samples,
     return verts;
 }
 
-std::pair<double, double> computeError(const SurfaceWrapper& surf,
-                                        const RuledSegment& seg,
-                                        double uSeg0, double uSeg1,
-                                        double vSeg0, double vSeg1,
-                                        int nAlong, int nAcross)
+static std::pair<double, double> computeError(const SurfaceWrapper& surf,
+                                               const RuledCellFit& seg,
+                                               double uSeg0, double uSeg1,
+                                               double vSeg0, double vSeg1,
+                                               int nAlong, int nAcross)
 {
     double totalDist = 0.0;
     double maxDist = 0.0;
     int count = 0;
 
     bool wrap = surf.isWrapU();
-    if (seg.directrixDir == ParamDir::V) {
-        for (int i = 0; i < nAlong; ++i) {
-            for (int j = 0; j < nAcross; ++j) {
-                double u = evalU(uSeg0, uSeg1, i / (nAlong - 1.0), wrap);
-                double v = vSeg0 + (vSeg1 - vSeg0) * j / (nAcross - 1.0);
-                Vec3 surfPt = surf.evaluate(u, v);
-                double bestDist = std::numeric_limits<double>::max();
-                int nR = static_cast<int>(seg.curveC0Samples.size());
-                for (int ri = 0; ri < nR; ++ri) {
-                    for (int rj = 0; rj < 10; ++rj) {
-                        double t = rj / 9.0;
-                        Vec3 ruledPt = seg.curveC0Samples[ri] * (1.0 - t) +
-                                       seg.curveC1Samples[ri] * t;
-                        double d = (surfPt - ruledPt).norm();
-                        if (d < bestDist) bestDist = d;
-                    }
-                }
-                totalDist += bestDist;
-                if (bestDist > maxDist) maxDist = bestDist;
-                ++count;
+    for (int i = 0; i < nAlong; ++i) {
+        for (int j = 0; j < nAcross; ++j) {
+            double u, v;
+            if (seg.fitDir == ParamDir::V) {
+                u = evalU(uSeg0, uSeg1, i / (nAlong - 1.0), wrap);
+                v = vSeg0 + (vSeg1 - vSeg0) * j / (nAcross - 1.0);
+            } else {
+                v = vSeg0 + (vSeg1 - vSeg0) * i / (nAlong - 1.0);
+                u = evalU(uSeg0, uSeg1, j / (nAcross - 1.0), wrap);
             }
-        }
-    } else {
-        for (int i = 0; i < nAlong; ++i) {
-            for (int j = 0; j < nAcross; ++j) {
-                double v = vSeg0 + (vSeg1 - vSeg0) * i / (nAlong - 1.0);
-                double u = evalU(uSeg0, uSeg1, j / (nAcross - 1.0), wrap);
-                Vec3 surfPt = surf.evaluate(u, v);
-                double bestDist = std::numeric_limits<double>::max();
-                int nR = static_cast<int>(seg.curveC0Samples.size());
-                for (int ri = 0; ri < nR; ++ri) {
-                    for (int rj = 0; rj < 10; ++rj) {
-                        double t = rj / 9.0;
-                        Vec3 ruledPt = seg.curveC0Samples[ri] * (1.0 - t) +
-                                       seg.curveC1Samples[ri] * t;
-                        double d = (surfPt - ruledPt).norm();
-                        if (d < bestDist) bestDist = d;
-                    }
+            Vec3 surfPt = surf.evaluate(u, v);
+            double bestDist = std::numeric_limits<double>::max();
+            int nR = static_cast<int>(seg.curveC0Samples.size());
+            for (int ri = 0; ri < nR; ++ri) {
+                for (int rj = 0; rj < 10; ++rj) {
+                    double t = rj / 9.0;
+                    Vec3 ruledPt = seg.curveC0Samples[ri] * (1.0 - t) +
+                                   seg.curveC1Samples[ri] * t;
+                    double d = (surfPt - ruledPt).norm();
+                    if (d < bestDist) bestDist = d;
                 }
-                totalDist += bestDist;
-                if (bestDist > maxDist) maxDist = bestDist;
-                ++count;
             }
+            totalDist += bestDist;
+            if (bestDist > maxDist) maxDist = bestDist;
+            ++count;
         }
     }
 
@@ -282,78 +208,64 @@ void optimizeDirectrices(
     }
 }
 
-RuledResult fitRuledSegments(const SurfaceWrapper& surf,
-                              int numSegments,
-                              ParamDir splitDir,
-                              const std::vector<ParamDir>& directrixDirs,
-                              int nUSamples,
-                              int nVSamples,
-                              int version,
-                              const std::string& name)
+RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
+                          double u0, double u1, double v0, double v1,
+                          ParamDir dir,
+                          int nUSamples, int nVSamples,
+                          int nRibs, double lambda)
 {
-    RuledResult result;
-    result.name = name;
-    result.version = version;
-    result.splitDir = splitDir;
+    RuledCellFit r;
+    r.fitDir = dir;
+    r.maxError = 0.0;
+    r.rmsError = 0.0;
 
-    auto [uFull0, uFull1] = surf.paramDomainU();
-    auto [vFull0, vFull1] = surf.paramDomainV();
     bool wrap = surf.isWrapU();
 
-    for (int seg = 0; seg < numSegments; ++seg) {
-        RuledSegment rseg;
-        rseg.segmentIndex = seg;
-        ParamDir ddir = (seg < (int)directrixDirs.size()) ? directrixDirs[seg] : ParamDir::V;
-        rseg.directrixDir = ddir;
+    int nCurveSamples = (dir == ParamDir::V) ? nUSamples : std::max(nUSamples, nVSamples);
+    int nAcrossSamples = (dir == ParamDir::V) ? nVSamples : std::min(nUSamples, nVSamples);
 
-        double uSeg0, uSeg1, vSeg0, vSeg1;
-
-        if (splitDir == ParamDir::V) {
-            uSeg0 = uFull0; uSeg1 = uFull1;
-            vSeg0 = vFull0 + (vFull1 - vFull0) * seg / numSegments;
-            vSeg1 = vFull0 + (vFull1 - vFull0) * (seg + 1) / numSegments;
+    if (dir == ParamDir::V) {
+        r.curveC0 = surf.extractIsoCurveV(v0);
+        r.curveC1 = surf.extractIsoCurveV(v1);
+        if (wrap && u0 > u1) {
+            r.curveC0Samples = sampleCurveRangeWrap(r.curveC0, u0, u1, nCurveSamples);
+            r.curveC1Samples = sampleCurveRangeWrap(r.curveC1, u0, u1, nCurveSamples);
         } else {
-            uSeg0 = uFull0 + (uFull1 - uFull0) * seg / numSegments;
-            uSeg1 = uFull0 + (uFull1 - uFull0) * (seg + 1) / numSegments;
-            vSeg0 = vFull0; vSeg1 = vFull1;
+            r.curveC0Samples = sampleCurveRange(r.curveC0, u0, u1, nCurveSamples);
+            r.curveC1Samples = sampleCurveRange(r.curveC1, u0, u1, nCurveSamples);
         }
-
-        int nCurveSamples = (ddir == ParamDir::V) ? nUSamples : std::max(nUSamples, nVSamples);
-        int nAcrossSamples = (ddir == ParamDir::V) ? nVSamples : std::min(nUSamples, nVSamples);
-        int nRibs = 20;
-
-        if (ddir == ParamDir::V) {
-            rseg.curveC0 = surf.extractIsoCurveV(vSeg0);
-            rseg.curveC1 = surf.extractIsoCurveV(vSeg1);
-            if (wrap && uSeg0 > uSeg1) {
-                rseg.curveC0Samples = sampleCurveRangeWrap(rseg.curveC0, uSeg0, uSeg1, nCurveSamples);
-                rseg.curveC1Samples = sampleCurveRangeWrap(rseg.curveC1, uSeg0, uSeg1, nCurveSamples);
-            } else {
-                rseg.curveC0Samples = sampleCurveRange(rseg.curveC0, uSeg0, uSeg1, nCurveSamples);
-                rseg.curveC1Samples = sampleCurveRange(rseg.curveC1, uSeg0, uSeg1, nCurveSamples);
-            }
-        } else {
-            rseg.curveC0 = surf.extractIsoCurveU(uSeg0);
-            rseg.curveC1 = surf.extractIsoCurveU(uSeg1);
-            rseg.curveC0Samples = sampleCurveRange(rseg.curveC0, vSeg0, vSeg1, nCurveSamples);
-            rseg.curveC1Samples = sampleCurveRange(rseg.curveC1, vSeg0, vSeg1, nCurveSamples);
-        }
-
-        optimizeDirectrices(surf, uSeg0, uSeg1, vSeg0, vSeg1, ddir,
-            rseg.curveC0Samples, rseg.curveC1Samples, nRibs, 1.0);
-
-        rseg.ruledMeshVerts = generateRuledMesh(
-            rseg.curveC0Samples, rseg.curveC1Samples,
-            nCurveSamples, nAcrossSamples, rseg.ruledMeshFaces);
-
-        auto [mx, rms] = computeError(surf, rseg,
-            uSeg0, uSeg1, vSeg0, vSeg1, nCurveSamples, nAcrossSamples);
-        rseg.maxError = mx; rseg.rmsError = rms;
-
-        result.segments.push_back(rseg);
+    } else {
+        r.curveC0 = surf.extractIsoCurveU(u0);
+        r.curveC1 = surf.extractIsoCurveU(u1);
+        r.curveC0Samples = sampleCurveRange(r.curveC0, v0, v1, nCurveSamples);
+        r.curveC1Samples = sampleCurveRange(r.curveC1, v0, v1, nCurveSamples);
     }
 
-    return result;
+    if (r.curveC0Samples.size() < 2 || r.curveC1Samples.size() < 2) return r;
+
+    optimizeDirectrices(surf, u0, u1, v0, v1, dir,
+        r.curveC0Samples, r.curveC1Samples, nRibs, lambda);
+
+    r.ruledMeshVerts = generateRuledMesh(
+        r.curveC0Samples, r.curveC1Samples,
+        nCurveSamples, nAcrossSamples, r.ruledMeshFaces);
+
+    auto [mx, rms] = computeError(surf, r, u0, u1, v0, v1, nCurveSamples, nAcrossSamples);
+    r.maxError = mx; r.rmsError = rms;
+
+    return r;
+}
+
+RuledCellFit fitCellRuledAuto(const SurfaceWrapper& surf,
+                              double u0, double u1, double v0, double v1,
+                              int nUSamples, int nVSamples,
+                              int nRibs, double lambda)
+{
+    RuledCellFit fv = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::V,
+                                   nUSamples, nVSamples, nRibs, lambda);
+    RuledCellFit fu = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::U,
+                                   nUSamples, nVSamples, nRibs, lambda);
+    return (fv.maxError <= fu.maxError) ? fv : fu;
 }
 
 } // namespace simple

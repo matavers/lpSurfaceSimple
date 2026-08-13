@@ -24,13 +24,13 @@ typedef enum {
     RULED_ERR_INVALID_PARAMS = 5
 } RuledErrorCode;
 
-/* ─── Parameter direction ──────────────────────────────────── */
+/* ─── Parameter / fit direction (per cell, auto-selected) ──── */
 typedef enum {
     RULED_DIR_U = 0,
     RULED_DIR_V = 1
 } RuledDirection;
 
-/* ─── Config ───────────────────────────────────────────────── */
+/* ─── Config (ruled) ───────────────────────────────────────── */
 typedef struct {
     const char* stepFile1;
     const char* stepFile2;
@@ -39,34 +39,42 @@ typedef struct {
     int nVSamples;          /* default 10 */
     int nRibs;              /* default 20 */
     double lambda;          /* default 1.0 */
-    RuledDirection splitDir[2];
-    int directrixDirs[2][10];
-    int numDirectrixDirs[2];
+    int nSplitU;            /* U-direction (vertical) splits -> columns   default 2 */
+    int nSplitV;            /* V-direction (horizontal) splits -> rows    default 2 */
+    double tolerance;       /* default 0.1 */
+    int maxDepth;           /* default 20 */
     int faceIdx[2];         /* -1 = auto-pick largest */
 } RuledConfig;
 
+/* ─── Config (planar) ──────────────────────────────────────── */
 typedef struct {
     const char* stepFile1;
     const char* stepFile2;
     const char* outputDir;
     int nUSamples;          /* default 50 */
     int nVSamples;          /* default 10 */
-    RuledDirection splitDir[2];
+    int nSplitU;            /* default 2 */
+    int nSplitV;            /* default 2 */
+    double tolerance;       /* default 0.1 */
+    int maxDepth;           /* default 20 */
     int faceIdx[2];         /* -1 = auto-pick largest */
 } PlanarConfig;
 
-/* ─── Per-segment result ───────────────────────────────────── */
+/* ─── Per-cell result ──────────────────────────────────────── */
 typedef struct {
-    int segmentIndex;
+    int index;
+    int row;
+    int col;
+    int fitDir;             /* RuledDirection: optimizer-selected (U or V); planar = U */
     double maxError;
     double rmsError;
-} RuledSegmentResult;
+} RuledCellResult;
 
 /* ─── Per-surface result ───────────────────────────────────── */
 typedef struct {
     char name[64];
-    RuledSegmentResult segments[10];
-    int numSegments;
+    RuledCellResult cells[512];
+    int numCells;
 } RuledSurfaceResult;
 
 /* ─── Overall result ───────────────────────────────────────── */
@@ -75,16 +83,16 @@ typedef struct {
     char errorMsg[256];
     int numSurfaces;
     RuledSurfaceResult surfaces[2];
-    char metaJson[2048];
+    char metaJson[4096];
 } RuledFittingResult;
 
 /* ─── API functions ────────────────────────────────────────── */
 
-/* Legacy: two-file input, manual face selection */
+/* Two-file input, manual face selection */
 RULED_API RuledFittingResult* ruled_surface_fitting(const RuledConfig* config);
 RULED_API RuledFittingResult* plane_surface_fitting(const PlanarConfig* config);
 
-/* New: single-file auto blade processing (auto-identify + split + fit) */
+/* Single-file auto blade processing (auto-identify + split + grid fit) */
 RULED_API RuledFittingResult* pressure_ruled_fitting(const RuledConfig* config);
 RULED_API RuledFittingResult* pressure_plane_fitting(const PlanarConfig* config);
 RULED_API RuledFittingResult* suction_ruled_fitting(const RuledConfig* config);

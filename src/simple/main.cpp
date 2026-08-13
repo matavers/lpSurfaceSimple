@@ -10,6 +10,7 @@
 #include "simple/surface_wrapper.hpp"
 #include "simple/ruled_fitter.hpp"
 #include "simple/planar_fitter.hpp"
+#include "simple/grid_fitter.hpp"
 #include "simple/blade_identifier.hpp"
 #include "simple/blade_splitter.hpp"
 
@@ -86,38 +87,26 @@ void printUsage() {
     std::cout << "Usage: simple.exe <step_file1> <step_file2> [options]\n"
               << "  step_file1, step_file2 : Path to STEP blade model files\n"
               << "  Options:\n"
-              << "    --mode <ruled|planar|planar-adaptive|info|face-obj|extract-faces|auto-identify|split-blade>  Algorithm mode (default: ruled)\n"
+              << "    --mode <ruled|planar|info|face-obj|extract-faces|auto-identify|split-blade>  Algorithm mode (default: ruled)\n"
               << "    --outdir <DIR>          Output directory (default: ./output)\n"
               << "    --face-idx1 <N>         Face index for file 1 (default: auto-pick largest)\n"
               << "    --face-idx2 <N>         Face index for file 2 (default: auto-pick largest)\n"
               << "    --nusamples <N>         U-direction samples (default: 50)\n"
               << "    --nvsamples <N>         V-direction samples (default: 10)\n"
-              << "    --numsegments <N>       Number of segments (default: 3)\n"
-              << "    --split-dir1 <u|v>      Split direction surface 1 (default: v)\n"
-              << "    --split-dir2 <u|v>      Split direction surface 2 (default: v)\n"
-              << "    --dirx-dir1 <d,d,d>     Directrix dirs surface 1 (ruled only, default: v,v,v)\n"
-              << "    --dirx-dir2 <d,d,d>     Directrix dirs surface 2 (ruled only, default: v,v,v)\n"
+              << "    --nsplit-u <N>          U-direction (vertical) splits -> columns (default: 2)\n"
+              << "    --nsplit-v <N>          V-direction (horizontal) splits -> rows (default: 2)\n"
+              << "    --tolerance <T>         Tolerance for adaptive refinement (default: 0.1)\n"
+              << "    --max-depth <N>         Max refinement steps (default: 20)\n"
               << "    --help                  Show this help\n"
               << std::endl;
-}
-
-std::vector<ParamDir> parseDirectrixDirs(const std::string& s) {
-    std::vector<ParamDir> dirs;
-    std::stringstream ss(s);
-    std::string tok;
-    while (std::getline(ss, tok, ',')) {
-        if (tok == "u" || tok == "U") dirs.push_back(ParamDir::U);
-        else dirs.push_back(ParamDir::V);
-    }
-    return dirs;
 }
 
 int main(int argc, char* argv[]) {
     std::string stepFile1, stepFile2, outDir = "output";
     std::string modeStr = "ruled";
-    int nUSamples = 50, nVSamples = 10, numSegments = 3;
-    std::string splitDirStr1 = "v", splitDirStr2 = "v";
-    std::string directrixDirsStr1 = "v,v,v", directrixDirsStr2 = "v,v,v";
+    int nUSamples = 50, nVSamples = 10;
+    int nSplitU = 2, nSplitV = 2, maxDepth = 20;
+    double tolerance = 0.1;
     int faceIdx1 = -1, faceIdx2 = -1;
     std::string faceOutPath;
     double uRange1Min = -1, uRange1Max = -1;
@@ -169,30 +158,15 @@ int main(int argc, char* argv[]) {
         }
         else if (arg == "--nusamples" && i + 1 < argc) { nUSamples = std::stoi(argv[++i]); }
         else if (arg == "--nvsamples" && i + 1 < argc) { nVSamples = std::stoi(argv[++i]); }
-        else if (arg == "--numsegments" && i + 1 < argc) { numSegments = std::stoi(argv[++i]); }
-        else if (arg == "--split-dir1" && i + 1 < argc) { splitDirStr1 = argv[++i]; }
-        else if (arg == "--split-dir2" && i + 1 < argc) { splitDirStr2 = argv[++i]; }
-        else if (arg == "--dirx-dir1" && i + 1 < argc) { directrixDirsStr1 = argv[++i]; }
-        else if (arg == "--dirx-dir2" && i + 1 < argc) { directrixDirsStr2 = argv[++i]; }
+        else if (arg == "--nsplit-u" && i + 1 < argc) { nSplitU = std::stoi(argv[++i]); }
+        else if (arg == "--nsplit-v" && i + 1 < argc) { nSplitV = std::stoi(argv[++i]); }
+        else if (arg == "--tolerance" && i + 1 < argc) { tolerance = std::stod(argv[++i]); }
+        else if (arg == "--max-depth" && i + 1 < argc) { maxDepth = std::stoi(argv[++i]); }
         else if (stepFile1.empty()) { stepFile1 = arg; }
         else if (stepFile2.empty()) { stepFile2 = arg; }
     }
 
     bool isPlanar = (modeStr == "planar");
-    bool isAdaptivePlanar = (modeStr == "planar-adaptive");
-
-    auto writePlaneTXT = [](const std::string& path, const Vec3& c, const Vec3& n,
-                            const Vec3Arr& corners) {
-        std::ofstream o(path); if (!o) return;
-        o << std::fixed << std::setprecision(6);
-        o << "centroid = " << c.x() << " " << c.y() << " " << c.z() << "\n";
-        o << "normal = " << n.x() << " " << n.y() << " " << n.z() << "\n";
-        if (corners.size() >= 4) {
-            for (size_t i = 0; i < 4; ++i)
-                o << "corner" << i << " = " << corners[i].x() << " "
-                  << corners[i].y() << " " << corners[i].z() << "\n";
-        }
-    };
 
     if (stepFile1.empty() || stepFile2.empty()) {
         // --info mode
@@ -499,269 +473,68 @@ int main(int argc, char* argv[]) {
               << surf2->UDegree() << "," << surf2->VDegree() << ")" << std::endl;
 
     std::cout << "[Step 3] Fitting " << (isPlanar ? "planar" : "ruled")
-              << " segments..." << std::endl;
-    std::cout << "  Segments: " << numSegments
+              << " grid with adaptive refinement..." << std::endl;
+    std::cout << "  Splits: U=" << nSplitU << " V=" << nSplitV
               << "  U-samples: " << nUSamples
-              << "  V-samples: " << nVSamples << std::endl;
+              << "  V-samples: " << nVSamples
+              << "  tolerance: " << tolerance
+              << "  max-depth: " << maxDepth << std::endl;
 
-    ParamDir sd1 = (splitDirStr1 == "u" || splitDirStr1 == "U") ? ParamDir::U : ParamDir::V;
-    ParamDir sd2 = (splitDirStr2 == "u" || splitDirStr2 == "U") ? ParamDir::U : ParamDir::V;
-    if (vRange1Min >= 0.0) sd1 = ParamDir::V;
-    if (vRange2Min >= 0.0) sd2 = ParamDir::V;
-    auto dd1 = parseDirectrixDirs(directrixDirsStr1);
-    auto dd2 = parseDirectrixDirs(directrixDirsStr2);
+    GridConfig gcfg;
+    gcfg.nSplitU = nSplitU;
+    gcfg.nSplitV = nSplitV;
+    gcfg.tolerance = tolerance;
+    gcfg.maxDepth = maxDepth;
+    gcfg.nUSamples = nUSamples;
+    gcfg.nVSamples = nVSamples;
 
-    std::cout << "  Split dir: surface1=" << (int)sd1 << " surface2=" << (int)sd2 << "\n";
-    if (!isPlanar) {
-        std::cout << "  Directrix dirs: ";
-        for (auto d : dd1) std::cout << (int)d; std::cout << " / ";
-        for (auto d : dd2) std::cout << (int)d; std::cout << std::endl;
-    }
-
-    if (isAdaptivePlanar) {
-        if (isPlanar) {} // suppress unused warning
-
-        int refSegs = 10;
-        auto rr1 = simple::fitRuledSegments(sw1, refSegs, sd1, dd1,
-                                             nUSamples, nVSamples, 0, "Blade-1");
-        auto rr2 = simple::fitRuledSegments(sw2, refSegs, sd2, dd2,
-                                             nUSamples, nVSamples, 0, "Blade-2");
-
-        std::vector<double> targets1(refSegs), targets2(refSegs);
-        for (int i = 0; i < refSegs && i < (int)rr1.segments.size(); ++i)
-            targets1[i] = rr1.segments[i].rmsError * 1.5;
-        for (int i = 0; i < refSegs && i < (int)rr2.segments.size(); ++i)
-            targets2[i] = rr2.segments[i].rmsError * 1.5;
-
-        int initSegs = 10;
-        std::cout << "[Step 3] Adaptive planar fitting init=" << initSegs
-                  << " (ref=" << refSegs << " ruled segments)" << std::endl;
-        std::cout << "  Target (rms*1.5):";
-        for (auto t : targets1) std::cout << " " << t;
-        std::cout << " /";
-        for (auto t : targets2) std::cout << " " << t;
-        std::cout << std::endl;
-
-        auto pr1 = simple::fitPlanarSegmentsAdaptive(sw1, targets1, initSegs, sd1,
-                                                       nUSamples, nVSamples, 6, "Blade-1");
-        auto pr2 = simple::fitPlanarSegmentsAdaptive(sw2, targets2, initSegs, sd2,
-                                                       nUSamples, nVSamples, 6, "Blade-2");
-
-        for (const auto& res : {pr1, pr2}) {
-            std::cout << "  " << res.name << " " << res.segments.size() << " segments:" << std::endl;
-            for (const auto& seg : res.segments) {
-                std::cout << "    Segment " << seg.segmentIndex
-                          << "  maxError=" << std::fixed << std::setprecision(5) << seg.maxError
-                          << "  rmsError=" << seg.rmsError << std::endl;
-            }
-        }
-
-        // Mesh + export
-        std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
-        Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
-        sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
-        if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
-            sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
-            std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
-        } else { mv2 = mv1; mf2 = mf1; }
-        std::cout << "  Face 1 mesh: " << mv1.size() << " verts, " << mf1.size() << " tris" << std::endl;
-
-        std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
-        std::string m1Path = outDir + "/blade1_mesh.obj";
-        std::string m2Path = outDir + "/blade2_mesh.obj";
-        simple::exportOBJ(m1Path, mv1, mf1);
-        std::cout << "  wrote " << m1Path << std::endl;
-        simple::exportOBJ(m2Path, mv2, mf2);
-        std::cout << "  wrote " << m2Path << std::endl;
-
-        for (int bi = 0; bi < 2; ++bi) {
-            auto& pr = (bi==0)?pr1:pr2;
-            std::string pfx = (bi==0)?"blade1":"blade2";
-            for (auto& seg : pr.segments) {
-                std::string sp = outDir + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + ".obj";
-                simple::exportOBJ(sp, seg.meshVerts, seg.meshFaces);
-                std::string dp = outDir + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + "_desc.txt";
-                writePlaneTXT(dp, seg.centroid, seg.normal, seg.meshVerts);
-            }
-        }
-
-        // Error CSV + meta
-        std::ofstream errOut(outDir + "/errors.csv");
-        errOut << "surface,version,segment,mode,maxError,rmsError\n";
-        for (int bi = 0; bi < 2; ++bi) {
-            auto& pr = (bi==0)?pr1:pr2;
-            std::string name = (bi==0)?"Blade-1":"Blade-2";
-            for (auto& seg : pr.segments)
-                errOut << name << ",0," << seg.segmentIndex
-                       << ",planar-adaptive," << seg.maxError << "," << seg.rmsError << "\n";
-        }
-        errOut.close();
-        std::cout << "  wrote " << outDir << "/errors.csv" << std::endl;
-
-        std::ofstream metaOut(outDir + "/meta.json");
-        metaOut << "{\"mode\":\"planar-adaptive\",\"files\":[\"" << jsonSafe(stepFile1) << "\",\"" << jsonSafe(stepFile2) << "\"],"
-                << "\"surfaces\":[";
-        for (int bi = 0; bi < 2; ++bi) {
-            if (bi) metaOut << ",";
-            auto& pr = (bi==0)?pr1:pr2;
-            std::string name = (bi==0)?"Blade-1":"Blade-2";
-            metaOut << "{\"name\":\"" << name << "\",\"numSegments\":" << pr.segments.size()
-                    << ",\"segments\":[";
-            for (size_t j = 0; j < pr.segments.size(); ++j) {
-                if (j) metaOut << ",";
-                metaOut << "{\"index\":" << pr.segments[j].segmentIndex
-                        << ",\"maxErr\":" << pr.segments[j].maxError
-                        << ",\"rmsErr\":" << pr.segments[j].rmsError << "}";
-            }
-            metaOut << "]}";
-        }
-        metaOut << "]}";
-        metaOut.flush();
-        metaOut.close();
-        std::cout << "  wrote " << outDir << "/meta.json" << std::endl;
-        std::cout << "[Done] All files exported to " << outDir << std::endl;
-        return 0;
-    }
-
+    GridResult gr1, gr2;
     if (isPlanar) {
-        std::vector<simple::PlanarResult> allResults;
-
-        auto pr1 = simple::fitPlanarSegments(sw1, numSegments, sd1,
-                                              nUSamples, nVSamples, 0, "Blade-1");
-        allResults.push_back(pr1);
-        auto pr2 = simple::fitPlanarSegments(sw2, numSegments, sd2,
-                                              nUSamples, nVSamples, 0, "Blade-2");
-        allResults.push_back(pr2);
-
-        for (const auto& res : allResults) {
-            std::cout << "  " << res.name << " (v" << res.version << "):" << std::endl;
-            for (const auto& seg : res.segments) {
-                std::cout << "    Segment " << seg.segmentIndex
-                          << "  maxError=" << std::fixed << std::setprecision(5) << seg.maxError
-                          << "  rmsError=" << seg.rmsError
-                          << "  centroid=" << seg.centroid.transpose()
-                          << "  normal=" << seg.normal.transpose() << std::endl;
-            }
-        }
-
-        std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
-        Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
-        sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
-        if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
-            sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
-            std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
-        } else {
-            mv2 = mv1; mf2 = mf1;
-        }
-        std::cout << "  Face 1 mesh: " << mv1.size() << " verts, " << mf1.size() << " tris" << std::endl;
-
-        std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
-        std::string m1Path = outDir + "/blade1_mesh.obj";
-        std::string m2Path = outDir + "/blade2_mesh.obj";
-        simple::exportOBJ(m1Path, mv1, mf1);
-        std::cout << "  wrote " << m1Path << std::endl;
-        simple::exportOBJ(m2Path, mv2, mf2);
-        std::cout << "  wrote " << m2Path << std::endl;
-
-        for (size_t bi = 0; bi < allResults.size(); ++bi) {
-            std::string prefix = (bi == 0) ? "blade1" : "blade2";
-            for (const auto& seg : allResults[bi].segments) {
-                std::string sp = outDir + "/" + prefix + "_plane"
-                               + std::to_string(seg.segmentIndex) + ".obj";
-                simple::exportOBJ(sp, seg.meshVerts, seg.meshFaces);
-                std::cout << "  wrote " << sp << std::endl;
-                std::string dp = outDir + "/" + prefix + "_plane"
-                               + std::to_string(seg.segmentIndex) + "_desc.txt";
-                writePlaneTXT(dp, seg.centroid, seg.normal, seg.meshVerts);
-                std::cout << "  wrote " << dp << std::endl;
-            }
-        }
-
-        std::string errPath = outDir + "/errors.csv";
-        {
-            std::ofstream errOut(errPath);
-            errOut << "surface,version,segment,mode,maxError,rmsError\n";
-            errOut << std::fixed << std::setprecision(6);
-            for (const auto& res : allResults)
-                for (const auto& seg : res.segments)
-                    errOut << res.name << "," << res.version << "," << seg.segmentIndex
-                           << ",planar," << seg.maxError << "," << seg.rmsError << "\n";
-        }
-        std::cout << "  wrote " << errPath << std::endl;
-
-        std::string metaPath = outDir + "/meta.json";
-        {
-            std::ofstream metaOut(metaPath);
-            metaOut << "{\"mode\":\"planar\",\"files\":[\"" << jsonSafe(stepFile1) << "\",\"" << jsonSafe(stepFile2) << "\"],"
-                    << "\"surfaces\":[";
-            for (size_t i = 0; i < allResults.size(); ++i) {
-                if (i > 0) metaOut << ",";
-                metaOut << "{\"name\":\"" << allResults[i].name << "\",\"segments\":[";
-                for (size_t j = 0; j < allResults[i].segments.size(); ++j) {
-                    if (j > 0) metaOut << ",";
-                    metaOut << "{\"index\":" << j
-                            << ",\"maxErr\":" << allResults[i].segments[j].maxError
-                            << ",\"rmsErr\":" << allResults[i].segments[j].rmsError << "}";
-                }
-                metaOut << "]}";
-            }
-            metaOut << "]}\n";
-        }
-        std::cout << "  wrote " << metaPath << std::endl;
-
+        gr1 = fitGridPlanar(sw1, gcfg, "Blade-1");
+        gr2 = fitGridPlanar(sw2, gcfg, "Blade-2");
     } else {
-        std::vector<simple::RuledResult> allResults;
-
-        auto r1 = simple::fitRuledSegments(sw1, numSegments, sd1, dd1, nUSamples, nVSamples, 0, "Blade-1");
-        allResults.push_back(r1);
-        auto r2 = simple::fitRuledSegments(sw2, numSegments, sd2, dd2, nUSamples, nVSamples, 0, "Blade-2");
-        allResults.push_back(r2);
-
-        for (const auto& res : allResults) {
-            std::cout << "  " << res.name << " (v" << res.version << "):" << std::endl;
-            for (const auto& seg : res.segments) {
-                std::cout << "    Segment " << seg.segmentIndex
-                          << "  maxError=" << std::fixed << std::setprecision(5) << seg.maxError
-                          << "  rmsError=" << seg.rmsError << std::endl;
-            }
-        }
-
-        std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
-        Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
-        sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
-        sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
-        std::cout << "  Face 1 mesh: " << mv1.size() << " verts, " << mf1.size() << " tris" << std::endl;
-        std::cout << "  Face 2 mesh: " << mv2.size() << " verts, " << mf2.size() << " tris" << std::endl;
-
-        std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
-        simple::exportOBJ(outDir + "/blade1_mesh.obj", mv1, mf1);
-        std::cout << "  wrote " << outDir << "/blade1_mesh.obj" << std::endl;
-        simple::exportOBJ(outDir + "/blade2_mesh.obj", mv2, mf2);
-        std::cout << "  wrote " << outDir << "/blade2_mesh.obj" << std::endl;
-
-        for (size_t i = 0; i < allResults.size(); ++i) {
-            std::string bladeName = (i == 0) ? "blade1" : "blade2";
-            const auto& res = allResults[i];
-            for (const auto& seg : res.segments) {
-                std::string segPath = outDir + "/" + bladeName
-                    + "_seg" + std::to_string(seg.segmentIndex) + ".obj";
-                simple::exportOBJ(segPath, seg.ruledMeshVerts, seg.ruledMeshFaces);
-                std::cout << "  wrote " << segPath << std::endl;
-                std::string paramPath = outDir + "/" + bladeName
-                    + "_seg" + std::to_string(seg.segmentIndex) + "_params.txt";
-                simple::exportCurveParamsTXT(paramPath, seg.curveC0, seg.curveC1, nUSamples);
-                std::cout << "  wrote " << paramPath << std::endl;
-            }
-        }
-
-        std::string errPath = outDir + "/errors.csv";
-        simple::exportErrorsCSV(errPath, allResults);
-        std::cout << "  wrote " << errPath << std::endl;
-
-        std::string metaPath = outDir + "/meta.json";
-        simple::exportMetaJSON(metaPath, stepFile1, stepFile2, allResults);
-        std::cout << "  wrote " << metaPath << std::endl;
+        gr1 = fitGridRuled(sw1, gcfg, "Blade-1");
+        gr2 = fitGridRuled(sw2, gcfg, "Blade-2");
     }
+
+    for (const auto& gr : {gr1, gr2}) {
+        std::cout << "  " << gr.name << ": " << gr.nRows << "x" << gr.nCols
+                  << " = " << gr.cells.size() << " cells" << std::endl;
+        for (const auto& c : gr.cells) {
+            std::cout << "    cell[" << c.row << "," << c.col << "]"
+                      << " dir=" << (c.fitDir == ParamDir::U ? "U" : "V")
+                      << "  maxError=" << std::fixed << std::setprecision(5) << c.maxError
+                      << "  rmsError=" << c.rmsError << std::endl;
+        }
+    }
+
+    std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
+    Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
+    sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
+    if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
+        sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
+    } else {
+        mv2 = mv1; mf2 = mf1;
+    }
+
+    std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
+    exportOBJ(outDir + "/blade1_mesh.obj", mv1, mf1);
+    std::cout << "  wrote " << outDir << "/blade1_mesh.obj" << std::endl;
+    exportOBJ(outDir + "/blade2_mesh.obj", mv2, mf2);
+    std::cout << "  wrote " << outDir << "/blade2_mesh.obj" << std::endl;
+
+    exportGridOBJs(outDir, "blade1", gr1, isPlanar);
+    exportGridOBJs(outDir, "blade2", gr2, isPlanar);
+    exportGridLinesVTK(outDir + "/blade1_grid.vtk", sw1, gr1);
+    exportGridLinesVTK(outDir + "/blade2_grid.vtk", sw2, gr2);
+
+    {
+        std::ofstream metaOut(outDir + "/meta.json");
+        metaOut << buildGridMetaJson({gr1, gr2},
+                                     isPlanar ? "planar" : "ruled",
+                                     stepFile1, stepFile2) << "\n";
+    }
+    std::cout << "  wrote " << outDir << "/meta.json" << std::endl;
 
     std::cout << "\n[Done] All files exported to " << outDir << std::endl;
     return 0;

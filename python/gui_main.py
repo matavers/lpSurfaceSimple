@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QFileDialog, QTextEdit,
     QTreeWidget, QTreeWidgetItem, QSplitter, QFormLayout,
-    QSpinBox, QMessageBox,
+    QSpinBox, QDoubleSpinBox, QMessageBox,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QTextCursor
@@ -108,8 +108,12 @@ class MainWindow(QMainWindow):
         self._out_dir = str(PROJECT_DIR / "output")
         self._nSamplesU = 50
         self._nSamplesV = 10
-        self._numSegments = 3
-        self._surfaceSegCounts = [3, 3]
+        self._nSplitU = 2
+        self._nSplitV = 2
+        self._tolerance = 0.1
+        self._maxDepth = 20
+        self._surfaceCellCounts = [4, 4]
+        self._cellMeta = [[], []]
         self._currentVersion = 0
         self._mode = "ruled"
         self._single_file_mode = False
@@ -283,42 +287,27 @@ class MainWindow(QMainWindow):
         self._spn_v.setValue(self._nSamplesV)
         form.addRow("V Samples:", self._spn_v)
 
-        self._spn_seg = QSpinBox()
-        self._spn_seg.setRange(1, 10)
-        self._spn_seg.setValue(self._numSegments)
-        form.addRow("Segments:", self._spn_seg)
+        self._spn_split_u = QSpinBox()
+        self._spn_split_u.setRange(1, 20)
+        self._spn_split_u.setValue(self._nSplitU)
+        form.addRow("U Splits (columns):", self._spn_split_u)
 
-        self._cmb_split1 = QComboBox()
-        self._cmb_split1.addItems(["V", "U"])
-        form.addRow("Split Dir (Surface 1):", self._cmb_split1)
+        self._spn_split_v = QSpinBox()
+        self._spn_split_v.setRange(1, 20)
+        self._spn_split_v.setValue(self._nSplitV)
+        form.addRow("V Splits (rows):", self._spn_split_v)
 
-        self._cmb_split2 = QComboBox()
-        self._cmb_split2.addItems(["V", "U"])
-        form.addRow("Split Dir (Surface 2):", self._cmb_split2)
+        self._spn_tol = QDoubleSpinBox()
+        self._spn_tol.setRange(0.001, 100.0)
+        self._spn_tol.setDecimals(3)
+        self._spn_tol.setSingleStep(0.01)
+        self._spn_tol.setValue(self._tolerance)
+        form.addRow("Tolerance:", self._spn_tol)
 
-        self._cmb_dirx1 = []
-        form.addRow(QLabel("Directrix Dir (Surface 1):"))
-        for seg in range(3):
-            cmb = QComboBox()
-            cmb.addItems(["V", "U"])
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"  Seg {seg+1}:"))
-            row.addWidget(cmb)
-            row.addStretch()
-            form.addRow(row)
-            self._cmb_dirx1.append(cmb)
-
-        self._cmb_dirx2 = []
-        form.addRow(QLabel("Directrix Dir (Surface 2):"))
-        for seg in range(3):
-            cmb = QComboBox()
-            cmb.addItems(["V", "U"])
-            row = QHBoxLayout()
-            row.addWidget(QLabel(f"  Seg {seg+1}:"))
-            row.addWidget(cmb)
-            row.addStretch()
-            form.addRow(row)
-            self._cmb_dirx2.append(cmb)
+        self._spn_depth = QSpinBox()
+        self._spn_depth.setRange(1, 200)
+        self._spn_depth.setValue(self._maxDepth)
+        form.addRow("Max Depth:", self._spn_depth)
 
         bar = QHBoxLayout()
         self._btn_run = QPushButton("Run")
@@ -368,10 +357,6 @@ class MainWindow(QMainWindow):
             self._out_dir = d
             self._txt_outdir.setText(d)
 
-    def _get_dirx_str(self, surface_idx):
-        cmbs = self._cmb_dirx1 if surface_idx == 1 else self._cmb_dirx2
-        return ",".join(c.currentText().lower() for c in cmbs)
-
     def _log(self, text):
         ts = datetime.now().strftime("[%H:%M:%S] ")
         self._console.append(ts + text)
@@ -388,13 +373,20 @@ class MainWindow(QMainWindow):
             self._out_dir = cfg.get("out_dir", self._out_dir)
             self._nSamplesU = cfg.get("nUSamples", 50)
             self._nSamplesV = cfg.get("nVSamples", 10)
-            self._numSegments = cfg.get("numSegments", 3)
+            self._nSplitU = cfg.get("nSplitU", 2)
+            self._nSplitV = cfg.get("nSplitV", 2)
+            self._tolerance = cfg.get("tolerance", 0.1)
+            self._maxDepth = cfg.get("maxDepth", 20)
             self._txt_file1.setText(self._file1)
             self._txt_file2.setText(self._file2)
             self._txt_outdir.setText(self._out_dir)
             self._spn_u.setValue(self._nSamplesU)
             self._spn_v.setValue(self._nSamplesV)
-            self._spn_seg.setValue(self._numSegments)
+            self._spn_split_u.setValue(self._nSplitU)
+            self._spn_split_v.setValue(self._nSplitV)
+            self._spn_tol.setValue(self._tolerance)
+            self._spn_depth.setValue(self._maxDepth)
+            self._cmb_mode.setCurrentIndex(0 if cfg.get("mode", "ruled") == "ruled" else 1)
         except Exception:
             pass
 
@@ -403,9 +395,13 @@ class MainWindow(QMainWindow):
             "file1": self._txt_file1.text(),
             "file2": self._txt_file2.text(),
             "out_dir": self._txt_outdir.text(),
+            "mode": self._mode,
             "nUSamples": self._spn_u.value(),
             "nVSamples": self._spn_v.value(),
-            "numSegments": self._spn_seg.value(),
+            "nSplitU": self._spn_split_u.value(),
+            "nSplitV": self._spn_split_v.value(),
+            "tolerance": self._spn_tol.value(),
+            "maxDepth": self._spn_depth.value(),
         }
         try:
             with open(CONFIG_PATH, 'w') as f:
@@ -414,7 +410,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_mode_changed(self, idx):
-        self._mode = "ruled" if idx == 0 else "planar-adaptive"
+        self._mode = "ruled" if idx == 0 else "planar"
 
     def _hide_single_controls(self):
         for w in [self._btn_preview, self._btn_auto_id, self._btn_split,
@@ -925,7 +921,10 @@ class MainWindow(QMainWindow):
         self._out_dir = self._txt_outdir.text()
         self._nSamplesU = self._spn_u.value()
         self._nSamplesV = self._spn_v.value()
-        self._numSegments = self._spn_seg.value()
+        self._nSplitU = self._spn_split_u.value()
+        self._nSplitV = self._spn_split_v.value()
+        self._tolerance = self._spn_tol.value()
+        self._maxDepth = self._spn_depth.value()
 
         if not os.path.exists(self._file1):
             QMessageBox.warning(self, "Error", "File not found.")
@@ -946,7 +945,8 @@ class MainWindow(QMainWindow):
 
         self._tree.clear()
         self._loaded_files.clear()
-        self._surfaceSegCounts = [3, 3]
+        self._surfaceCellCounts = [4, 4]
+        self._cellMeta = [[], []]
         self._clear_3d()
         self._console.clear()
 
@@ -967,11 +967,10 @@ class MainWindow(QMainWindow):
             f'--outdir "{self._out_dir}" '
             f'--nusamples {self._nSamplesU} '
             f'--nvsamples {self._nSamplesV} '
-            f'--numsegments {self._numSegments} '
-            f'--split-dir1 {self._cmb_split1.currentText().lower()} '
-            f'--split-dir2 {self._cmb_split2.currentText().lower()} '
-            f'--dirx-dir1 {self._get_dirx_str(1)} '
-            f'--dirx-dir2 {self._get_dirx_str(2)}'
+            f'--nsplit-u {self._nSplitU} '
+            f'--nsplit-v {self._nSplitV} '
+            f'--tolerance {self._tolerance} '
+            f'--max-depth {self._maxDepth}'
         )
         if self._single_file_mode:
             f1 = self._cmb_face1.currentData()
@@ -1035,10 +1034,7 @@ class MainWindow(QMainWindow):
 
     def _build_tree(self):
         self._tree.clear()
-        self._log(f"[Tree] surfaceSegCounts={self._surfaceSegCounts}")
-
-        seg_label = "Plane Seg" if self._mode.startswith("planar") else "Ruled Seg"
-        seg_prefix = "plane" if self._mode.startswith("planar") else "seg"
+        self._log(f"[Tree] surfaceCellCounts={self._surfaceCellCounts}")
 
         for bi in range(2):
             blade_name = f"Surface {bi + 1}"
@@ -1055,40 +1051,64 @@ class MainWindow(QMainWindow):
             mesh_item.setData(2, Qt.UserRole, "mesh")
             bnode.addChild(mesh_item)
 
+            grid_item = QTreeWidgetItem(["Grid"])
+            grid_item.setFlags(grid_item.flags() | Qt.ItemIsUserCheckable)
+            grid_item.setCheckState(0, Qt.Checked)
+            grid_item.setData(1, Qt.UserRole, f"blade{bi + 1}_grid")
+            grid_item.setData(2, Qt.UserRole, "grid")
+            bnode.addChild(grid_item)
+
             ver_node = QTreeWidgetItem([f"Version {self._currentVersion}"])
             ver_node.setFlags(ver_node.flags() | Qt.ItemIsUserCheckable)
             ver_node.setCheckState(0, Qt.Checked)
             ver_node.setExpanded(True)
             bnode.addChild(ver_node)
 
-            for seg in range(self._surfaceSegCounts[bi]):
-                seg_item = QTreeWidgetItem([f"{seg_label} {seg + 1}"])
-                seg_item.setFlags(seg_item.flags() | Qt.ItemIsUserCheckable)
-                seg_item.setCheckState(0, Qt.Checked)
-                seg_item.setData(1, Qt.UserRole, f"blade{bi + 1}_{seg_prefix}{seg}")
-                seg_item.setData(2, Qt.UserRole, "ruled")
-                ver_node.addChild(seg_item)
+            meta_cells = self._cellMeta[bi] if bi < len(self._cellMeta) else []
+            count = self._surfaceCellCounts[bi]
+            for ci in range(count):
+                info = meta_cells[ci] if ci < len(meta_cells) else {}
+                d = info.get("fitDir", "")
+                lbl = f"Cell {ci}"
+                if info:
+                    lbl = f"Cell {ci} (r{info.get('row', '')},c{info.get('col', '')}) [{d}]"
+                cell_item = QTreeWidgetItem([lbl])
+                cell_item.setFlags(cell_item.flags() | Qt.ItemIsUserCheckable)
+                cell_item.setCheckState(0, Qt.Checked)
+                cell_item.setData(1, Qt.UserRole, f"blade{bi + 1}_cell{ci}")
+                cell_item.setData(2, Qt.UserRole, "ruled")
+                ver_node.addChild(cell_item)
 
     def _load_meta(self, meta_path):
-        try:
-            with open(meta_path) as f:
-                raw = f.read()
-            self._log(f"[Meta] raw_len={len(raw)}")
-            meta = json.load(raw)
-            self._log(f"[Meta] surfaces={len(meta.get('surfaces', []))}")
-            if "mode" in meta:
-                self._mode = meta["mode"]
-                self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
-                self._log(f"  Mode: {self._mode}")
-            for i, s in enumerate(meta.get("surfaces", [])):
-                ns = len(s.get('segments', []))
-                if i < 2:
-                    self._surfaceSegCounts[i] = ns
-                if ns > self._numSegments:
-                    self._numSegments = ns
-                self._log(f"  {s['name']}: {ns} segments")
-        except Exception as e:
-            self._log(f"[Meta Error] {e}")
+        meta = None
+        for attempt in range(5):
+            try:
+                with open(meta_path) as f:
+                    raw = f.read()
+                self._log(f"[Meta] attempt={attempt} raw_len={len(raw)}")
+                meta = json.loads(raw)
+                break
+            except Exception as e:
+                self._log(f"[Meta] attempt={attempt} error={e}")
+                import time
+                time.sleep(0.3)
+        if meta is None:
+            self._log("[Meta] FAILED all retries")
+            self._load_all_objs()
+            return
+
+        self._log(f"[Meta] surfaces={len(meta.get('surfaces', []))}")
+        if "mode" in meta:
+            self._mode = meta["mode"]
+            self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
+            self._log(f"  Mode: {self._mode}")
+        self._cellMeta = [[], []]
+        for i, s in enumerate(meta.get("surfaces", [])):
+            cells = s.get('cells', [])
+            if i < 2:
+                self._surfaceCellCounts[i] = len(cells)
+                self._cellMeta[i] = cells
+            self._log(f"  {s['name']}: {len(cells)} cells")
 
         self._load_all_objs()
 
@@ -1100,20 +1120,27 @@ class MainWindow(QMainWindow):
 
         ruled_files = []
         mesh_files = []
+        grid_files = []
         for fn in sorted(os.listdir(out_dir)):
-            if not fn.endswith('.obj'):
-                continue
-            if fn.endswith('_mesh.obj'):
-                mesh_files.append(fn)
-            else:
-                ruled_files.append(fn)
+            if fn.endswith('.obj'):
+                if fn.endswith('_mesh.obj'):
+                    mesh_files.append(fn)
+                else:
+                    ruled_files.append(fn)
+            elif fn.endswith('.vtk'):
+                grid_files.append(fn)
 
         for fn in ruled_files:
             path = os.path.normpath(os.path.join(out_dir, fn))
             name = fn.replace('.obj', '')
             self._load_obj(path, name, "ruled")
 
-        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)}")
+        for fn in grid_files:
+            path = os.path.normpath(os.path.join(out_dir, fn))
+            name = fn.replace('.vtk', '')
+            self._load_obj(path, name, "grid")
+
+        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)} grid_files={len(grid_files)}")
 
         mesh_paths = [os.path.normpath(os.path.join(out_dir, fn)) for fn in mesh_files]
         if len(mesh_paths) == 2:
@@ -1154,17 +1181,24 @@ class MainWindow(QMainWindow):
                     show_edges=True, edge_color='darkgray')
                 self._log(f"  Loaded mesh: {name}")
             elif tag == "ruled":
-                sidx = int(re.search(r'(?:seg|plane)(\d+)', name).group(1))
-                total = self._surfaceSegCounts[0] if "blade1" in name else self._surfaceSegCounts[1]
+                sidx = int(re.search(r'(?:seg|plane|cell)(\d+)', name).group(1))
+                total = self._surfaceCellCounts[0] if "blade1" in name else self._surfaceCellCounts[1]
                 import colorsys
                 hue = (sidx / max(1, total)) % 1.0
                 r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.95)
                 color = [r, g, b]
-                opacity = 0.80 if "plane" in name else 0.35
+                opacity = 0.80 if self._mode.startswith("planar") else 0.35
                 self._plotter.add_mesh(
                     m, name=name, color=color, opacity=opacity,
                     show_edges=True, edge_color='dimgray')
                 self._log(f"  Loaded: {name}")
+            elif tag == "grid":
+                try:
+                    self._plotter.add_mesh(
+                        m, name=name, color=[0.1, 0.1, 0.1], line_width=2)
+                except TypeError:
+                    self._plotter.add_mesh(m, name=name, color=[0.1, 0.1, 0.1])
+                self._log(f"  Loaded grid: {name}")
 
         except Exception as e:
             self._log(f"  Load error {name}: {e}")
@@ -1190,6 +1224,8 @@ class MainWindow(QMainWindow):
                     if self._mesh_shared and blade == 2:
                         visible_set.add("blade1_mesh")
                 elif tag == "ruled":
+                    visible_set.add(data_name)
+                elif tag == "grid":
                     visible_set.add(data_name)
             for i in range(node.childCount()):
                 walk(node.child(i), vis)
@@ -1258,6 +1294,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._stop()
+        try:
+            self._save_config()
+        except Exception:
+            pass
         event.accept()
 
 

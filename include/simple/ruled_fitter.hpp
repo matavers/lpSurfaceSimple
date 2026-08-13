@@ -10,9 +10,10 @@
 
 namespace simple {
 
-struct RuledSegment {
-    int segmentIndex;
-    ParamDir directrixDir;
+// 单个格子（参数域矩形）的直纹面拟合结果。
+// fitDir 由优化器自动指定（U 或 V）。
+struct RuledCellFit {
+    ParamDir fitDir;
     Handle(Geom_BSplineCurve) curveC0;
     Handle(Geom_BSplineCurve) curveC1;
     Vec3Arr curveC0Samples;
@@ -23,34 +24,23 @@ struct RuledSegment {
     double rmsError;
 };
 
-struct RuledResult {
-    std::string name;
-    int version;
-    ParamDir splitDir;
-    std::vector<RuledSegment> segments;
-    Vec3Arr origMeshVerts;
-    FaceArr origMeshFaces;
-};
+// 单格直纹面拟合（指定方向），内部含准线优化（最小二乘 + lambda 正则）。
+RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
+                          double u0, double u1, double v0, double v1,
+                          ParamDir dir,
+                          int nUSamples, int nVSamples,
+                          int nRibs, double lambda);
 
-RuledResult fitRuledSegments(const SurfaceWrapper& surf,
-                              int numSegments,
-                              ParamDir splitDir,
-                              const std::vector<ParamDir>& directrixDirs,
-                              int nUSamples,
-                              int nVSamples,
-                              int version,
-                              const std::string& name);
+// 单格直纹面拟合（自动方向）：U、V 各拟合一次，取 maxError 更小者。
+RuledCellFit fitCellRuledAuto(const SurfaceWrapper& surf,
+                              double u0, double u1, double v0, double v1,
+                              int nUSamples, int nVSamples,
+                              int nRibs, double lambda);
 
 Vec3Arr generateRuledMesh(const Vec3Arr& c0Samples,
                            const Vec3Arr& c1Samples,
-                           int nU, int nV,
+                           int nAlong, int nAcross,
                            FaceArr& faces);
-
-std::pair<double, double> computeError(const SurfaceWrapper& surf,
-                                        const RuledSegment& seg,
-                                        double uSeg0, double uSeg1,
-                                        double vSeg0, double vSeg1,
-                                        int nAlong, int nAcross);
 
 void optimizeDirectrices(
     const SurfaceWrapper& surf,
@@ -63,13 +53,6 @@ void optimizeDirectrices(
 
 bool exportOBJ(const std::string& path,
                const Vec3Arr& verts, const FaceArr& faces);
-
-bool exportErrorsCSV(const std::string& path,
-                     const std::vector<RuledResult>& results);
-
-bool exportMetaJSON(const std::string& path,
-                    const std::string& file1, const std::string& file2,
-                    const std::vector<RuledResult>& results);
 
 bool exportCurveParamsTXT(const std::string& path,
                           const Handle(Geom_BSplineCurve)& curveC0,
