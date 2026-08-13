@@ -1072,7 +1072,10 @@ class MainWindow(QMainWindow):
     def _load_meta(self, meta_path):
         try:
             with open(meta_path) as f:
-                meta = json.load(f)
+                raw = f.read()
+            self._log(f"[Meta] raw_len={len(raw)}")
+            meta = json.load(raw)
+            self._log(f"[Meta] surfaces={len(meta.get('surfaces', []))}")
             if "mode" in meta:
                 self._mode = meta["mode"]
                 self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
@@ -1084,12 +1087,8 @@ class MainWindow(QMainWindow):
                 if ns > self._numSegments:
                     self._numSegments = ns
                 self._log(f"  {s['name']}: {ns} segments")
-                for seg in s.get('segments', []):
-                    self._log(
-                        f"    Seg {seg['index']}: maxErr={seg['maxError']:.4f}, "
-                        f"rmsErr={seg['rmsError']:.4f}")
-        except Exception:
-            pass
+        except Exception as e:
+            self._log(f"[Meta Error] {e}")
 
         self._load_all_objs()
 
