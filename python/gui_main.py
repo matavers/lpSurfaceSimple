@@ -938,6 +938,7 @@ class MainWindow(QMainWindow):
 
         self._tree.clear()
         self._loaded_files.clear()
+        self._surfaceSegCounts = [3, 3]
         self._clear_3d()
         self._console.clear()
 
@@ -1070,7 +1071,7 @@ class MainWindow(QMainWindow):
             for i, s in enumerate(meta.get("surfaces", [])):
                 ns = len(s.get('segments', []))
                 if i < 2:
-                    self._surfaceSegCounts[i] = max(ns, self._surfaceSegCounts[i])
+                    self._surfaceSegCounts[i] = ns
                 if ns > self._numSegments:
                     self._numSegments = ns
                 self._log(f"  {s['name']}: {ns} segments")
