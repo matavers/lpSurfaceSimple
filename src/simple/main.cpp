@@ -28,6 +28,15 @@
 using namespace simple;
 namespace fs = std::filesystem;
 
+static std::string jsonSafe(const std::string& s) {
+    std::string r = s;
+    for (char& c : r) {
+        if (c == '\\') c = '/';
+        if (c == '"') c = '\'';
+    }
+    return r;
+}
+
 TopoDS_Face pickLargestFace(
     const std::vector<TopoDS_Face>& faces,
     const std::string& label)
@@ -590,7 +599,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  wrote " << outDir << "/errors.csv" << std::endl;
 
         std::ofstream metaOut(outDir + "/meta.json");
-        metaOut << "{\"mode\":\"planar-adaptive\",\"files\":[\"" << stepFile1 << "\",\"" << stepFile2 << "\"],"
+        metaOut << "{\"mode\":\"planar-adaptive\",\"files\":[\"" << jsonSafe(stepFile1) << "\",\"" << jsonSafe(stepFile2) << "\"],"
                 << "\"surfaces\":[";
         for (int bi = 0; bi < 2; ++bi) {
             if (bi) metaOut << ",";
@@ -607,6 +616,8 @@ int main(int argc, char* argv[]) {
             metaOut << "]}";
         }
         metaOut << "]}";
+        metaOut.flush();
+        metaOut.close();
         std::cout << "  wrote " << outDir << "/meta.json" << std::endl;
         std::cout << "[Done] All files exported to " << outDir << std::endl;
         return 0;
@@ -681,7 +692,7 @@ int main(int argc, char* argv[]) {
         std::string metaPath = outDir + "/meta.json";
         {
             std::ofstream metaOut(metaPath);
-            metaOut << "{\"mode\":\"planar\",\"files\":[\"" << stepFile1 << "\",\"" << stepFile2 << "\"],"
+            metaOut << "{\"mode\":\"planar\",\"files\":[\"" << jsonSafe(stepFile1) << "\",\"" << jsonSafe(stepFile2) << "\"],"
                     << "\"surfaces\":[";
             for (size_t i = 0; i < allResults.size(); ++i) {
                 if (i > 0) metaOut << ",";

@@ -56,10 +56,14 @@ bool exportMetaJSON(const std::string& path,
                     const std::string& file1, const std::string& file2,
                     const std::vector<RuledResult>& results)
 {
+    auto jsonSafe = [](std::string s) {
+        for (char& c : s) { if (c == '\\') c = '/'; if (c == '"') c = '\''; }
+        return s;
+    };
     std::ofstream out(path);
     if (!out) return false;
     out << "{\n";
-    out << "  \"files\": [\"" << file1 << "\", \"" << file2 << "\"],\n";
+    out << "  \"files\": [\"" << jsonSafe(file1) << "\", \"" << jsonSafe(file2) << "\"],\n";
     out << "  \"surfaces\": [\n";
     for (size_t i = 0; i < results.size(); ++i) {
         out << "    {\n";

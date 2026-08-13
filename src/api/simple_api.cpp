@@ -82,8 +82,12 @@ void exportPlaneTXT(const std::string& path, const Vec3& centroid, const Vec3& n
 void exportMeta(const std::string& path, const std::string& mode,
                 const std::string& f1, const std::string& f2,
                 const std::vector<double>& errors1, const std::vector<double>& errors2) {
+    auto jsonSafe = [](std::string s) {
+        for (char& c : s) { if (c == '\\') c = '/'; if (c == '"') c = '\''; }
+        return s;
+    };
     std::ofstream o(path);
-    o << "{\"mode\":\"" << mode << "\",\"files\":[\"" << f1 << "\",\"" << f2 << "\"],\"surfaces\":[";
+    o << "{\"mode\":\"" << mode << "\",\"files\":[\"" << jsonSafe(f1) << "\",\"" << jsonSafe(f2) << "\"],\"surfaces\":[";
     for (int s = 0; s < 2; ++s) {
         if (s) o << ",";
         o << "{\"name\":\"" << ((s==0)?"Blade-1":"Blade-2") << "\",\"segments\":[";
