@@ -936,6 +936,14 @@ class MainWindow(QMainWindow):
 
         self._save_config()
 
+        import shutil
+        if os.path.isdir(self._out_dir):
+            try:
+                shutil.rmtree(self._out_dir)
+            except Exception:
+                pass
+        os.makedirs(self._out_dir, exist_ok=True)
+
         self._tree.clear()
         self._loaded_files.clear()
         self._surfaceSegCounts = [3, 3]
