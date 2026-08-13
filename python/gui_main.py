@@ -1035,6 +1035,7 @@ class MainWindow(QMainWindow):
 
     def _build_tree(self):
         self._tree.clear()
+        self._log(f"[Tree] surfaceSegCounts={self._surfaceSegCounts}")
 
         seg_label = "Plane Seg" if self._mode.startswith("planar") else "Ruled Seg"
         seg_prefix = "plane" if self._mode.startswith("planar") else "seg"
@@ -1113,6 +1114,8 @@ class MainWindow(QMainWindow):
             name = fn.replace('.obj', '')
             self._load_obj(path, name, "ruled")
 
+        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)}")
+
         mesh_paths = [os.path.normpath(os.path.join(out_dir, fn)) for fn in mesh_files]
         if len(mesh_paths) == 2:
             try:
@@ -1152,11 +1155,12 @@ class MainWindow(QMainWindow):
                     show_edges=True, edge_color='darkgray')
                 self._log(f"  Loaded mesh: {name}")
             elif tag == "ruled":
-                if "blade1" in name:
-                    sidx = int(re.search(r'(?:seg|plane)(\d+)', name).group(1))
-                else:
-                    sidx = int(re.search(r'(?:seg|plane)(\d+)', name).group(1))
-                color = SEG_COLORS[sidx % 3]
+                sidx = int(re.search(r'(?:seg|plane)(\d+)', name).group(1))
+                total = self._surfaceSegCounts[0] if "blade1" in name else self._surfaceSegCounts[1]
+                import colorsys
+                hue = (sidx / max(1, total)) % 1.0
+                r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.95)
+                color = [r, g, b]
                 opacity = 0.80 if "plane" in name else 0.35
                 self._plotter.add_mesh(
                     m, name=name, color=color, opacity=opacity,
@@ -1202,9 +1206,12 @@ class MainWindow(QMainWindow):
                     visible_set.add("blade1_mesh")
 
         try:
+            actor_count = 0
             for a in self._plotter.renderer._actors:
                 if hasattr(a, '_name'):
+                    actor_count += 1
                     a.SetVisibility(a._name in visible_set)
+            self._log(f"[Vis] visible_set={len(visible_set)} actors={actor_count}")
             self._plotter.render()
         except Exception:
             pass
