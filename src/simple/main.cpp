@@ -510,7 +510,7 @@ int main(int argc, char* argv[]) {
     if (isAdaptivePlanar) {
         if (isPlanar) {} // suppress unused warning
 
-        int refSegs = std::max(3, numSegments);
+        int refSegs = 10;
         auto rr1 = simple::fitRuledSegments(sw1, refSegs, sd1, dd1,
                                              nUSamples, nVSamples, 0, "Blade-1");
         auto rr2 = simple::fitRuledSegments(sw2, refSegs, sd2, dd2,
