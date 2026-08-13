@@ -77,7 +77,12 @@ PlanarResult fitPlanarSegments(const SurfaceWrapper& surf,
 
         Vec3Arr meshVerts;
         FaceArr meshFaces;
-        int gr = 8, gc = 8;
+        int gr, gc;
+        if (splitDir == ParamDir::V) {
+            gr = 24; gc = 3;
+        } else {
+            gr = 3; gc = 24;
+        }
         for (int i = 0; i <= gr; ++i) {
             double t = (double)i / gr;
             double u = uSeg0 + (uSeg1 - uSeg0) * t;
@@ -114,7 +119,8 @@ PlanarResult fitPlanarSegments(const SurfaceWrapper& surf,
 
 static PlanarSegment fitSinglePlane(const SurfaceWrapper& surf,
                                      double u0, double u1, double v0, double v1,
-                                     int nSamplesU, int nSamplesV, int index)
+                                     int nSamplesU, int nSamplesV, int index,
+                                     ParamDir splitDir)
 {
     Vec3Arr pts = samplePoints(surf, u0, u1, v0, v1, nSamplesU, nSamplesV);
     PlanarSegment seg;
@@ -149,9 +155,15 @@ static PlanarSegment fitSinglePlane(const SurfaceWrapper& surf,
     }
     double rmsErr = std::sqrt(sumSq / pts.size());
 
+    int gr, gc;
+    if (splitDir == ParamDir::V) {
+        gr = 24; gc = 3;
+    } else {
+        gr = 3; gc = 24;
+    }
+
     Vec3Arr mv;
     FaceArr mf;
-    int gr = 8, gc = 8;
     for (int i = 0; i <= gr; ++i) {
         double t = (double)i / gr;
         double u = u0 + (u1 - u0) * t;
@@ -205,14 +217,14 @@ PlanarResult fitPlanarSegmentsAdaptive(const SurfaceWrapper& surf,
     {
         if (domLen < minDomainLen || globalIdx >= maxTotalSegments) {
             PlanarSegment seg = fitSinglePlane(surf, u0, u1, v0, v1,
-                                                nSamplesU, nSamplesV, globalIdx);
+                                                nSamplesU, nSamplesV, globalIdx, splitDir);
             seg.segmentIndex = globalIdx++;
             result.segments.push_back(seg);
             return;
         }
 
         PlanarSegment seg = fitSinglePlane(surf, u0, u1, v0, v1,
-                                            nSamplesU, nSamplesV, globalIdx);
+                                            nSamplesU, nSamplesV, globalIdx, splitDir);
 
         if (seg.maxError <= target || depth <= 0) {
             seg.segmentIndex = globalIdx++;
@@ -224,8 +236,8 @@ PlanarResult fitPlanarSegmentsAdaptive(const SurfaceWrapper& surf,
             double vm = (v0 + v1) * 0.5;
             double half = domLen * 0.5;
 
-            auto segA = fitSinglePlane(surf, u0, u1, v0, vm, nSamplesU, nSamplesV, 0);
-            auto segB = fitSinglePlane(surf, u0, u1, vm, v1, nSamplesU, nSamplesV, 0);
+            auto segA = fitSinglePlane(surf, u0, u1, v0, vm, nSamplesU, nSamplesV, 0, splitDir);
+            auto segB = fitSinglePlane(surf, u0, u1, vm, v1, nSamplesU, nSamplesV, 0, splitDir);
             if (std::max(segA.maxError, segB.maxError) > seg.maxError * 0.95) {
                 seg.segmentIndex = globalIdx++;
                 result.segments.push_back(seg);
@@ -237,8 +249,8 @@ PlanarResult fitPlanarSegmentsAdaptive(const SurfaceWrapper& surf,
             double um = (u0 + u1) * 0.5;
             double half = domLen * 0.5;
 
-            auto segA = fitSinglePlane(surf, u0, um, v0, v1, nSamplesU, nSamplesV, 0);
-            auto segB = fitSinglePlane(surf, um, u1, v0, v1, nSamplesU, nSamplesV, 0);
+            auto segA = fitSinglePlane(surf, u0, um, v0, v1, nSamplesU, nSamplesV, 0, splitDir);
+            auto segB = fitSinglePlane(surf, um, u1, v0, v1, nSamplesU, nSamplesV, 0, splitDir);
             if (std::max(segA.maxError, segB.maxError) > seg.maxError * 0.95) {
                 seg.segmentIndex = globalIdx++;
                 result.segments.push_back(seg);
