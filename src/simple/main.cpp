@@ -11,6 +11,7 @@
 #include "simple/ruled_fitter.hpp"
 #include "simple/planar_fitter.hpp"
 #include "simple/grid_fitter.hpp"
+#include "simple/blend_fitter.hpp"
 #include "simple/blade_identifier.hpp"
 #include "simple/blade_splitter.hpp"
 
@@ -97,6 +98,8 @@ void printUsage() {
               << "    --nsplit-v <N>          V-direction (horizontal) splits -> rows (default: 2)\n"
               << "    --tolerance <T>         Tolerance for adaptive refinement (default: 0.1)\n"
               << "    --max-depth <N>         Max refinement steps (default: 20)\n"
+              << "    --blend                 Enable trim+blend post-pass (ruled mode only)\n"
+              << "    --fmax <F>              Max per-cell trim fraction for blend (default: 0.3)\n"
               << "    --help                  Show this help\n"
               << std::endl;
 }
@@ -107,6 +110,8 @@ int main(int argc, char* argv[]) {
     int nUSamples = 50, nVSamples = 10;
     int nSplitU = 2, nSplitV = 2, maxDepth = 20;
     double tolerance = 0.1;
+    bool doBlend = false;
+    double fMax = 0.3;
     int faceIdx1 = -1, faceIdx2 = -1;
     std::string faceOutPath;
     double uRange1Min = -1, uRange1Max = -1;
@@ -162,6 +167,8 @@ int main(int argc, char* argv[]) {
         else if (arg == "--nsplit-v" && i + 1 < argc) { nSplitV = std::stoi(argv[++i]); }
         else if (arg == "--tolerance" && i + 1 < argc) { tolerance = std::stod(argv[++i]); }
         else if (arg == "--max-depth" && i + 1 < argc) { maxDepth = std::stoi(argv[++i]); }
+        else if (arg == "--blend") { doBlend = true; }
+        else if (arg == "--fmax" && i + 1 < argc) { fMax = std::stod(argv[++i]); }
         else if (stepFile1.empty()) { stepFile1 = arg; }
         else if (stepFile2.empty()) { stepFile2 = arg; }
     }
@@ -508,6 +515,31 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    BlendResult br1, br2;
+    if (doBlend && !isPlanar) {
+        BlendConfig bcfg;
+        bcfg.fMax = fMax;
+        std::cout << "[Step 3b] Trim+blend post-pass (fMax=" << fMax << ")..." << std::endl;
+        std::vector<double> f1 = optimizeTrim(sw1, gr1, bcfg);
+        std::vector<double> f2 = optimizeTrim(sw2, gr2, bcfg);
+        br1 = buildBlend(sw1, gr1, f1, bcfg);
+        br2 = buildBlend(sw2, gr2, f2, bcfg);
+        auto printF = [](const GridResult& gr, const std::vector<double>& f) {
+            std::cout << "    trim f:";
+            for (size_t i = 0; i < gr.cells.size(); ++i)
+                std::cout << " [" << gr.cells[i].row << "," << gr.cells[i].col << "]="
+                          << std::fixed << std::setprecision(3) << f[i];
+            std::cout << std::endl;
+        };
+        printF(gr1, f1);
+        printF(gr2, f2);
+        for (const auto& br : {br1, br2}) {
+            std::cout << "  blend: totalMaxError=" << std::fixed << std::setprecision(5)
+                      << br.totalMaxError << "  totalRmsError=" << br.totalRmsError
+                      << "  strips=" << br.strips.size() << std::endl;
+        }
+    }
+
     std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
     Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
     sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
@@ -527,6 +559,12 @@ int main(int argc, char* argv[]) {
     exportGridOBJs(outDir, "blade2", gr2, isPlanar);
     exportGridLinesVTK(outDir + "/blade1_grid.vtk", sw1, gr1);
     exportGridLinesVTK(outDir + "/blade2_grid.vtk", sw2, gr2);
+
+    if (doBlend && !isPlanar) {
+        exportBlendOBJs(outDir, "blade1", br1);
+        exportBlendOBJs(outDir, "blade2", br2);
+        std::cout << "  wrote blend OBJs (trimmed cells + strips)" << std::endl;
+    }
 
     {
         std::ofstream metaOut(outDir + "/meta.json");
