@@ -119,6 +119,7 @@ class MainWindow(QMainWindow):
         self._surfaceDims = [(0, 0), (0, 0)]
         self._blendTrim = [[], []]
         self._blendStrips = [[], []]
+        self._blendCorners = [[], []]
         self._currentVersion = 0
         self._mode = "ruled"
         self._single_file_mode = False
@@ -974,6 +975,7 @@ class MainWindow(QMainWindow):
         self._surfaceDims = [(0, 0), (0, 0)]
         self._blendTrim = [[], []]
         self._blendStrips = [[], []]
+        self._blendCorners = [[], []]
         self._clear_3d()
         self._console.clear()
 
@@ -1110,7 +1112,8 @@ class MainWindow(QMainWindow):
 
             trims = self._blendTrim[bi] if bi < len(self._blendTrim) else []
             strips = self._blendStrips[bi] if bi < len(self._blendStrips) else []
-            if trims or strips:
+            corners = self._blendCorners[bi] if bi < len(self._blendCorners) else []
+            if trims or strips or corners:
                 blend_node = QTreeWidgetItem(["Blend"])
                 blend_node.setFlags(blend_node.flags() | Qt.ItemIsUserCheckable)
                 blend_node.setCheckState(0, Qt.Checked)
@@ -1129,6 +1132,13 @@ class MainWindow(QMainWindow):
                     it.setCheckState(0, Qt.Checked)
                     it.setData(1, Qt.UserRole, s["name"])
                     it.setData(2, Qt.UserRole, "strip")
+                    blend_node.addChild(it)
+                for k in corners:
+                    it = QTreeWidgetItem([f"Corner ({k['r']},{k['c']})"])
+                    it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                    it.setCheckState(0, Qt.Checked)
+                    it.setData(1, Qt.UserRole, k["name"])
+                    it.setData(2, Qt.UserRole, "corner")
                     blend_node.addChild(it)
 
     def _load_meta(self, meta_path):
@@ -1175,6 +1185,7 @@ class MainWindow(QMainWindow):
         ruled_files = []
         trim_files = []
         strip_files = []
+        corner_files = []
         mesh_files = []
         grid_files = []
         for fn in sorted(os.listdir(out_dir)):
@@ -1185,6 +1196,8 @@ class MainWindow(QMainWindow):
                     trim_files.append(fn)
                 elif '_strip' in fn:
                     strip_files.append(fn)
+                elif '_corner_' in fn:
+                    corner_files.append(fn)
                 else:
                     ruled_files.append(fn)
             elif fn.endswith('.vtk'):
@@ -1192,6 +1205,7 @@ class MainWindow(QMainWindow):
 
         self._blendTrim = [[], []]
         self._blendStrips = [[], []]
+        self._blendCorners = [[], []]
 
         for fn in ruled_files:
             path = os.path.normpath(os.path.join(out_dir, fn))
@@ -1222,7 +1236,17 @@ class MainWindow(QMainWindow):
             self._blendStrips[bi].append({"name": name, "idx": idx})
             self._load_obj(path, name, "strip")
 
-        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)} grid_files={len(grid_files)} trim_files={len(trim_files)} strip_files={len(strip_files)}")
+        for fn in corner_files:
+            path = os.path.normpath(os.path.join(out_dir, fn))
+            name = fn.replace('.obj', '')
+            bi = 0 if "blade1" in name else 1
+            m = re.search(r'_corner_(\d+)_(\d+)$', name)
+            cr = int(m.group(1)) if m else 0
+            cc = int(m.group(2)) if m else 0
+            self._blendCorners[bi].append({"name": name, "r": cr, "c": cc})
+            self._load_obj(path, name, "corner")
+
+        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)} grid_files={len(grid_files)} trim_files={len(trim_files)} strip_files={len(strip_files)} corner_files={len(corner_files)}")
 
         mesh_paths = [os.path.normpath(os.path.join(out_dir, fn)) for fn in mesh_files]
         if len(mesh_paths) == 2:
@@ -1300,6 +1324,11 @@ class MainWindow(QMainWindow):
                     m, name=name, color=[0.95, 0.55, 0.1], opacity=0.9,
                     show_edges=True, edge_color='darkorange')
                 self._log(f"  Loaded strip: {name}")
+            elif tag == "corner":
+                self._plotter.add_mesh(
+                    m, name=name, color=[0.6, 0.4, 0.95], opacity=0.9,
+                    show_edges=True, edge_color='purple')
+                self._log(f"  Loaded corner: {name}")
 
         except Exception as e:
             self._log(f"  Load error {name}: {e}")
@@ -1331,6 +1360,8 @@ class MainWindow(QMainWindow):
                 elif tag == "trim":
                     visible_set.add(data_name)
                 elif tag == "strip":
+                    visible_set.add(data_name)
+                elif tag == "corner":
                     visible_set.add(data_name)
             for i in range(node.childCount()):
                 walk(node.child(i), vis)

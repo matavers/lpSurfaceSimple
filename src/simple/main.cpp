@@ -536,7 +536,8 @@ int main(int argc, char* argv[]) {
         for (const auto& br : {br1, br2}) {
             std::cout << "  blend: totalMaxError=" << std::fixed << std::setprecision(5)
                       << br.totalMaxError << "  totalRmsError=" << br.totalRmsError
-                      << "  strips=" << br.strips.size() << std::endl;
+                      << "  strips=" << br.strips.size()
+                      << "  corners=" << br.corners.size() << std::endl;
         }
     }
 

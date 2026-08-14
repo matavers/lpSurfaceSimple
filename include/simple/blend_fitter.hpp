@@ -22,6 +22,16 @@ struct BlendConfig {
 struct BlendStrip {
     int r = 0, c = 0;
     bool isVertical = true;   // true=竖直缝(u=const)，false=水平缝(v=const)
+    bool valid = true;        // false=两侧 f 均为 0，退化零宽，跳过
+    Vec3Arr meshVerts;
+    FaceArr meshFaces;
+    double maxError = 0.0;
+    double rmsError = 0.0;
+};
+
+// 角点过渡 patch（内部网格顶点处，双线性 Coons）
+struct BlendCorner {
+    int r = 0, c = 0;         // 顶点 (c,r)
     Vec3Arr meshVerts;
     FaceArr meshFaces;
     double maxError = 0.0;
@@ -42,6 +52,7 @@ struct TrimmedCell {
 struct BlendResult {
     std::vector<TrimmedCell> cells;
     std::vector<BlendStrip> strips;
+    std::vector<BlendCorner> corners;
     double totalMaxError = 0.0;
     double totalRmsError = 0.0;
 };

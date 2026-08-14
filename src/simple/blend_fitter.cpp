@@ -157,9 +157,12 @@ BlendStrip buildVerticalStrip(const SurfaceWrapper& surf, const GridResult& gr,
 
     double uL = tL.u1;   // 左格右边界
     double uR = tR.u0;   // 右格左边界
-    double gapU = std::max(uR - uL, 1e-12);
-    double vMin = gr.vEdges[r];
-    double vMax = gr.vEdges[r + 1];
+    double gapRaw = uR - uL;
+    if (gapRaw < 1e-9) { s.valid = false; return s; }   // 两侧 f=0，退化
+    double gapU = gapRaw;
+    double vMin = std::max(tL.v0, tR.v0);   // 缩到两侧 trimmed v 范围交集
+    double vMax = std::min(tL.v1, tR.v1);
+    if (vMax - vMin < 1e-12) { s.valid = false; return s; }
 
     int nA = cfg.nAlong, nB = cfg.nAcross;
     s.meshVerts.resize(nA * nB);
@@ -212,9 +215,12 @@ BlendStrip buildHorizontalStrip(const SurfaceWrapper& surf, const GridResult& gr
 
     double vT = tT.v1;   // 上格下边界
     double vB = tB.v0;   // 下格上边界
-    double gapV = std::max(vB - vT, 1e-12);
-    double uMin = gr.uEdges[c];
-    double uMax = gr.uEdges[c + 1];
+    double gapRaw = vB - vT;
+    if (gapRaw < 1e-9) { s.valid = false; return s; }   // 两侧 f=0，退化
+    double gapV = gapRaw;
+    double uMin = std::max(tT.u0, tB.u0);   // 缩到两侧 trimmed u 范围交集
+    double uMax = std::min(tT.u1, tB.u1);
+    if (uMax - uMin < 1e-12) { s.valid = false; return s; }
 
     int nA = cfg.nAlong, nB = cfg.nAcross;
     s.meshVerts.resize(nA * nB);
@@ -251,6 +257,79 @@ BlendStrip buildHorizontalStrip(const SurfaceWrapper& surf, const GridResult& gr
     s.maxError = e.maxError;
     s.rmsError = e.rmsError;
     return s;
+}
+
+// 角点过渡 patch：内部网格顶点 (c,r) 处的双线性 Coons，消除条端交叉重合
+BlendCorner buildCornerPatch(const SurfaceWrapper& surf, const GridResult& gr,
+                             const std::vector<double>& f,
+                             int r, int c, const BlendConfig& cfg) {
+    BlendCorner cp;
+    cp.r = r; cp.c = c;
+
+    const GridCell& TL = gr.cells[(r - 1) * gr.nCols + (c - 1)];
+    const GridCell& TR = gr.cells[(r - 1) * gr.nCols + c];
+    const GridCell& BL = gr.cells[r * gr.nCols + (c - 1)];
+    const GridCell& BR = gr.cells[r * gr.nCols + c];
+    TrimmedBounds tTL = trimOf(gr, TL, f[(r - 1) * gr.nCols + (c - 1)]);
+    TrimmedBounds tTR = trimOf(gr, TR, f[(r - 1) * gr.nCols + c]);
+    TrimmedBounds tBL = trimOf(gr, BL, f[r * gr.nCols + (c - 1)]);
+    TrimmedBounds tBR = trimOf(gr, BR, f[r * gr.nCols + c]);
+
+    double uL = std::max(tTL.u1, tBL.u1);
+    double uR = std::min(tTR.u0, tBR.u0);
+    double vB = std::max(tTL.v1, tTR.v1);
+    double vT = std::min(tBL.v0, tBR.v0);
+    if (uR - uL < 1e-12 || vT - vB < 1e-12) return cp;   // 退化角点
+
+    int n = cfg.nMeshRes + 1;
+    cp.meshVerts.resize(n * n);
+
+    // 用原曲面 S 采样 4 条边界曲线，做双线性 Coons（近似 S，误差小）
+    Vec3Arr top(n), bottom(n), left(n), right(n);
+    for (int k = 0; k < n; ++k) {
+        double s = (double)k / (n - 1);
+        double u = uL + s * (uR - uL);
+        top[k]    = surf.evaluate(u, vB);
+        bottom[k] = surf.evaluate(u, vT);
+    }
+    for (int k = 0; k < n; ++k) {
+        double t = (double)k / (n - 1);
+        double v = vB + t * (vT - vB);
+        left[k]  = surf.evaluate(uL, v);
+        right[k] = surf.evaluate(uR, v);
+    }
+    Vec3 C00 = surf.evaluate(uL, vB);
+    Vec3 C10 = surf.evaluate(uR, vB);
+    Vec3 C01 = surf.evaluate(uL, vT);
+    Vec3 C11 = surf.evaluate(uR, vT);
+
+    ErrorStat e;
+    for (int i = 0; i < n; ++i) {
+        double s = (double)i / (n - 1);
+        for (int j = 0; j < n; ++j) {
+            double t = (double)j / (n - 1);
+            Vec3 P = (1 - t) * top[i] + t * bottom[i]
+                   + (1 - s) * left[j] + s * right[j]
+                   - (1 - s) * (1 - t) * C00 - s * (1 - t) * C10
+                   - (1 - s) * t * C01 - s * t * C11;
+            cp.meshVerts[i * n + j] = P;
+            double u = uL + s * (uR - uL);
+            double v = vB + t * (vT - vB);
+            Vec3 S = surf.evaluate(u, v);
+            addSample(e, (P - S).norm());
+        }
+    }
+    for (int i = 0; i < n - 1; ++i)
+        for (int j = 0; j < n - 1; ++j) {
+            int a = i * n + j;
+            cp.meshFaces.push_back({a, a + 1, a + n});
+            cp.meshFaces.push_back({a + 1, a + n + 1, a + n});
+        }
+
+    finalize(e);
+    cp.maxError = e.maxError;
+    cp.rmsError = e.rmsError;
+    return cp;
 }
 
 double stripErrorMax(const BlendStrip& s, bool useMaxError) {
@@ -292,6 +371,7 @@ BlendResult buildBlend(const SurfaceWrapper& surf, const GridResult& gr,
     for (int r = 0; r < gr.nRows; ++r)
         for (int c = 1; c < gr.nCols; ++c) {
             BlendStrip s = buildVerticalStrip(surf, gr, f, r, c, cfg);
+            if (!s.valid) continue;
             totalSumSq += s.rmsError * s.rmsError * (int)s.meshVerts.size();
             totalCnt += (int)s.meshVerts.size();
             br.strips.push_back(std::move(s));
@@ -299,14 +379,25 @@ BlendResult buildBlend(const SurfaceWrapper& surf, const GridResult& gr,
     for (int r = 1; r < gr.nRows; ++r)
         for (int c = 0; c < gr.nCols; ++c) {
             BlendStrip s = buildHorizontalStrip(surf, gr, f, r, c, cfg);
+            if (!s.valid) continue;
             totalSumSq += s.rmsError * s.rmsError * (int)s.meshVerts.size();
             totalCnt += (int)s.meshVerts.size();
             br.strips.push_back(std::move(s));
         }
 
+    for (int r = 1; r < gr.nRows; ++r)
+        for (int c = 1; c < gr.nCols; ++c) {
+            BlendCorner cp = buildCornerPatch(surf, gr, f, r, c, cfg);
+            if (cp.meshVerts.empty()) continue;
+            totalSumSq += cp.rmsError * cp.rmsError * (int)cp.meshVerts.size();
+            totalCnt += (int)cp.meshVerts.size();
+            br.corners.push_back(std::move(cp));
+        }
+
     br.totalMaxError = 0.0;
     for (const auto& tc : br.cells) br.totalMaxError = std::max(br.totalMaxError, tc.maxError);
     for (const auto& s : br.strips) br.totalMaxError = std::max(br.totalMaxError, s.maxError);
+    for (const auto& cp : br.corners) br.totalMaxError = std::max(br.totalMaxError, cp.maxError);
     br.totalRmsError = totalCnt ? std::sqrt(totalSumSq / totalCnt) : 0.0;
     return br;
 }
@@ -364,6 +455,11 @@ bool exportBlendOBJs(const std::string& outDir, const std::string& prefix,
         const auto& s = br.strips[si];
         std::string op = outDir + "/" + prefix + "_strip" + std::to_string(si) + ".obj";
         exportOBJ(op, s.meshVerts, s.meshFaces);
+    }
+    for (const auto& cp : br.corners) {
+        std::string op = outDir + "/" + prefix + "_corner_" + std::to_string(cp.r)
+                         + "_" + std::to_string(cp.c) + ".obj";
+        exportOBJ(op, cp.meshVerts, cp.meshFaces);
     }
     return true;
 }
