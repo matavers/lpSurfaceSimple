@@ -112,8 +112,13 @@ class MainWindow(QMainWindow):
         self._nSplitV = 2
         self._tolerance = 0.1
         self._maxDepth = 20
+        self._doBlend = False
+        self._fMax = 0.3
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
+        self._surfaceDims = [(0, 0), (0, 0)]
+        self._blendTrim = [[], []]
+        self._blendStrips = [[], []]
         self._currentVersion = 0
         self._mode = "ruled"
         self._single_file_mode = False
@@ -309,6 +314,17 @@ class MainWindow(QMainWindow):
         self._spn_depth.setValue(self._maxDepth)
         form.addRow("Max Depth:", self._spn_depth)
 
+        self._chk_blend = QCheckBox("Trim+Blend post-pass")
+        self._chk_blend.setChecked(self._doBlend)
+        form.addRow(self._chk_blend)
+
+        self._spn_fmax = QDoubleSpinBox()
+        self._spn_fmax.setRange(0.0, 0.9)
+        self._spn_fmax.setDecimals(2)
+        self._spn_fmax.setSingleStep(0.05)
+        self._spn_fmax.setValue(self._fMax)
+        form.addRow("Blend fMax:", self._spn_fmax)
+
         bar = QHBoxLayout()
         self._btn_run = QPushButton("Run")
         self._btn_run.setStyleSheet(
@@ -377,6 +393,8 @@ class MainWindow(QMainWindow):
             self._nSplitV = cfg.get("nSplitV", 2)
             self._tolerance = cfg.get("tolerance", 0.1)
             self._maxDepth = cfg.get("maxDepth", 20)
+            self._doBlend = cfg.get("doBlend", False)
+            self._fMax = cfg.get("fMax", 0.3)
             self._txt_file1.setText(self._file1)
             self._txt_file2.setText(self._file2)
             self._txt_outdir.setText(self._out_dir)
@@ -386,6 +404,8 @@ class MainWindow(QMainWindow):
             self._spn_split_v.setValue(self._nSplitV)
             self._spn_tol.setValue(self._tolerance)
             self._spn_depth.setValue(self._maxDepth)
+            self._chk_blend.setChecked(self._doBlend)
+            self._spn_fmax.setValue(self._fMax)
             self._cmb_mode.setCurrentIndex(0 if cfg.get("mode", "ruled") == "ruled" else 1)
         except Exception:
             pass
@@ -402,6 +422,8 @@ class MainWindow(QMainWindow):
             "nSplitV": self._spn_split_v.value(),
             "tolerance": self._spn_tol.value(),
             "maxDepth": self._spn_depth.value(),
+            "doBlend": self._chk_blend.isChecked(),
+            "fMax": self._spn_fmax.value(),
         }
         try:
             with open(CONFIG_PATH, 'w') as f:
@@ -925,6 +947,8 @@ class MainWindow(QMainWindow):
         self._nSplitV = self._spn_split_v.value()
         self._tolerance = self._spn_tol.value()
         self._maxDepth = self._spn_depth.value()
+        self._doBlend = self._chk_blend.isChecked()
+        self._fMax = self._spn_fmax.value()
 
         if not os.path.exists(self._file1):
             QMessageBox.warning(self, "Error", "File not found.")
@@ -947,6 +971,9 @@ class MainWindow(QMainWindow):
         self._loaded_files.clear()
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
+        self._surfaceDims = [(0, 0), (0, 0)]
+        self._blendTrim = [[], []]
+        self._blendStrips = [[], []]
         self._clear_3d()
         self._console.clear()
 
@@ -972,6 +999,8 @@ class MainWindow(QMainWindow):
             f'--tolerance {self._tolerance} '
             f'--max-depth {self._maxDepth}'
         )
+        if self._doBlend and self._mode == "ruled":
+            cmd += f' --blend --fmax {self._fMax}'
         if self._single_file_mode:
             f1 = self._cmb_face1.currentData()
             f2 = self._cmb_face2.currentData()
@@ -1079,6 +1108,29 @@ class MainWindow(QMainWindow):
                 cell_item.setData(2, Qt.UserRole, "ruled")
                 ver_node.addChild(cell_item)
 
+            trims = self._blendTrim[bi] if bi < len(self._blendTrim) else []
+            strips = self._blendStrips[bi] if bi < len(self._blendStrips) else []
+            if trims or strips:
+                blend_node = QTreeWidgetItem(["Blend"])
+                blend_node.setFlags(blend_node.flags() | Qt.ItemIsUserCheckable)
+                blend_node.setCheckState(0, Qt.Checked)
+                blend_node.setExpanded(True)
+                bnode.addChild(blend_node)
+                for t in trims:
+                    it = QTreeWidgetItem([f"Trim ({t['row']},{t['col']})"])
+                    it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                    it.setCheckState(0, Qt.Checked)
+                    it.setData(1, Qt.UserRole, t["name"])
+                    it.setData(2, Qt.UserRole, "trim")
+                    blend_node.addChild(it)
+                for s in strips:
+                    it = QTreeWidgetItem([f"Strip {s['idx']}"])
+                    it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+                    it.setCheckState(0, Qt.Checked)
+                    it.setData(1, Qt.UserRole, s["name"])
+                    it.setData(2, Qt.UserRole, "strip")
+                    blend_node.addChild(it)
+
     def _load_meta(self, meta_path):
         meta = None
         for attempt in range(5):
@@ -1103,11 +1155,13 @@ class MainWindow(QMainWindow):
             self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
             self._log(f"  Mode: {self._mode}")
         self._cellMeta = [[], []]
+        self._surfaceDims = [(0, 0), (0, 0)]
         for i, s in enumerate(meta.get("surfaces", [])):
             cells = s.get('cells', [])
             if i < 2:
                 self._surfaceCellCounts[i] = len(cells)
                 self._cellMeta[i] = cells
+                self._surfaceDims[i] = (s.get('nRows', 0), s.get('nCols', 0))
             self._log(f"  {s['name']}: {len(cells)} cells")
 
         self._load_all_objs()
@@ -1119,16 +1173,25 @@ class MainWindow(QMainWindow):
             self._plotter.disable_render = True
 
         ruled_files = []
+        trim_files = []
+        strip_files = []
         mesh_files = []
         grid_files = []
         for fn in sorted(os.listdir(out_dir)):
             if fn.endswith('.obj'):
                 if fn.endswith('_mesh.obj'):
                     mesh_files.append(fn)
+                elif '_trim_' in fn:
+                    trim_files.append(fn)
+                elif '_strip' in fn:
+                    strip_files.append(fn)
                 else:
                     ruled_files.append(fn)
             elif fn.endswith('.vtk'):
                 grid_files.append(fn)
+
+        self._blendTrim = [[], []]
+        self._blendStrips = [[], []]
 
         for fn in ruled_files:
             path = os.path.normpath(os.path.join(out_dir, fn))
@@ -1140,7 +1203,26 @@ class MainWindow(QMainWindow):
             name = fn.replace('.vtk', '')
             self._load_obj(path, name, "grid")
 
-        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)} grid_files={len(grid_files)}")
+        for fn in trim_files:
+            path = os.path.normpath(os.path.join(out_dir, fn))
+            name = fn.replace('.obj', '')
+            bi = 0 if "blade1" in name else 1
+            m = re.search(r'_trim_(\d+)_(\d+)$', name)
+            row = int(m.group(1)) if m else 0
+            col = int(m.group(2)) if m else 0
+            self._blendTrim[bi].append({"name": name, "row": row, "col": col})
+            self._load_obj(path, name, "trim")
+
+        for fn in strip_files:
+            path = os.path.normpath(os.path.join(out_dir, fn))
+            name = fn.replace('.obj', '')
+            bi = 0 if "blade1" in name else 1
+            m = re.search(r'_strip(\d+)$', name)
+            idx = int(m.group(1)) if m else 0
+            self._blendStrips[bi].append({"name": name, "idx": idx})
+            self._load_obj(path, name, "strip")
+
+        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)} grid_files={len(grid_files)} trim_files={len(trim_files)} strip_files={len(strip_files)}")
 
         mesh_paths = [os.path.normpath(os.path.join(out_dir, fn)) for fn in mesh_files]
         if len(mesh_paths) == 2:
@@ -1199,6 +1281,25 @@ class MainWindow(QMainWindow):
                 except TypeError:
                     self._plotter.add_mesh(m, name=name, color=[0.1, 0.1, 0.1])
                 self._log(f"  Loaded grid: {name}")
+            elif tag == "trim":
+                m = re.search(r'_trim_(\d+)_(\d+)$', name)
+                row = int(m.group(1)) if m else 0
+                col = int(m.group(2)) if m else 0
+                nCols = self._surfaceDims[0][1] if "blade1" in name else self._surfaceDims[1][1]
+                flat = row * max(1, nCols) + col
+                total = self._surfaceCellCounts[0] if "blade1" in name else self._surfaceCellCounts[1]
+                import colorsys
+                hue = (flat / max(1, total)) % 1.0
+                r, g, b = colorsys.hsv_to_rgb(hue, 0.6, 0.95)
+                self._plotter.add_mesh(
+                    m, name=name, color=[r, g, b], opacity=0.85,
+                    show_edges=True, edge_color='dimgray')
+                self._log(f"  Loaded trimmed cell: {name}")
+            elif tag == "strip":
+                self._plotter.add_mesh(
+                    m, name=name, color=[0.95, 0.55, 0.1], opacity=0.9,
+                    show_edges=True, edge_color='darkorange')
+                self._log(f"  Loaded strip: {name}")
 
         except Exception as e:
             self._log(f"  Load error {name}: {e}")
@@ -1226,6 +1327,10 @@ class MainWindow(QMainWindow):
                 elif tag == "ruled":
                     visible_set.add(data_name)
                 elif tag == "grid":
+                    visible_set.add(data_name)
+                elif tag == "trim":
+                    visible_set.add(data_name)
+                elif tag == "strip":
                     visible_set.add(data_name)
             for i in range(node.childCount()):
                 walk(node.child(i), vis)
