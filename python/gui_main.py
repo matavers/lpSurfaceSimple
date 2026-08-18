@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
         self._mesh_shared = False
         self._preview_colors = {}
         self._preview_face_ids = set()
+        self._diag_result = None
 
         self._proc = None
         self._loaded_files = set()
@@ -325,6 +326,20 @@ class MainWindow(QMainWindow):
         self._spn_fmax.setSingleStep(0.05)
         self._spn_fmax.setValue(self._fMax)
         form.addRow("Blend fMax:", self._spn_fmax)
+
+        diag_row = QHBoxLayout()
+        self._btn_diag = QPushButton("Diagnose")
+        self._btn_diag.setToolTip(
+            "Post-processing diagnostics on exported OBJs (no re-run)")
+        self._btn_diag.clicked.connect(self._on_diagnose)
+        diag_row.addWidget(self._btn_diag)
+        self._cmb_diag = QComboBox()
+        self._cmb_diag.addItems(
+            ["(no overlay)", "Fit error", "Normal deviation", "Coverage gap"])
+        self._cmb_diag.currentIndexChanged.connect(self._on_diag_overlay_changed)
+        diag_row.addWidget(self._cmb_diag)
+        diag_row.addStretch()
+        form.addRow("Diagnostics:", diag_row)
 
         bar = QHBoxLayout()
         self._btn_run = QPushButton("Run")
@@ -1380,8 +1395,11 @@ class MainWindow(QMainWindow):
             actor_count = 0
             for a in self._plotter.renderer._actors:
                 if hasattr(a, '_name'):
+                    name = a._name
+                    if name.startswith('diag_') or name.startswith('ScalarBars'):
+                        continue
                     actor_count += 1
-                    a.SetVisibility(a._name in visible_set)
+                    a.SetVisibility(name in visible_set)
             self._log(f"[Vis] visible_set={len(visible_set)} actors={actor_count}")
             self._plotter.render()
         except Exception:
@@ -1391,6 +1409,7 @@ class MainWindow(QMainWindow):
         self._preview_colors = {}
         self._preview_face_ids = set()
         self._last_picked_fid = None
+        self._diag_result = None
         self._split_items = []
         self._split_list.clear()
         self._btn_identify.setEnabled(False)
@@ -1408,6 +1427,82 @@ class MainWindow(QMainWindow):
             self._log("[Done] Algorithm finished successfully.")
         else:
             self._log(f"[Error] Algorithm failed with code {code}.")
+
+    def _on_diagnose(self):
+        if not HAS_PYVISTA:
+            self._log("[Diag] pyvista not available; cannot render diagnostics.")
+            return
+        out_dir = self._txt_outdir.text()
+        if not os.path.isdir(out_dir):
+            self._log(f"[Diag] Output dir not found: {out_dir}")
+            return
+        try:
+            from diagnostic import run_diagnostic, report_text, write_report
+        except Exception as e:
+            self._log(f"[Diag] import diagnostic failed: {e}")
+            return
+
+        self._log("[Diag] Running objective diagnostics on exported OBJs...")
+        try:
+            result = run_diagnostic(out_dir)
+        except Exception as e:
+            self._log(f"[Diag] failed: {e}")
+            return
+
+        try:
+            path = write_report(result, out_dir)
+            self._log(f"[Diag] wrote {path}")
+        except Exception as e:
+            self._log(f"[Diag] report write failed: {e}")
+
+        for line in report_text(result).split("\n"):
+            self._log(f"[Diag] {line}")
+
+        self._diag_result = result
+        self._render_diag_overlay()
+
+    def _on_diag_overlay_changed(self):
+        self._render_diag_overlay()
+
+    def _render_diag_overlay(self):
+        if not HAS_PYVISTA:
+            return
+        self._remove_diag_actors()
+        if not getattr(self, '_diag_result', None):
+            return
+        idx = self._cmb_diag.currentIndex()
+        if idx <= 0:
+            return
+        kind = ('fit', 'normal', 'coverage')[idx - 1]
+        spec = {
+            'fit':      ('fit_meshes', 'fit_error', 'jet',    'fit error (mm)'),
+            'normal':   ('normal_dev_meshes', 'normal_dev', 'jet', 'normal dev (deg)'),
+            'coverage': ('coverage_meshes', 'coverage', 'turbo', 'coverage gap (mm)'),
+        }[kind]
+        attr, scalar, cmap, title = spec
+        meshes = getattr(self._diag_result, attr, {})
+        if not meshes:
+            self._log(f"[Diag] no '{kind}' data available.")
+            return
+        for bi, mesh in meshes.items():
+            name = f"diag_{kind}_{bi}"
+            self._plotter.add_mesh(
+                mesh, name=name, scalars=scalar, cmap=cmap,
+                opacity=0.92, show_edges=False, smooth_shading=False,
+                scalar_bar_args={'title': title, 'color': 'black'})
+        self._plotter.render()
+
+    def _remove_diag_actors(self):
+        try:
+            self._plotter.remove_scalar_bar()
+        except Exception:
+            pass
+        for name in ('diag_fit_0', 'diag_fit_1', 'diag_normal_0',
+                     'diag_normal_1', 'diag_coverage_0', 'diag_coverage_1'):
+            try:
+                self._plotter.remove_actor(name)
+            except Exception:
+                pass
 
     def _stop(self):
         if self._proc:
