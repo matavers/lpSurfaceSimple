@@ -1321,9 +1321,9 @@ class MainWindow(QMainWindow):
                     self._plotter.add_mesh(m, name=name, color=[0.1, 0.1, 0.1])
                 self._log(f"  Loaded grid: {name}")
             elif tag == "trim":
-                m = re.search(r'_trim_(\d+)_(\d+)$', name)
-                row = int(m.group(1)) if m else 0
-                col = int(m.group(2)) if m else 0
+                mt = re.search(r'_trim_(\d+)_(\d+)$', name)
+                row = int(mt.group(1)) if mt else 0
+                col = int(mt.group(2)) if mt else 0
                 nCols = self._surfaceDims[0][1] if "blade1" in name else self._surfaceDims[1][1]
                 flat = row * max(1, nCols) + col
                 total = self._surfaceCellCounts[0] if "blade1" in name else self._surfaceCellCounts[1]
