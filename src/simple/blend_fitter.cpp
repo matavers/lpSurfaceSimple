@@ -87,6 +87,38 @@ void evalRuledCell(const GridCell& cell, double u, double v,
     }
 }
 
+// 直纹面扭矢 ∂²P/∂u∂v：∂/∂v[∂P/∂u]（或 ∂/∂u[∂P/∂v]）。
+// 直纹面 P 对母线方向线性、对准线方向分段线性，故扭矢为
+// 两准线切线之差 / 母线跨度，用于角点面片的完全 G1。
+Vec3 evalRuledCellTwist(const GridCell& cell, double u, double v) {
+    const Vec3Arr& c0 = cell.ruled.curveC0Samples;
+    const Vec3Arr& c1 = cell.ruled.curveC1Samples;
+    int n = static_cast<int>(c0.size());
+    if (n < 2) return Vec3(0, 0, 0);
+
+    if (cell.fitDir == ParamDir::V) {
+        // 准线沿 u，母线沿 v：∂²P/∂u∂v = (C1' - C0') / (v1 - v0)
+        double uN = clamp((u - cell.u0) / (cell.u1 - cell.u0), 0.0, 1.0);
+        double idx = uN * (n - 1);
+        int i0 = (int)std::floor(idx);
+        int i1 = std::min(i0 + 1, n - 1);
+        double du = (cell.u1 - cell.u0) / (n - 1);
+        Vec3 C0d = (c0[i1] - c0[i0]) / du;
+        Vec3 C1d = (c1[i1] - c1[i0]) / du;
+        return (C1d - C0d) / (cell.v1 - cell.v0);
+    } else {
+        // 准线沿 v，母线沿 u：∂²P/∂u∂v = (C1' - C0') / (u1 - u0)
+        double vN = clamp((v - cell.v0) / (cell.v1 - cell.v0), 0.0, 1.0);
+        double idx = vN * (n - 1);
+        int i0 = (int)std::floor(idx);
+        int i1 = std::min(i0 + 1, n - 1);
+        double dv = (cell.v1 - cell.v0) / (n - 1);
+        Vec3 C0d = (c0[i1] - c0[i0]) / dv;
+        Vec3 C1d = (c1[i1] - c1[i0]) / dv;
+        return (C1d - C0d) / (cell.u1 - cell.u0);
+    }
+}
+
 // 每格只内缩「内部边」，外边界不缩，保证复合面仍覆盖整个参数域
 struct TrimmedBounds { double u0, u1, v0, v1; };
 
@@ -288,20 +320,25 @@ BlendCorner buildCornerPatch(const SurfaceWrapper& surf, const GridResult& gr,
     cp.meshVerts.resize(n * n);
 
     // 双三次 Hermite (Ferguson) 角点面片：
-    // 插值 4 角点位置 + 8 个一阶偏导（扭矢置 0），四条边即为条带端边的
-    // Hermite 曲线（G0 严丝合缝），跨界切线由角点偏导插值（角点处严格、
-    // 沿边近似 G1）。
+    // 插值 4 角点位置 + 8 个一阶偏导 + 4 个扭矢（从 cell 直纹面差分估计），
+    // 四条边即条带端边的 Hermite 曲线（G0 严丝合缝），跨界切线在角点处严格、
+    // 沿边与条带完全 G1。
     double du = uR - uL, dv = vT - vB;
 
     Vec3 P00, P10, P01, P11;                 // 角点位置 (s,t)=(i,j)
     Vec3 Su00, Su10, Su01, Su11;             // ∂/∂s = ∂/∂u * du
     Vec3 Sv00, Sv10, Sv01, Sv11;             // ∂/∂t = ∂/∂v * dv
+    Vec3 W00, W10, W01, W11;                 // ∂²/∂s∂t = ∂²P/∂u∂v * du*dv
     {
         Vec3 dU, dV;
-        evalRuledCell(TL, uL, vB, P00, dU, dV); Su00 = dU * du; Sv00 = dV * dv;
-        evalRuledCell(TR, uR, vB, P10, dU, dV); Su10 = dU * du; Sv10 = dV * dv;
-        evalRuledCell(BL, uL, vT, P01, dU, dV); Su01 = dU * du; Sv01 = dV * dv;
-        evalRuledCell(BR, uR, vT, P11, dU, dV); Su11 = dU * du; Sv11 = dV * dv;
+        evalRuledCell(TL, uL, vB, P00, dU, dV);
+        Su00 = dU * du; Sv00 = dV * dv; W00 = evalRuledCellTwist(TL, uL, vB) * (du * dv);
+        evalRuledCell(TR, uR, vB, P10, dU, dV);
+        Su10 = dU * du; Sv10 = dV * dv; W10 = evalRuledCellTwist(TR, uR, vB) * (du * dv);
+        evalRuledCell(BL, uL, vT, P01, dU, dV);
+        Su01 = dU * du; Sv01 = dV * dv; W01 = evalRuledCellTwist(BL, uL, vT) * (du * dv);
+        evalRuledCell(BR, uR, vT, P11, dU, dV);
+        Su11 = dU * du; Sv11 = dV * dv; W11 = evalRuledCellTwist(BR, uR, vT) * (du * dv);
     }
 
     ErrorStat e;
@@ -312,8 +349,8 @@ BlendCorner buildCornerPatch(const SurfaceWrapper& surf, const GridResult& gr,
             Vec3 P =
                   h00(s) * (h00(t) * P00 + h10(t) * P01 + h01(t) * Sv00 + h11(t) * Sv01)
                 + h10(s) * (h00(t) * P10 + h10(t) * P11 + h01(t) * Sv10 + h11(t) * Sv11)
-                + h01(s) * (h00(t) * Su00 + h10(t) * Su01)
-                + h11(s) * (h00(t) * Su10 + h10(t) * Su11);
+                + h01(s) * (h00(t) * Su00 + h10(t) * Su01 + h01(t) * W00 + h11(t) * W01)
+                + h11(s) * (h00(t) * Su10 + h10(t) * Su11 + h01(t) * W10 + h11(t) * W11);
             cp.meshVerts[i * n + j] = P;
             double u = uL + s * (uR - uL);
             double v = vB + t * (vT - vB);
