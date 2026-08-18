@@ -544,11 +544,7 @@ int main(int argc, char* argv[]) {
     std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
     Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
     sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
-    if (!(faceIdx1 >= 0 && faceIdx2 >= 0 && faceIdx1 == faceIdx2)) {
-        sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
-    } else {
-        mv2 = mv1; mf2 = mf1;
-    }
+    sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
 
     std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
     exportOBJ(outDir + "/blade1_mesh.obj", mv1, mf1);
