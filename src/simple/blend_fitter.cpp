@@ -259,7 +259,10 @@ BlendStrip buildHorizontalStrip(const SurfaceWrapper& surf, const GridResult& gr
     return s;
 }
 
-// 角点过渡 patch：内部网格顶点 (c,r) 处的双线性 Coons，消除条端交叉重合
+// 角点过渡 patch：内部网格顶点 (c,r) 处的双三次 Hermite (Ferguson) 面片。
+// 插值 4 角点位置 + 8 个一阶偏导（扭矢置 0），与周围 4 条带同源：
+// 四条边即条带端边的 Hermite 曲线（G0 严丝合缝），跨界切线在角点处严格、
+// 沿边近似 G1。
 BlendCorner buildCornerPatch(const SurfaceWrapper& surf, const GridResult& gr,
                              const std::vector<double>& f,
                              int r, int c, const BlendConfig& cfg) {
@@ -284,34 +287,33 @@ BlendCorner buildCornerPatch(const SurfaceWrapper& surf, const GridResult& gr,
     int n = cfg.nMeshRes + 1;
     cp.meshVerts.resize(n * n);
 
-    // 用原曲面 S 采样 4 条边界曲线，做双线性 Coons（近似 S，误差小）
-    Vec3Arr top(n), bottom(n), left(n), right(n);
-    for (int k = 0; k < n; ++k) {
-        double s = (double)k / (n - 1);
-        double u = uL + s * (uR - uL);
-        top[k]    = surf.evaluate(u, vB);
-        bottom[k] = surf.evaluate(u, vT);
+    // 双三次 Hermite (Ferguson) 角点面片：
+    // 插值 4 角点位置 + 8 个一阶偏导（扭矢置 0），四条边即为条带端边的
+    // Hermite 曲线（G0 严丝合缝），跨界切线由角点偏导插值（角点处严格、
+    // 沿边近似 G1）。
+    double du = uR - uL, dv = vT - vB;
+
+    Vec3 P00, P10, P01, P11;                 // 角点位置 (s,t)=(i,j)
+    Vec3 Su00, Su10, Su01, Su11;             // ∂/∂s = ∂/∂u * du
+    Vec3 Sv00, Sv10, Sv01, Sv11;             // ∂/∂t = ∂/∂v * dv
+    {
+        Vec3 dU, dV;
+        evalRuledCell(TL, uL, vB, P00, dU, dV); Su00 = dU * du; Sv00 = dV * dv;
+        evalRuledCell(TR, uR, vB, P10, dU, dV); Su10 = dU * du; Sv10 = dV * dv;
+        evalRuledCell(BL, uL, vT, P01, dU, dV); Su01 = dU * du; Sv01 = dV * dv;
+        evalRuledCell(BR, uR, vT, P11, dU, dV); Su11 = dU * du; Sv11 = dV * dv;
     }
-    for (int k = 0; k < n; ++k) {
-        double t = (double)k / (n - 1);
-        double v = vB + t * (vT - vB);
-        left[k]  = surf.evaluate(uL, v);
-        right[k] = surf.evaluate(uR, v);
-    }
-    Vec3 C00 = surf.evaluate(uL, vB);
-    Vec3 C10 = surf.evaluate(uR, vB);
-    Vec3 C01 = surf.evaluate(uL, vT);
-    Vec3 C11 = surf.evaluate(uR, vT);
 
     ErrorStat e;
     for (int i = 0; i < n; ++i) {
-        double s = (double)i / (n - 1);
+        double s = (n == 1) ? 0.5 : (double)i / (n - 1);
         for (int j = 0; j < n; ++j) {
-            double t = (double)j / (n - 1);
-            Vec3 P = (1 - t) * top[i] + t * bottom[i]
-                   + (1 - s) * left[j] + s * right[j]
-                   - (1 - s) * (1 - t) * C00 - s * (1 - t) * C10
-                   - (1 - s) * t * C01 - s * t * C11;
+            double t = (n == 1) ? 0.5 : (double)j / (n - 1);
+            Vec3 P =
+                  h00(s) * (h00(t) * P00 + h10(t) * P01 + h01(t) * Sv00 + h11(t) * Sv01)
+                + h10(s) * (h00(t) * P10 + h10(t) * P11 + h01(t) * Sv10 + h11(t) * Sv11)
+                + h01(s) * (h00(t) * Su00 + h10(t) * Su01)
+                + h11(s) * (h00(t) * Su10 + h10(t) * Su11);
             cp.meshVerts[i * n + j] = P;
             double u = uL + s * (uR - uL);
             double v = vB + t * (vT - vB);
@@ -330,14 +332,6 @@ BlendCorner buildCornerPatch(const SurfaceWrapper& surf, const GridResult& gr,
     cp.maxError = e.maxError;
     cp.rmsError = e.rmsError;
     return cp;
-}
-
-double stripErrorMax(const BlendStrip& s, bool useMaxError) {
-    return useMaxError ? s.maxError : s.rmsError;
-}
-
-double cellErrorVal(const ErrorStat& e, bool useMaxError) {
-    return useMaxError ? e.maxError : e.rmsError;
 }
 
 } // anon
@@ -402,45 +396,23 @@ BlendResult buildBlend(const SurfaceWrapper& surf, const GridResult& gr,
     return br;
 }
 
+// 统一内缩量 f：所有格用同一个 f，保证过渡网格（条带+角点）无台阶、可 G0 拼接。
+// 对 f ∈ [0, fMax] 做一维搜索，最小化复合面总误差。
 std::vector<double> optimizeTrim(const SurfaceWrapper& surf, const GridResult& gr,
                                  const BlendConfig& cfg)
 {
     int nCells = (int)gr.cells.size();
-    std::vector<double> f(nCells, 0.0);
+    double bestF = 0.0;
+    double bestE = 1e30;
 
-    auto localObjective = [&](int i) -> double {
-        const GridCell& cell = gr.cells[i];
-        double e = cellErrorVal(cellError(surf, gr, cell, f[i], cfg), cfg.useMaxError);
-        int r = cell.row, c = cell.col;
-        if (c > 0)
-            e = std::max(e, stripErrorMax(buildVerticalStrip(surf, gr, f, r, c, cfg), cfg.useMaxError));
-        if (c + 1 < gr.nCols)
-            e = std::max(e, stripErrorMax(buildVerticalStrip(surf, gr, f, r, c + 1, cfg), cfg.useMaxError));
-        if (r > 0)
-            e = std::max(e, stripErrorMax(buildHorizontalStrip(surf, gr, f, r, c, cfg), cfg.useMaxError));
-        if (r + 1 < gr.nRows)
-            e = std::max(e, stripErrorMax(buildHorizontalStrip(surf, gr, f, r + 1, c, cfg), cfg.useMaxError));
-        return e;
-    };
-
-    for (int pass = 0; pass < cfg.maxPasses; ++pass) {
-        bool changed = false;
-        for (int i = 0; i < nCells; ++i) {
-            double orig = f[i];
-            double bestF = orig;
-            double bestE = localObjective(i);
-            for (int k = 1; k <= cfg.nSearch; ++k) {
-                double cand = cfg.fMax * k / cfg.nSearch;
-                f[i] = cand;
-                double e = localObjective(i);
-                if (e < bestE) { bestE = e; bestF = cand; }
-            }
-            f[i] = bestF;
-            if (std::abs(bestF - orig) > 1e-6) changed = true;
-        }
-        if (!changed) break;
+    for (int k = 0; k <= cfg.nSearch; ++k) {
+        double cand = cfg.fMax * k / cfg.nSearch;
+        std::vector<double> f(nCells, cand);
+        BlendResult br = buildBlend(surf, gr, f, cfg);
+        double e = cfg.useMaxError ? br.totalMaxError : br.totalRmsError;
+        if (e < bestE) { bestE = e; bestF = cand; }
     }
-    return f;
+    return std::vector<double>(nCells, bestF);
 }
 
 bool exportBlendOBJs(const std::string& outDir, const std::string& prefix,

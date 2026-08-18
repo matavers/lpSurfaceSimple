@@ -61,7 +61,7 @@ struct BlendResult {
 BlendResult buildBlend(const SurfaceWrapper& surf, const GridResult& gr,
                        const std::vector<double>& f, const BlendConfig& cfg);
 
-// 优化每格内缩量 f_i，最小化复合面拟合误差（坐标下降 + 一维搜索）
+// 优化统一内缩量 f，最小化复合面拟合误差（一维搜索）
 std::vector<double> optimizeTrim(const SurfaceWrapper& surf, const GridResult& gr,
                                  const BlendConfig& cfg);
 
