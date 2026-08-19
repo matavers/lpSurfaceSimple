@@ -26,6 +26,12 @@
 #include <TopExp_Explorer.hxx>
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
+#include <GeomAPI_PointsToBSplineSurface.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <STEPControl_Writer.hxx>
+#include <STEPControl_StepModelType.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <TColgp_Array2OfPnt.hxx>
 
 using namespace simple;
 namespace fs = std::filesystem;
@@ -84,6 +90,63 @@ TopoDS_Face pickLargestFace(
     return faces[bestIdx];
 }
 
+// 导出「原 NURBS（裁剪到与拟合相同的 u/v 范围）+ 各直纹格 NURBS 面」到 STEP，
+// 供 CATIA V5 加工模拟：原曲面与拟合结果几何范围一致，可做加工对比。
+static void exportFittedSTEP(const std::string& path,
+                             const SurfaceWrapper& sw,
+                             const GridResult& gr,
+                             const std::string& label)
+{
+    TopoDS_Compound comp;
+    BRep_Builder b;
+    b.MakeCompound(comp);
+
+    // 1) 原曲面，按 wrapper 的 u/v 范围裁剪成面（保证与拟合范围一致）
+    auto [u0, u1] = sw.paramDomainU();
+    auto [v0, v1] = sw.paramDomainV();
+    try {
+        BRepBuilderAPI_MakeFace orig(sw.surface(), u0, u1, v0, v1, 1e-6);
+        if (orig.IsDone()) {
+            b.Add(comp, orig.Face());
+            std::cout << "  [" << label << "] + original NURBS trimmed to U["
+                      << u0 << "," << u1 << "] V[" << v0 << "," << v1 << "]" << std::endl;
+        }
+    } catch (...) {}
+
+    // 2) 每个直纹格：由优化后的两条准线采样点近似成 B 样条直纹面（v 向线性）
+    int added = 0;
+    for (const auto& cell : gr.cells) {
+        const auto& r = cell.ruled;
+        int n = static_cast<int>(r.curveC0Samples.size());
+        if (n < 2 || (int)r.curveC1Samples.size() != n) continue;
+        try {
+            TColgp_Array2OfPnt grid(1, n, 1, 2);
+            for (int i = 0; i < n; ++i) {
+                grid.SetValue(i + 1, 1, gp_Pnt(r.curveC0Samples[i].x(),
+                                               r.curveC0Samples[i].y(),
+                                               r.curveC0Samples[i].z()));
+                grid.SetValue(i + 1, 2, gp_Pnt(r.curveC1Samples[i].x(),
+                                               r.curveC1Samples[i].y(),
+                                               r.curveC1Samples[i].z()));
+            }
+            GeomAPI_PointsToBSplineSurface approx(grid, 3, 8, GeomAbs_C2, 1e-4);
+            if (!approx.IsDone()) continue;
+            BRepBuilderAPI_MakeFace cf(approx.Surface(), 1e-6);
+            if (cf.IsDone()) {
+                b.Add(comp, cf.Face());
+                ++added;
+            }
+        } catch (...) {}
+    }
+
+    STEPControl_Writer writer;
+    writer.Transfer(comp, STEPControl_AsIs);
+    IFSelect_ReturnStatus st = writer.Write(path.c_str());
+    std::cout << "  [" << label << "] wrote " << path
+              << " (original + " << added << "/" << gr.cells.size()
+              << " ruled cells) status=" << (int)st << std::endl;
+}
+
 void printUsage() {
     std::cout << "Usage: simple.exe <step_file1> <step_file2> [options]\n"
               << "  step_file1, step_file2 : Path to STEP blade model files\n"
@@ -100,6 +163,7 @@ void printUsage() {
               << "    --max-depth <N>         Max refinement steps (default: 20)\n"
               << "    --blend                 Enable trim+blend post-pass (ruled mode only)\n"
               << "    --fmax <F>              Max per-cell trim fraction for blend (default: 0.3)\n"
+              << "    --export-step           Export original NURBS + ruled cells as STEP for CATIA\n"
               << "    --help                  Show this help\n"
               << std::endl;
 }
@@ -112,6 +176,7 @@ int main(int argc, char* argv[]) {
     double tolerance = 0.1;
     bool doBlend = false;
     double fMax = 0.3;
+    bool exportStep = false;
     int faceIdx1 = -1, faceIdx2 = -1;
     std::string faceOutPath;
     double uRange1Min = -1, uRange1Max = -1;
@@ -169,6 +234,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--max-depth" && i + 1 < argc) { maxDepth = std::stoi(argv[++i]); }
         else if (arg == "--blend") { doBlend = true; }
         else if (arg == "--fmax" && i + 1 < argc) { fMax = std::stod(argv[++i]); }
+        else if (arg == "--export-step") { exportStep = true; }
         else if (stepFile1.empty()) { stepFile1 = arg; }
         else if (stepFile2.empty()) { stepFile2 = arg; }
     }
@@ -513,6 +579,12 @@ int main(int argc, char* argv[]) {
                       << "  maxError=" << std::fixed << std::setprecision(5) << c.maxError
                       << "  rmsError=" << c.rmsError << std::endl;
         }
+    }
+
+    if (exportStep && !isPlanar) {
+        std::cout << "[Step 3c] Exporting fitted surfaces to STEP (CATIA)..." << std::endl;
+        exportFittedSTEP(outDir + "/blade1_fitted.step", sw1, gr1, "Blade-1");
+        exportFittedSTEP(outDir + "/blade2_fitted.step", sw2, gr2, "Blade-2");
     }
 
     BlendResult br1, br2;
