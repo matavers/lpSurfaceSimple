@@ -97,6 +97,59 @@ class ProcRunner(QThread):
             self.finished_signal.emit(1)
 
 
+def _merge_polydata(meshes):
+    """Concatenate triangle PolyData into one PolyData (no welding).
+    Assumes all meshes are triangles (exportOBJ writes 3-index faces)."""
+    import numpy as np
+    import pyvista as pv
+    pts, tris, off = [], [], 0
+    for m in meshes:
+        if m.n_points == 0:
+            continue
+        pts.append(np.asarray(m.points, dtype=np.float64))
+        f = np.asarray(m.faces).reshape(-1, 4)
+        tris.append(f[:, 1:4].astype(np.int64) + off)
+        off += m.n_points
+    if not pts:
+        return None
+    points = np.vstack(pts)
+    faces = np.hstack([
+        np.full((np.vstack(tris).shape[0], 1), 3, dtype=np.int64),
+        np.vstack(tris),
+    ]).ravel()
+    return pv.PolyData(points, faces)
+
+
+class ObjReaderThread(QThread):
+    """Background reader: load OBJ/VTK files off the UI thread, then merge
+    by (blade, category) into few actors to keep add_mesh fast."""
+    loaded = pyqtSignal(list)   # list of (name, tag, blade, merged_mesh|None)
+
+    def __init__(self, files, parent=None):
+        super().__init__(parent)
+        self._files = files     # list of (path, name, tag, blade)
+
+    def run(self):
+        import pyvista as pv
+        groups = {}   # (blade, tag) -> list of PolyData
+        for path, name, tag, blade in self._files:
+            try:
+                m = pv.read(path)
+                if m.n_points:
+                    groups.setdefault((blade, tag), []).append(m)
+            except Exception:
+                pass
+        out = []
+        for (blade, tag), meshes in groups.items():
+            if tag in ("grid", "mesh") or len(meshes) == 1:
+                merged = meshes[0]
+            else:
+                merged = _merge_polydata(meshes)
+            if merged is not None:
+                out.append((f"blade{blade + 1}_{tag}", tag, blade, merged))
+        self.loaded.emit(out)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -117,9 +170,9 @@ class MainWindow(QMainWindow):
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
         self._surfaceDims = [(0, 0), (0, 0)]
-        self._blendTrim = [[], []]
-        self._blendStrips = [[], []]
-        self._blendCorners = [[], []]
+        self._blendTrim = [0, 0]
+        self._blendStrips = [0, 0]
+        self._blendCorners = [0, 0]
         self._currentVersion = 0
         self._mode = "ruled"
         self._single_file_mode = False
@@ -129,6 +182,7 @@ class MainWindow(QMainWindow):
         self._preview_colors = {}
         self._preview_face_ids = set()
         self._diag_result = None
+        self._reader = None
 
         self._proc = None
         self._loaded_files = set()
@@ -988,9 +1042,9 @@ class MainWindow(QMainWindow):
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
         self._surfaceDims = [(0, 0), (0, 0)]
-        self._blendTrim = [[], []]
-        self._blendStrips = [[], []]
-        self._blendCorners = [[], []]
+        self._blendTrim = [0, 0]
+        self._blendStrips = [0, 0]
+        self._blendCorners = [0, 0]
         self._clear_3d()
         self._console.clear()
 
@@ -1093,7 +1147,7 @@ class MainWindow(QMainWindow):
             mesh_item = QTreeWidgetItem(["Original Mesh"])
             mesh_item.setFlags(mesh_item.flags() | Qt.ItemIsUserCheckable)
             mesh_item.setCheckState(0, Qt.Unchecked)
-            mesh_item.setData(1, Qt.UserRole, f"blade{bi + 1}")
+            mesh_item.setData(1, Qt.UserRole, f"blade{bi + 1}_mesh")
             mesh_item.setData(2, Qt.UserRole, "mesh")
             bnode.addChild(mesh_item)
 
@@ -1104,55 +1158,39 @@ class MainWindow(QMainWindow):
             grid_item.setData(2, Qt.UserRole, "grid")
             bnode.addChild(grid_item)
 
-            ver_node = QTreeWidgetItem([f"Version {self._currentVersion}"])
-            ver_node.setFlags(ver_node.flags() | Qt.ItemIsUserCheckable)
-            ver_node.setCheckState(0, Qt.Checked)
-            ver_node.setExpanded(True)
-            bnode.addChild(ver_node)
+            if self._surfaceCellCounts[bi] > 0:
+                ruled_item = QTreeWidgetItem([f"Ruled Cells ({self._surfaceCellCounts[bi]})"])
+                ruled_item.setFlags(ruled_item.flags() | Qt.ItemIsUserCheckable)
+                ruled_item.setCheckState(0, Qt.Checked)
+                ruled_item.setData(1, Qt.UserRole, f"blade{bi + 1}_ruled")
+                ruled_item.setData(2, Qt.UserRole, "ruled")
+                bnode.addChild(ruled_item)
 
-            meta_cells = self._cellMeta[bi] if bi < len(self._cellMeta) else []
-            count = self._surfaceCellCounts[bi]
-            for ci in range(count):
-                info = meta_cells[ci] if ci < len(meta_cells) else {}
-                d = info.get("fitDir", "")
-                lbl = f"Cell {ci}"
-                if info:
-                    lbl = f"Cell {ci} (r{info.get('row', '')},c{info.get('col', '')}) [{d}]"
-                cell_item = QTreeWidgetItem([lbl])
-                cell_item.setFlags(cell_item.flags() | Qt.ItemIsUserCheckable)
-                cell_item.setCheckState(0, Qt.Checked)
-                cell_item.setData(1, Qt.UserRole, f"blade{bi + 1}_cell{ci}")
-                cell_item.setData(2, Qt.UserRole, "ruled")
-                ver_node.addChild(cell_item)
-
-            trims = self._blendTrim[bi] if bi < len(self._blendTrim) else []
-            strips = self._blendStrips[bi] if bi < len(self._blendStrips) else []
-            corners = self._blendCorners[bi] if bi < len(self._blendCorners) else []
-            if trims or strips or corners:
+            if self._blendTrim[bi] or self._blendStrips[bi] or self._blendCorners[bi]:
                 blend_node = QTreeWidgetItem(["Blend"])
                 blend_node.setFlags(blend_node.flags() | Qt.ItemIsUserCheckable)
                 blend_node.setCheckState(0, Qt.Checked)
                 blend_node.setExpanded(True)
                 bnode.addChild(blend_node)
-                for t in trims:
-                    it = QTreeWidgetItem([f"Trim ({t['row']},{t['col']})"])
+                if self._blendTrim[bi]:
+                    it = QTreeWidgetItem([f"Trim Cells ({self._blendTrim[bi]})"])
                     it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                     it.setCheckState(0, Qt.Checked)
-                    it.setData(1, Qt.UserRole, t["name"])
+                    it.setData(1, Qt.UserRole, f"blade{bi + 1}_trim")
                     it.setData(2, Qt.UserRole, "trim")
                     blend_node.addChild(it)
-                for s in strips:
-                    it = QTreeWidgetItem([f"Strip {s['idx']}"])
+                if self._blendStrips[bi]:
+                    it = QTreeWidgetItem([f"Strips ({self._blendStrips[bi]})"])
                     it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                     it.setCheckState(0, Qt.Checked)
-                    it.setData(1, Qt.UserRole, s["name"])
+                    it.setData(1, Qt.UserRole, f"blade{bi + 1}_strip")
                     it.setData(2, Qt.UserRole, "strip")
                     blend_node.addChild(it)
-                for k in corners:
-                    it = QTreeWidgetItem([f"Corner ({k['r']},{k['c']})"])
+                if self._blendCorners[bi]:
+                    it = QTreeWidgetItem([f"Corners ({self._blendCorners[bi]})"])
                     it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                     it.setCheckState(0, Qt.Checked)
-                    it.setData(1, Qt.UserRole, k["name"])
+                    it.setData(1, Qt.UserRole, f"blade{bi + 1}_corner")
                     it.setData(2, Qt.UserRole, "corner")
                     blend_node.addChild(it)
 
@@ -1197,71 +1235,42 @@ class MainWindow(QMainWindow):
         if HAS_PYVISTA:
             self._plotter.disable_render = True
 
-        ruled_files = []
-        trim_files = []
-        strip_files = []
-        corner_files = []
+        files = []   # (path, name, tag, blade)
         mesh_files = []
         grid_files = []
+        self._blendTrim = [0, 0]
+        self._blendStrips = [0, 0]
+        self._blendCorners = [0, 0]
+
         for fn in sorted(os.listdir(out_dir)):
             if fn.endswith('.obj'):
+                bi = 0 if "blade1" in fn else 1
                 if fn.endswith('_mesh.obj'):
                     mesh_files.append(fn)
                 elif '_trim_' in fn:
-                    trim_files.append(fn)
+                    self._blendTrim[bi] += 1
+                    files.append((os.path.normpath(os.path.join(out_dir, fn)),
+                                  fn.replace('.obj', ''), "trim", bi))
                 elif '_strip' in fn:
-                    strip_files.append(fn)
+                    self._blendStrips[bi] += 1
+                    files.append((os.path.normpath(os.path.join(out_dir, fn)),
+                                  fn.replace('.obj', ''), "strip", bi))
                 elif '_corner_' in fn:
-                    corner_files.append(fn)
+                    self._blendCorners[bi] += 1
+                    files.append((os.path.normpath(os.path.join(out_dir, fn)),
+                                  fn.replace('.obj', ''), "corner", bi))
                 else:
-                    ruled_files.append(fn)
+                    files.append((os.path.normpath(os.path.join(out_dir, fn)),
+                                  fn.replace('.obj', ''), "ruled", bi))
             elif fn.endswith('.vtk'):
+                bi = 0 if "blade1" in fn else 1
                 grid_files.append(fn)
+                files.append((os.path.normpath(os.path.join(out_dir, fn)),
+                              fn.replace('.vtk', ''), "grid", bi))
 
-        self._blendTrim = [[], []]
-        self._blendStrips = [[], []]
-        self._blendCorners = [[], []]
-
-        for fn in ruled_files:
-            path = os.path.normpath(os.path.join(out_dir, fn))
-            name = fn.replace('.obj', '')
-            self._load_obj(path, name, "ruled")
-
-        for fn in grid_files:
-            path = os.path.normpath(os.path.join(out_dir, fn))
-            name = fn.replace('.vtk', '')
-            self._load_obj(path, name, "grid")
-
-        for fn in trim_files:
-            path = os.path.normpath(os.path.join(out_dir, fn))
-            name = fn.replace('.obj', '')
-            bi = 0 if "blade1" in name else 1
-            m = re.search(r'_trim_(\d+)_(\d+)$', name)
-            row = int(m.group(1)) if m else 0
-            col = int(m.group(2)) if m else 0
-            self._blendTrim[bi].append({"name": name, "row": row, "col": col})
-            self._load_obj(path, name, "trim")
-
-        for fn in strip_files:
-            path = os.path.normpath(os.path.join(out_dir, fn))
-            name = fn.replace('.obj', '')
-            bi = 0 if "blade1" in name else 1
-            m = re.search(r'_strip(\d+)$', name)
-            idx = int(m.group(1)) if m else 0
-            self._blendStrips[bi].append({"name": name, "idx": idx})
-            self._load_obj(path, name, "strip")
-
-        for fn in corner_files:
-            path = os.path.normpath(os.path.join(out_dir, fn))
-            name = fn.replace('.obj', '')
-            bi = 0 if "blade1" in name else 1
-            m = re.search(r'_corner_(\d+)_(\d+)$', name)
-            cr = int(m.group(1)) if m else 0
-            cc = int(m.group(2)) if m else 0
-            self._blendCorners[bi].append({"name": name, "r": cr, "c": cc})
-            self._load_obj(path, name, "corner")
-
-        self._log(f"[Load] ruled_files={len(ruled_files)} mesh_files={len(mesh_files)} grid_files={len(grid_files)} trim_files={len(trim_files)} strip_files={len(strip_files)} corner_files={len(corner_files)}")
+        self._log(f"[Load] files={len(files)} mesh={len(mesh_files)} "
+                  f"grid={len(grid_files)} trim={self._blendTrim} "
+                  f"strip={self._blendStrips} corner={self._blendCorners}")
 
         mesh_paths = [os.path.normpath(os.path.join(out_dir, fn)) for fn in mesh_files]
         if len(mesh_paths) == 2:
@@ -1274,77 +1283,58 @@ class MainWindow(QMainWindow):
                 pass
 
         for fn in mesh_files:
-            path = os.path.normpath(os.path.join(out_dir, fn))
             name = fn.replace('.obj', '')
-            if self._mesh_shared and 'blade2' in name:
+            bi = 0 if "blade1" in name else 1
+            if self._mesh_shared and bi == 1:
                 continue
-            self._load_obj(path, name, "mesh")
+            files.append((os.path.normpath(os.path.join(out_dir, fn)), name, "mesh", bi))
 
+        reader = ObjReaderThread(files)
+        self._reader = reader
+        reader.loaded.connect(lambda out, r=reader: self._on_objs_loaded(r, out))
+        reader.start()
+
+    def _on_objs_loaded(self, r, out):
+        if r is not self._reader:
+            return
+        self._reader = None
+        for name, tag, blade, mesh in out:
+            self._add_obj(name, tag, blade, mesh)
         if HAS_PYVISTA:
             self._plotter.disable_render = False
             self._apply_visibility()
             self._plotter.render()
+        self._log(f"[Load] finished ({len(out)} merged actors)")
 
-    def _load_obj(self, path, name, tag):
+    def _add_obj(self, name, tag, blade, mesh):
         if not HAS_PYVISTA:
             return
+        if mesh is None:
+            return
         try:
-            import pyvista as pv
-            m = pv.read(path)
-
             if tag == "mesh":
-                if "blade1" in name:
-                    color = BLADE_COLORS[0]
-                else:
-                    color = BLADE_COLORS[1]
                 self._plotter.add_mesh(
-                    m, name=name, color=color, opacity=0.85,
+                    mesh, name=name, color=BLADE_COLORS[blade], opacity=0.85,
                     show_edges=True, edge_color='darkgray')
-                self._log(f"  Loaded mesh: {name}")
-            elif tag == "ruled":
-                sidx = int(re.search(r'(?:seg|plane|cell)(\d+)', name).group(1))
-                total = self._surfaceCellCounts[0] if "blade1" in name else self._surfaceCellCounts[1]
-                import colorsys
-                hue = (sidx / max(1, total)) % 1.0
-                r, g, b = colorsys.hsv_to_rgb(hue, 0.65, 0.95)
-                color = [r, g, b]
-                opacity = 0.80 if self._mode.startswith("planar") else 0.35
-                self._plotter.add_mesh(
-                    m, name=name, color=color, opacity=opacity,
-                    show_edges=True, edge_color='dimgray')
-                self._log(f"  Loaded: {name}")
             elif tag == "grid":
                 try:
                     self._plotter.add_mesh(
-                        m, name=name, color=[0.1, 0.1, 0.1], line_width=2)
+                        mesh, name=name, color=[0.1, 0.1, 0.1], line_width=2)
                 except TypeError:
-                    self._plotter.add_mesh(m, name=name, color=[0.1, 0.1, 0.1])
-                self._log(f"  Loaded grid: {name}")
-            elif tag == "trim":
-                mt = re.search(r'_trim_(\d+)_(\d+)$', name)
-                row = int(mt.group(1)) if mt else 0
-                col = int(mt.group(2)) if mt else 0
-                nCols = self._surfaceDims[0][1] if "blade1" in name else self._surfaceDims[1][1]
-                flat = row * max(1, nCols) + col
-                total = self._surfaceCellCounts[0] if "blade1" in name else self._surfaceCellCounts[1]
-                import colorsys
-                hue = (flat / max(1, total)) % 1.0
-                r, g, b = colorsys.hsv_to_rgb(hue, 0.6, 0.95)
+                    self._plotter.add_mesh(mesh, name=name, color=[0.1, 0.1, 0.1])
+            elif tag == "ruled":
                 self._plotter.add_mesh(
-                    m, name=name, color=[r, g, b], opacity=0.85,
-                    show_edges=True, edge_color='dimgray')
-                self._log(f"  Loaded trimmed cell: {name}")
+                    mesh, name=name, color=[0.5, 0.7, 0.9], opacity=0.45)
+            elif tag == "trim":
+                self._plotter.add_mesh(
+                    mesh, name=name, color=[0.45, 0.75, 0.55], opacity=0.9)
             elif tag == "strip":
                 self._plotter.add_mesh(
-                    m, name=name, color=[0.95, 0.55, 0.1], opacity=0.9,
-                    show_edges=True, edge_color='darkorange')
-                self._log(f"  Loaded strip: {name}")
+                    mesh, name=name, color=[0.95, 0.55, 0.1], opacity=0.9)
             elif tag == "corner":
                 self._plotter.add_mesh(
-                    m, name=name, color=[0.6, 0.4, 0.95], opacity=0.9,
-                    show_edges=True, edge_color='purple')
-                self._log(f"  Loaded corner: {name}")
-
+                    mesh, name=name, color=[0.6, 0.4, 0.95], opacity=0.9)
+            self._log(f"  Loaded {tag}: {name}")
         except Exception as e:
             self._log(f"  Load error {name}: {e}")
 
@@ -1360,24 +1350,8 @@ class MainWindow(QMainWindow):
         def walk(node, inherited_vis):
             vis = inherited_vis and node.checkState(0) == Qt.Checked
             data_name = node.data(1, Qt.UserRole)
-            tag = node.data(2, Qt.UserRole)
             if vis and data_name:
-                if tag == "mesh":
-                    blade = int(data_name.replace('blade', ''))
-                    name = f"blade{blade}_mesh"
-                    visible_set.add(name)
-                    if self._mesh_shared and blade == 2:
-                        visible_set.add("blade1_mesh")
-                elif tag == "ruled":
-                    visible_set.add(data_name)
-                elif tag == "grid":
-                    visible_set.add(data_name)
-                elif tag == "trim":
-                    visible_set.add(data_name)
-                elif tag == "strip":
-                    visible_set.add(data_name)
-                elif tag == "corner":
-                    visible_set.add(data_name)
+                visible_set.add(data_name)
             for i in range(node.childCount()):
                 walk(node.child(i), vis)
 
@@ -1410,10 +1384,12 @@ class MainWindow(QMainWindow):
         self._preview_face_ids = set()
         self._last_picked_fid = None
         self._diag_result = None
+        self._reader = None
         self._split_items = []
         self._split_list.clear()
         self._btn_identify.setEnabled(False)
         if HAS_PYVISTA:
+            self._plotter.disable_render = False
             self._plotter.clear()
             self._plotter.set_background('lightblue')
 
