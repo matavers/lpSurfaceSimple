@@ -167,6 +167,7 @@ class MainWindow(QMainWindow):
         self._maxDepth = 20
         self._doBlend = False
         self._fMax = 0.3
+        self._exportStep = False
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
         self._surfaceDims = [(0, 0), (0, 0)]
@@ -381,6 +382,13 @@ class MainWindow(QMainWindow):
         self._spn_fmax.setValue(self._fMax)
         form.addRow("Blend fMax:", self._spn_fmax)
 
+        self._chk_export_step = QCheckBox("Export STEP for CATIA")
+        self._chk_export_step.setToolTip(
+            "Export original NURBS (same u/v range) + fitted surfaces "
+            "(blend composite or ruled cells) as STEP")
+        self._chk_export_step.setChecked(self._exportStep)
+        form.addRow(self._chk_export_step)
+
         diag_row = QHBoxLayout()
         self._btn_diag = QPushButton("Diagnose")
         self._btn_diag.setToolTip(
@@ -465,6 +473,7 @@ class MainWindow(QMainWindow):
             self._maxDepth = cfg.get("maxDepth", 20)
             self._doBlend = cfg.get("doBlend", False)
             self._fMax = cfg.get("fMax", 0.3)
+            self._exportStep = cfg.get("exportStep", False)
             self._txt_file1.setText(self._file1)
             self._txt_file2.setText(self._file2)
             self._txt_outdir.setText(self._out_dir)
@@ -476,6 +485,7 @@ class MainWindow(QMainWindow):
             self._spn_depth.setValue(self._maxDepth)
             self._chk_blend.setChecked(self._doBlend)
             self._spn_fmax.setValue(self._fMax)
+            self._chk_export_step.setChecked(self._exportStep)
             self._cmb_mode.setCurrentIndex(0 if cfg.get("mode", "ruled") == "ruled" else 1)
         except Exception:
             pass
@@ -494,6 +504,7 @@ class MainWindow(QMainWindow):
             "maxDepth": self._spn_depth.value(),
             "doBlend": self._chk_blend.isChecked(),
             "fMax": self._spn_fmax.value(),
+            "exportStep": self._chk_export_step.isChecked(),
         }
         try:
             with open(CONFIG_PATH, 'w') as f:
@@ -1019,6 +1030,7 @@ class MainWindow(QMainWindow):
         self._maxDepth = self._spn_depth.value()
         self._doBlend = self._chk_blend.isChecked()
         self._fMax = self._spn_fmax.value()
+        self._exportStep = self._chk_export_step.isChecked()
 
         if not os.path.exists(self._file1):
             QMessageBox.warning(self, "Error", "File not found.")
@@ -1072,6 +1084,8 @@ class MainWindow(QMainWindow):
         )
         if self._doBlend and self._mode == "ruled":
             cmd += f' --blend --fmax {self._fMax}'
+        if self._exportStep and self._mode == "ruled":
+            cmd += ' --export-step'
         if self._single_file_mode:
             f1 = self._cmb_face1.currentData()
             f2 = self._cmb_face2.currentData()

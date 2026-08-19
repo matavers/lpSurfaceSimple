@@ -147,6 +147,66 @@ static void exportFittedSTEP(const std::string& path,
               << " ruled cells) status=" << (int)st << std::endl;
 }
 
+// 把一张规则点网格近似成 NURBS 面并加入 compound（verts 按 [i*nCols+j] 排列）
+static void addGridFace(TopoDS_Compound& comp, BRep_Builder& b,
+                        const Vec3Arr& verts, int nRows, int nCols, int& added)
+{
+    if ((int)verts.size() < nRows * nCols || nRows < 2 || nCols < 2) return;
+    try {
+        TColgp_Array2OfPnt grid(1, nRows, 1, nCols);
+        for (int i = 0; i < nRows; ++i)
+            for (int j = 0; j < nCols; ++j) {
+                const Vec3& p = verts[i * nCols + j];
+                grid.SetValue(i + 1, j + 1, gp_Pnt(p.x(), p.y(), p.z()));
+            }
+        GeomAPI_PointsToBSplineSurface approx(grid, 3, 8, GeomAbs_C2, 1e-4);
+        if (!approx.IsDone()) return;
+        BRepBuilderAPI_MakeFace cf(approx.Surface(), 1e-6);
+        if (cf.IsDone()) { b.Add(comp, cf.Face()); ++added; }
+    } catch (...) {}
+}
+
+// 导出「原 NURBS（同范围）+ 复合面（trimmed cell + strip + corner）」到 STEP
+static void exportCompositeSTEP(const std::string& path,
+                                const SurfaceWrapper& sw,
+                                const BlendResult& br,
+                                const BlendConfig& cfg,
+                                const std::string& label)
+{
+    TopoDS_Compound comp;
+    BRep_Builder b;
+    b.MakeCompound(comp);
+
+    auto [u0, u1] = sw.paramDomainU();
+    auto [v0, v1] = sw.paramDomainV();
+    try {
+        BRepBuilderAPI_MakeFace orig(sw.surface(), u0, u1, v0, v1, 1e-6);
+        if (orig.IsDone()) {
+            b.Add(comp, orig.Face());
+            std::cout << "  [" << label << "] + original NURBS trimmed to U["
+                      << u0 << "," << u1 << "] V[" << v0 << "," << v1 << "]" << std::endl;
+        }
+    } catch (...) {}
+
+    int added = 0;
+    int side = cfg.nMeshRes + 1;
+    for (const auto& tc : br.cells)
+        addGridFace(comp, b, tc.meshVerts, side, side, added);
+    for (const auto& s : br.strips)
+        addGridFace(comp, b, s.meshVerts, cfg.nAlong, cfg.nAcross, added);
+    for (const auto& cp : br.corners)
+        addGridFace(comp, b, cp.meshVerts, side, side, added);
+
+    STEPControl_Writer writer;
+    writer.Transfer(comp, STEPControl_AsIs);
+    IFSelect_ReturnStatus st = writer.Write(path.c_str());
+    std::cout << "  [" << label << "] wrote " << path
+              << " (original + " << added << " composite faces: "
+              << br.cells.size() << " trim + " << br.strips.size()
+              << " strip + " << br.corners.size() << " corner)"
+              << " status=" << (int)st << std::endl;
+}
+
 void printUsage() {
     std::cout << "Usage: simple.exe <step_file1> <step_file2> [options]\n"
               << "  step_file1, step_file2 : Path to STEP blade model files\n"
@@ -581,16 +641,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (exportStep && !isPlanar) {
-        std::cout << "[Step 3c] Exporting fitted surfaces to STEP (CATIA)..." << std::endl;
-        exportFittedSTEP(outDir + "/blade1_fitted.step", sw1, gr1, "Blade-1");
-        exportFittedSTEP(outDir + "/blade2_fitted.step", sw2, gr2, "Blade-2");
-    }
-
     BlendResult br1, br2;
+    BlendConfig bcfg;
+    bcfg.fMax = fMax;
     if (doBlend && !isPlanar) {
-        BlendConfig bcfg;
-        bcfg.fMax = fMax;
         std::cout << "[Step 3b] Trim+blend post-pass (fMax=" << fMax << ")..." << std::endl;
         std::vector<double> f1 = optimizeTrim(sw1, gr1, bcfg);
         std::vector<double> f2 = optimizeTrim(sw2, gr2, bcfg);
@@ -610,6 +664,17 @@ int main(int argc, char* argv[]) {
                       << br.totalMaxError << "  totalRmsError=" << br.totalRmsError
                       << "  strips=" << br.strips.size()
                       << "  corners=" << br.corners.size() << std::endl;
+        }
+    }
+
+    if (exportStep && !isPlanar) {
+        std::cout << "[Step 3c] Exporting surfaces to STEP (CATIA)..." << std::endl;
+        if (doBlend) {
+            exportCompositeSTEP(outDir + "/blade1_fitted.step", sw1, br1, bcfg, "Blade-1");
+            exportCompositeSTEP(outDir + "/blade2_fitted.step", sw2, br2, bcfg, "Blade-2");
+        } else {
+            exportFittedSTEP(outDir + "/blade1_fitted.step", sw1, gr1, "Blade-1");
+            exportFittedSTEP(outDir + "/blade2_fitted.step", sw2, gr2, "Blade-2");
         }
     }
 
