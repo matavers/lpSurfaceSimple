@@ -28,6 +28,7 @@
 #include <Bnd_Box.hxx>
 #include <GeomAPI_PointsToBSplineSurface.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <STEPControl_Writer.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <IFSelect_ReturnStatus.hxx>
@@ -90,8 +91,7 @@ TopoDS_Face pickLargestFace(
     return faces[bestIdx];
 }
 
-// 导出「原 NURBS（裁剪到与拟合相同的 u/v 范围）+ 各直纹格 NURBS 面」到 STEP，
-// 供 CATIA V5 加工模拟：原曲面与拟合结果几何范围一致，可做加工对比。
+// 导出「各直纹格 NURBS 面」到 STEP（不含原曲面，原曲面单独导出）
 static void exportFittedSTEP(const std::string& path,
                              const SurfaceWrapper& sw,
                              const GridResult& gr,
@@ -101,19 +101,7 @@ static void exportFittedSTEP(const std::string& path,
     BRep_Builder b;
     b.MakeCompound(comp);
 
-    // 1) 原曲面，按 wrapper 的 u/v 范围裁剪成面（保证与拟合范围一致）
-    auto [u0, u1] = sw.paramDomainU();
-    auto [v0, v1] = sw.paramDomainV();
-    try {
-        BRepBuilderAPI_MakeFace orig(sw.surface(), u0, u1, v0, v1, 1e-6);
-        if (orig.IsDone()) {
-            b.Add(comp, orig.Face());
-            std::cout << "  [" << label << "] + original NURBS trimmed to U["
-                      << u0 << "," << u1 << "] V[" << v0 << "," << v1 << "]" << std::endl;
-        }
-    } catch (...) {}
-
-    // 2) 每个直纹格：由优化后的两条准线采样点近似成 B 样条直纹面（v 向线性）
+    // 每个直纹格：由优化后的两条准线采样点近似成 B 样条直纹面（v 向线性）
     int added = 0;
     for (const auto& cell : gr.cells) {
         const auto& r = cell.ruled;
@@ -143,7 +131,7 @@ static void exportFittedSTEP(const std::string& path,
     writer.Transfer(comp, STEPControl_AsIs);
     IFSelect_ReturnStatus st = writer.Write(path.c_str());
     std::cout << "  [" << label << "] wrote " << path
-              << " (original + " << added << "/" << gr.cells.size()
+              << " (" << added << "/" << gr.cells.size()
               << " ruled cells) status=" << (int)st << std::endl;
 }
 
@@ -166,7 +154,7 @@ static void addGridFace(TopoDS_Compound& comp, BRep_Builder& b,
     } catch (...) {}
 }
 
-// 导出「原 NURBS（同范围）+ 复合面（trimmed cell + strip + corner）」到 STEP
+// 导出「复合面（trimmed cell + strip + corner）」到 STEP（不含原曲面）
 static void exportCompositeSTEP(const std::string& path,
                                 const SurfaceWrapper& sw,
                                 const BlendResult& br,
@@ -176,17 +164,6 @@ static void exportCompositeSTEP(const std::string& path,
     TopoDS_Compound comp;
     BRep_Builder b;
     b.MakeCompound(comp);
-
-    auto [u0, u1] = sw.paramDomainU();
-    auto [v0, v1] = sw.paramDomainV();
-    try {
-        BRepBuilderAPI_MakeFace orig(sw.surface(), u0, u1, v0, v1, 1e-6);
-        if (orig.IsDone()) {
-            b.Add(comp, orig.Face());
-            std::cout << "  [" << label << "] + original NURBS trimmed to U["
-                      << u0 << "," << u1 << "] V[" << v0 << "," << v1 << "]" << std::endl;
-        }
-    } catch (...) {}
 
     int added = 0;
     int side = cfg.nMeshRes + 1;
@@ -201,10 +178,50 @@ static void exportCompositeSTEP(const std::string& path,
     writer.Transfer(comp, STEPControl_AsIs);
     IFSelect_ReturnStatus st = writer.Write(path.c_str());
     std::cout << "  [" << label << "] wrote " << path
-              << " (original + " << added << " composite faces: "
+              << " (" << added << " composite faces: "
               << br.cells.size() << " trim + " << br.strips.size()
               << " strip + " << br.corners.size() << " corner)"
               << " status=" << (int)st << std::endl;
+}
+
+// 导出「原曲面」到独立 STEP：保留原始裁剪边界，并裁剪到与拟合相同的 u/v 范围
+static void exportOriginalSTEP(const std::string& path,
+                               const TopoDS_Face& face,
+                               const SurfaceWrapper& sw,
+                               const std::string& label)
+{
+    TopoDS_Compound comp;
+    BRep_Builder b;
+    b.MakeCompound(comp);
+
+    auto [u0, u1] = sw.paramDomainU();
+    auto [v0, v1] = sw.paramDomainV();
+
+    // 用 B 样条在 wrapper 范围上建矩形面，与原 face 求交，保留原裁剪边界
+    bool clipped = false;
+    try {
+        BRepBuilderAPI_MakeFace rect(sw.surface(), u0, u1, v0, v1, 1e-6);
+        if (rect.IsDone()) {
+            BRepAlgoAPI_Common common(rect.Face(), face);
+            if (common.IsDone()) {
+                for (TopExp_Explorer ex(common.Shape(), TopAbs_FACE); ex.More(); ex.Next()) {
+                    b.Add(comp, ex.Current());
+                    clipped = true;
+                }
+            }
+        }
+    } catch (...) {}
+
+    if (!clipped) {
+        b.Add(comp, face);   // 兜底：原样导出（至少保留原始形状）
+    }
+
+    STEPControl_Writer writer;
+    writer.Transfer(comp, STEPControl_AsIs);
+    IFSelect_ReturnStatus st = writer.Write(path.c_str());
+    std::cout << "  [" << label << "] wrote " << path
+              << " (original face, " << (clipped ? "clipped to wrapper range" : "as-is")
+              << ") status=" << (int)st << std::endl;
 }
 
 void printUsage() {
@@ -669,6 +686,8 @@ int main(int argc, char* argv[]) {
 
     if (exportStep && !isPlanar) {
         std::cout << "[Step 3c] Exporting surfaces to STEP (CATIA)..." << std::endl;
+        exportOriginalSTEP(outDir + "/blade1_original.step", face1, sw1, "Blade-1");
+        exportOriginalSTEP(outDir + "/blade2_original.step", face2, sw2, "Blade-2");
         if (doBlend) {
             exportCompositeSTEP(outDir + "/blade1_fitted.step", sw1, br1, bcfg, "Blade-1");
             exportCompositeSTEP(outDir + "/blade2_fitted.step", sw2, br2, bcfg, "Blade-2");
