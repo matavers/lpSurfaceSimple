@@ -135,21 +135,44 @@ static void exportFittedSTEP(const std::string& path,
               << " ruled cells) status=" << (int)st << std::endl;
 }
 
-// 把一张规则点网格近似成 NURBS 面并加入 compound（verts 按 [i*nCols+j] 排列）
+// 把一张规则点网格近似成 NURBS 面并加入 compound（verts 按 [i*nCols+j] 排列）。
+// 用三次 C1 近似 + 宽松容差避免薄条/退化片近似发散；再加包围盒校验，
+// 若曲面控制点远超出输入点（发散），则跳过该片。
 static void addGridFace(TopoDS_Compound& comp, BRep_Builder& b,
                         const Vec3Arr& verts, int nRows, int nCols, int& added)
 {
     if ((int)verts.size() < nRows * nCols || nRows < 2 || nCols < 2) return;
     try {
+        // 输入点包围盒
+        Vec3 inMin(1e30, 1e30, 1e30), inMax(-1e30, -1e30, -1e30);
+        for (const auto& v : verts) {
+            inMin = inMin.cwiseMin(v);
+            inMax = inMax.cwiseMax(v);
+        }
+        double inDiag = (inMax - inMin).norm();
+
         TColgp_Array2OfPnt grid(1, nRows, 1, nCols);
         for (int i = 0; i < nRows; ++i)
             for (int j = 0; j < nCols; ++j) {
                 const Vec3& p = verts[i * nCols + j];
                 grid.SetValue(i + 1, j + 1, gp_Pnt(p.x(), p.y(), p.z()));
             }
-        GeomAPI_PointsToBSplineSurface approx(grid, 3, 8, GeomAbs_C2, 1e-4);
+        GeomAPI_PointsToBSplineSurface approx(grid, 3, 3, GeomAbs_C1, 1e-2);
         if (!approx.IsDone()) return;
-        BRepBuilderAPI_MakeFace cf(approx.Surface(), 1e-6);
+        Handle(Geom_BSplineSurface) S = approx.Surface();
+
+        // 控制点包围盒校验，防止发散曲面
+        Vec3 pMin(1e30, 1e30, 1e30), pMax(-1e30, -1e30, -1e30);
+        for (int i = 1; i <= S->NbUPoles(); ++i)
+            for (int j = 1; j <= S->NbVPoles(); ++j) {
+                gp_Pnt p = S->Pole(i, j);
+                pMin = pMin.cwiseMin(Vec3(p.X(), p.Y(), p.Z()));
+                pMax = pMax.cwiseMax(Vec3(p.X(), p.Y(), p.Z()));
+            }
+        double pDiag = (pMax - pMin).norm();
+        if (pDiag > inDiag * 3.0 + 1.0) return;   // 发散，跳过
+
+        BRepBuilderAPI_MakeFace cf(S, 1e-6);
         if (cf.IsDone()) { b.Add(comp, cf.Face()); ++added; }
     } catch (...) {}
 }
@@ -177,8 +200,10 @@ static void exportCompositeSTEP(const std::string& path,
     STEPControl_Writer writer;
     writer.Transfer(comp, STEPControl_AsIs);
     IFSelect_ReturnStatus st = writer.Write(path.c_str());
+    int total = (int)br.cells.size() + (int)br.strips.size() + (int)br.corners.size();
     std::cout << "  [" << label << "] wrote " << path
-              << " (" << added << " composite faces: "
+              << " (" << added << "/" << total << " composite faces added; "
+              << (total - added) << " skipped: "
               << br.cells.size() << " trim + " << br.strips.size()
               << " strip + " << br.corners.size() << " corner)"
               << " status=" << (int)st << std::endl;
