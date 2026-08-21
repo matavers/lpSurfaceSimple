@@ -14,12 +14,6 @@ catia_export.py — 把直纹面拟合结果导出为 CATIA V5 原生 CATPart。
 依赖:
     - 本机已安装 CATIA V5（脚本会自动启动/连接）
     - pip install pywin32
-
-说明:
-    - 直纹面 = 两条准线 + 母线。脚本为每条准线建三次样条（HybridShapeSpline），
-      再用 HybridShapeRuledSurface 由两条样条生成直纹面。
-    - 若你的 CATIA 版本对 AddPointWithConstraintExplicit 签名不同，可调整
-      make_spline 里的调用参数。
 """
 
 import json
@@ -28,10 +22,34 @@ import sys
 import argparse
 
 
+def connect_catia():
+    """连接 CATIA；优先用 early binding（gencache），失败退回 late binding。"""
+    import win32com.client
+    try:
+        catia = win32com.client.gencache.EnsureDispatch("CATIA.Application")
+        print("[catia] connected via early binding (gencache)")
+    except Exception as e:
+        print(f"[catia] gencache failed ({e}), falling back to Dispatch")
+        catia = win32com.client.Dispatch("CATIA.Application")
+    catia.Visible = True
+    return catia
+
+
+def set_name(obj, name):
+    """兼容不同绑定方式地设置对象 Name。"""
+    try:
+        obj.Name = name          # early binding 属性赋值
+    except Exception:
+        obj.set_Name(name)       # late binding 的 put 别名
+
+
 def make_spline(hsf, gs, part, pts):
     """由点列在 CATIA 里建一条三次样条曲线（作为直纹面准线）。"""
     spline = hsf.AddNewSpline()
-    spline.SetSplineType(0)   # 0 = 三次样条
+    try:
+        spline.SetSplineType(0)  # 0 = 三次样条
+    except Exception:
+        spline.SplineType = 0
     for x, y, z in pts:
         pt = hsf.AddNewPointCoord(x, y, z)
         gs.AppendHybridShape(pt)
@@ -40,7 +58,6 @@ def make_spline(hsf, gs, part, pts):
         try:
             spline.AddPointWithConstraintExplicit(ref, None, -1.0, 1, 0.0, 0.0, 0.0)
         except Exception:
-            # 兼容更简签名
             spline.AddPointWithConstraintExplicit(ref)
         part.Update()
     gs.AppendHybridShape(spline)
@@ -54,7 +71,7 @@ def build_ruled(part, hsf, gs, c0_pts, c1_pts, name):
     ruled = hsf.AddNewRuledSurface(
         part.CreateReferenceFromObject(s0),
         part.CreateReferenceFromObject(s1))
-    ruled.set_Name(name)
+    set_name(ruled, name)
     gs.AppendHybridShape(ruled)
     part.Update()
     return ruled
@@ -81,16 +98,13 @@ def main():
         print("[catia] dry-run done (no CATIA connection)")
         return 0
 
-    import win32com.client
-    catia = win32com.client.Dispatch("CATIA.Application")
-    catia.Visible = True
-
+    catia = connect_catia()
     doc = catia.Documents.Add("Part")
     part = doc.Part
     hsf = part.HybridShapeFactory
 
     gs = part.HybridBodies.Add()
-    gs.set_Name(f"{name}_ruled")
+    set_name(gs, f"{name}_ruled")
 
     ok = 0
     for c in cells:
