@@ -27,12 +27,15 @@
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 #include <GeomAPI_PointsToBSplineSurface.hxx>
+#include <GeomAPI_PointsToBSpline.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <STEPControl_Writer.hxx>
 #include <STEPControl_StepModelType.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <TColgp_Array2OfPnt.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 
 using namespace simple;
 namespace fs = std::filesystem;
@@ -247,6 +250,73 @@ static void exportOriginalSTEP(const std::string& path,
     std::cout << "  [" << label << "] wrote " << path
               << " (original face, " << (clipped ? "clipped to wrapper range" : "as-is")
               << ") status=" << (int)st << std::endl;
+}
+
+// 导出每个直纹格的两条优化准线曲线到 STEP（供 CATIA GSD 用"直纹面"重建）
+static void exportDirectricesSTEP(const std::string& path,
+                                  const GridResult& gr,
+                                  const std::string& label)
+{
+    TopoDS_Compound comp;
+    BRep_Builder b;
+    b.MakeCompound(comp);
+    int nEdges = 0;
+    for (const auto& cell : gr.cells) {
+        const auto& r = cell.ruled;
+        int n = static_cast<int>(r.curveC0Samples.size());
+        if (n < 2 || (int)r.curveC1Samples.size() != n) continue;
+        for (int k = 0; k < 2; ++k) {
+            const Vec3Arr& samples = (k == 0) ? r.curveC0Samples : r.curveC1Samples;
+            TColgp_Array1OfPnt pts(1, n);
+            for (int i = 0; i < n; ++i)
+                pts.SetValue(i + 1, gp_Pnt(samples[i].x(), samples[i].y(), samples[i].z()));
+            GeomAPI_PointsToBSpline interp(pts, 3, 8, GeomAbs_C2, 1e-3);
+            if (!interp.IsDone()) continue;
+            BRepBuilderAPI_MakeEdge edge(interp.Curve());
+            if (edge.IsDone()) {
+                b.Add(comp, edge.Edge());
+                ++nEdges;
+            }
+        }
+    }
+    STEPControl_Writer writer;
+    writer.Transfer(comp, STEPControl_AsIs);
+    IFSelect_ReturnStatus st = writer.Write(path.c_str());
+    std::cout << "  [" << label << "] wrote " << path
+              << " (" << nEdges << " directrix curves) status=" << (int)st << std::endl;
+}
+
+// 导出每个直纹格的两条优化准线采样点到 JSON（供 CATIA COM 脚本读取重建直纹面）
+static void exportDirectricesJSON(const std::string& path,
+                                  const GridResult& gr,
+                                  const std::string& label)
+{
+    std::ofstream o(path);
+    if (!o) return;
+    o << std::fixed << std::setprecision(6);
+    o << "{\n  \"name\": \"" << gr.name << "\",\n  \"cells\": [";
+    bool firstCell = true;
+    for (const auto& cell : gr.cells) {
+        const auto& r = cell.ruled;
+        int n = static_cast<int>(r.curveC0Samples.size());
+        if (n < 2) continue;
+        if (!firstCell) o << ",";
+        firstCell = false;
+        o << "\n    {\"index\": " << cell.row * gr.nCols + cell.col
+          << ", \"row\": " << cell.row << ", \"col\": " << cell.col
+          << ", \"fitDir\": \"" << (cell.fitDir == ParamDir::U ? "U" : "V") << "\"";
+        for (int k = 0; k < 2; ++k) {
+            const Vec3Arr& samples = (k == 0) ? r.curveC0Samples : r.curveC1Samples;
+            o << ", \"c" << k << "\": [";
+            for (int i = 0; i < n; ++i)
+                o << (i ? "," : "") << "[" << samples[i].x() << ","
+                  << samples[i].y() << "," << samples[i].z() << "]";
+            o << "]";
+        }
+        o << "}";
+    }
+    o << "\n  ]\n}\n";
+    std::cout << "  [" << label << "] wrote " << path << std::endl;
 }
 
 void printUsage() {
@@ -713,6 +783,10 @@ int main(int argc, char* argv[]) {
         std::cout << "[Step 3c] Exporting surfaces to STEP (CATIA)..." << std::endl;
         exportOriginalSTEP(outDir + "/blade1_original.step", face1, sw1, "Blade-1");
         exportOriginalSTEP(outDir + "/blade2_original.step", face2, sw2, "Blade-2");
+        exportDirectricesSTEP(outDir + "/blade1_directrices.step", gr1, "Blade-1");
+        exportDirectricesSTEP(outDir + "/blade2_directrices.step", gr2, "Blade-2");
+        exportDirectricesJSON(outDir + "/blade1_directrices.json", gr1, "Blade-1");
+        exportDirectricesJSON(outDir + "/blade2_directrices.json", gr2, "Blade-2");
         if (doBlend) {
             exportCompositeSTEP(outDir + "/blade1_fitted.step", sw1, br1, bcfg, "Blade-1");
             exportCompositeSTEP(outDir + "/blade2_fitted.step", sw2, br2, bcfg, "Blade-2");
