@@ -41,8 +41,10 @@ def set_name(obj, name):
 
 
 def connect_catia():
-    import win32com.client
-    catia = win32com.client.Dispatch("CATIA.Application")
+    # 用 dynamic.Dispatch 强制晚绑定：避免 gencache 早绑定把 Document 类型化后
+    # 取不到 Part 属性；同时 dynamic 会带上类型信息做惰性方法解析，Add() 也能正确识别。
+    from win32com.client import dynamic
+    catia = dynamic.Dispatch("CATIA.Application")
     catia.Visible = True
     return catia
 
