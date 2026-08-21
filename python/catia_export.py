@@ -117,40 +117,71 @@ def main():
                  "AddNewSweepLine", "AddNewLoft")
     flag_methods(part, "CreateReferenceFromObject")
 
-    gs = part.HybridBodies.Add()
-    flag_methods(gs, "AppendHybridShape")
-    set_name(gs, f"{name}_ruled")
-
     ok = 0
     failed = []
     sel = doc.Selection
-    for i, c in enumerate(cells):
-        sw = None
-        try:
-            sw = build_ruled(part, hsf, gs, c["c0"], c["c1"], f"ruled_{c['index']}")
-            part.Update()   # 逐格 Update，能及时发现无效扫掠并回滚
-            ok += 1
-        except Exception as e:
-            failed.append(c["index"])
-            if sw is not None:
-                try:   # 回滚：删掉无效扫掠，避免污染后续 Update
-                    sel.Clear()
-                    sel.Add(sw)
-                    sel.Delete()
-                except Exception:
-                    pass
-            print(f"[catia] cell[{c['index']}] failed: {e}")
-        if (i + 1) % 20 == 0:
-            print(f"[catia] progress {i + 1}/{len(cells)} (ok={ok}, failed={len(failed)})")
+    BATCH = 10
 
+    def delete(obj):
+        try:
+            sel.Clear()
+            sel.Add(obj)
+            sel.Delete()
+        except Exception:
+            pass
+
+    for start in range(0, len(cells), BATCH):
+        batch = cells[start:start + BATCH]
+        gs = part.HybridBodies.Add()
+        set_name(gs, f"{name}_ruled_{start // BATCH}")
+        sws = []
+        for c in batch:
+            try:
+                sw = build_ruled(part, hsf, gs, c["c0"], c["c1"],
+                                 f"ruled_{c['index']}")
+                sws.append((c["index"], sw))
+            except Exception:
+                failed.append(c["index"])
+
+        try:
+            part.Update()          # 每批只 Update 一次（快路径）
+            ok += len(sws)
+        except Exception:
+            # 该批有无效扫掠：整批删掉，逐格重建（慢路径）
+            delete(gs)
+            gs2 = part.HybridBodies.Add()
+            for c in batch:
+                sw = None
+                try:
+                    sw = build_ruled(part, hsf, gs2, c["c0"], c["c1"],
+                                     f"ruled_{c['index']}")
+                    part.Update()
+                    ok += 1
+                except Exception:
+                    failed.append(c["index"])
+                    if sw is not None:
+                        delete(sw)
+        print(f"[catia] progress {min(start + BATCH, len(cells))}/{len(cells)} "
+              f"(ok={ok}, failed={len(failed)})")
+
+    try:
+        part.Update()
+    except Exception:
+        pass
     try:
         catia.RefreshDisplay = True
     except Exception:
         pass
+
     out = args.out or (os.path.splitext(args.json_path)[0] + ".CATPart")
-    doc.SaveAs(out)
-    print(f"[catia] saved {out} ({ok}/{len(cells)} ruled surfaces, "
-          f"{len(failed)} failed: {failed})")
+    try:
+        doc.SaveAs(out)
+        print(f"[catia] saved {out} ({ok}/{len(cells)} ruled surfaces, "
+              f"{len(failed)} failed: {failed})")
+    except Exception as e:
+        print(f"[catia] SaveAs failed ({e}); 请在 CATIA 里手动 File->SaveAs 保存")
+        print(f"[catia] 结果: {ok}/{len(cells)} ruled surfaces, "
+              f"{len(failed)} failed: {failed}")
     return 0
 
 
