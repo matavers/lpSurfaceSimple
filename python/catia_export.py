@@ -46,11 +46,20 @@ def connect_catia():
     from win32com.client import dynamic
     catia = dynamic.Dispatch("CATIA.Application")
     catia.Visible = True
+    try:
+        catia.Interactive = False      # 抑制 CATIA 错误弹窗，失败直接抛异常
+    except Exception:
+        pass
+    try:
+        catia.RefreshDisplay = False   # 关显示刷新，大幅提速
+    except Exception:
+        pass
     return catia
 
 
 def make_spline(hsf, gs, part, pts):
-    """由点列在 CATIA 里建一条三次样条曲线（作为直纹面准线）。"""
+    """由点列在 CATIA 里建一条三次样条曲线（作为直纹面准线）。不在每个点后
+    Update，最后统一 Update，避免每个点都重算整个 part（提速关键）。"""
     spline = hsf.AddNewSpline()
     try:
         spline.SetSplineType(0)   # 0 = 三次样条
@@ -59,46 +68,21 @@ def make_spline(hsf, gs, part, pts):
     for x, y, z in pts:
         pt = hsf.AddNewPointCoord(x, y, z)
         gs.AppendHybridShape(pt)
-        part.Update()
-        ref = part.CreateReferenceFromObject(pt)
-        spline.AddPoint(ref)
-        part.Update()
+        spline.AddPoint(part.CreateReferenceFromObject(pt))
     gs.AppendHybridShape(spline)
-    part.Update()
     return spline
 
 
 def build_ruled(part, hsf, gs, c0_pts, c1_pts, name):
     s0 = make_spline(hsf, gs, part, c0_pts)
     s1 = make_spline(hsf, gs, part, c1_pts)
-    r0 = part.CreateReferenceFromObject(s0)
-    r1 = part.CreateReferenceFromObject(s1)
-    ruled = None
     # 直纹面：CATIA V5-6R2020 无 AddNewRuledSurface，用 Line Sweep（直线扫掠，两极限）
-    try:
-        sw = hsf.AddNewSweepLine(r0)
-        sw.SecondGuideCrv = r1
-        sw.Mode = 1   # 1 = Two limits（两极限，即直纹面）
-        ruled = sw
-    except Exception:
-        ruled = None
-    # 回退：多截面曲面（Loft，两条截面 + 比例耦合 ≈ 直纹几何）
-    if ruled is None:
-        try:
-            loft = hsf.AddNewLoft()
-            loft.AddSectionToLoft(r0, 1, r0)
-            loft.AddSectionToLoft(r1, 1, r1)
-            ruled = loft
-        except Exception:
-            ruled = None
-    if ruled is None:
-        raise RuntimeError(
-            "CATIA 无 AddNewRuledSurface/AddNewSweepLine 且 Loft 回退失败；"
-            "请改用 STEP 导入或 GSD 手动直纹面命令")
-    set_name(ruled, name)
-    gs.AppendHybridShape(ruled)
-    part.Update()
-    return ruled
+    sw = hsf.AddNewSweepLine(part.CreateReferenceFromObject(s0))
+    sw.SecondGuideCrv = part.CreateReferenceFromObject(s1)
+    sw.Mode = 1   # 1 = Two limits（两极限，即直纹面）
+    set_name(sw, name)
+    gs.AppendHybridShape(sw)
+    return sw
 
 
 def main():
@@ -138,17 +122,35 @@ def main():
     set_name(gs, f"{name}_ruled")
 
     ok = 0
-    for c in cells:
+    failed = []
+    sel = doc.Selection
+    for i, c in enumerate(cells):
+        sw = None
         try:
-            build_ruled(part, hsf, gs, c["c0"], c["c1"], f"ruled_{c['index']}")
+            sw = build_ruled(part, hsf, gs, c["c0"], c["c1"], f"ruled_{c['index']}")
+            part.Update()   # 逐格 Update，能及时发现无效扫掠并回滚
             ok += 1
         except Exception as e:
+            failed.append(c["index"])
+            if sw is not None:
+                try:   # 回滚：删掉无效扫掠，避免污染后续 Update
+                    sel.Clear()
+                    sel.Add(sw)
+                    sel.Delete()
+                except Exception:
+                    pass
             print(f"[catia] cell[{c['index']}] failed: {e}")
+        if (i + 1) % 20 == 0:
+            print(f"[catia] progress {i + 1}/{len(cells)} (ok={ok}, failed={len(failed)})")
 
-    part.Update()
+    try:
+        catia.RefreshDisplay = True
+    except Exception:
+        pass
     out = args.out or (os.path.splitext(args.json_path)[0] + ".CATPart")
     doc.SaveAs(out)
-    print(f"[catia] saved {out} ({ok}/{len(cells)} ruled surfaces)")
+    print(f"[catia] saved {out} ({ok}/{len(cells)} ruled surfaces, "
+          f"{len(failed)} failed: {failed})")
     return 0
 
 
