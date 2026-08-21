@@ -22,32 +22,36 @@ import sys
 import argparse
 
 
-def connect_catia():
-    """连接 CATIA；优先用 early binding（gencache），失败退回 late binding。"""
-    import win32com.client
+def flag_methods(obj, *names):
+    """晚绑定下把名字强制标记为方法（修复 Add 等被误判成属性的问题）。"""
     try:
-        catia = win32com.client.gencache.EnsureDispatch("CATIA.Application")
-        print("[catia] connected via early binding (gencache)")
-    except Exception as e:
-        print(f"[catia] gencache failed ({e}), falling back to Dispatch")
-        catia = win32com.client.Dispatch("CATIA.Application")
-    catia.Visible = True
-    return catia
+        obj._FlagAsMethod(*names)
+    except Exception:
+        pass
 
 
 def set_name(obj, name):
-    """兼容不同绑定方式地设置对象 Name。"""
     try:
-        obj.Name = name          # early binding 属性赋值
+        obj.Name = name
     except Exception:
-        obj.set_Name(name)       # late binding 的 put 别名
+        try:
+            obj.set_Name(name)
+        except Exception:
+            pass
+
+
+def connect_catia():
+    import win32com.client
+    catia = win32com.client.Dispatch("CATIA.Application")
+    catia.Visible = True
+    return catia
 
 
 def make_spline(hsf, gs, part, pts):
     """由点列在 CATIA 里建一条三次样条曲线（作为直纹面准线）。"""
     spline = hsf.AddNewSpline()
     try:
-        spline.SetSplineType(0)  # 0 = 三次样条
+        spline.SetSplineType(0)   # 0 = 三次样条
     except Exception:
         spline.SplineType = 0
     for x, y, z in pts:
@@ -103,7 +107,13 @@ def main():
     part = doc.Part
     hsf = part.HybridShapeFactory
 
+    # 晚绑定下把易误判的方法名显式标记为方法
+    flag_methods(part.HybridBodies, "Add")
+    flag_methods(hsf, "AddNewSpline", "AddNewPointCoord", "AddNewRuledSurface")
+    flag_methods(part, "CreateReferenceFromObject")
+
     gs = part.HybridBodies.Add()
+    flag_methods(gs, "AppendHybridShape")
     set_name(gs, f"{name}_ruled")
 
     ok = 0
