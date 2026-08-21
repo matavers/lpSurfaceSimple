@@ -61,10 +61,7 @@ def make_spline(hsf, gs, part, pts):
         gs.AppendHybridShape(pt)
         part.Update()
         ref = part.CreateReferenceFromObject(pt)
-        try:
-            spline.AddPointWithConstraintExplicit(ref, None, -1.0, 1, 0.0, 0.0, 0.0)
-        except Exception:
-            spline.AddPointWithConstraintExplicit(ref)
+        spline.AddPoint(ref)
         part.Update()
     gs.AppendHybridShape(spline)
     part.Update()
@@ -77,12 +74,15 @@ def build_ruled(part, hsf, gs, c0_pts, c1_pts, name):
     r0 = part.CreateReferenceFromObject(s0)
     r1 = part.CreateReferenceFromObject(s1)
     ruled = None
-    # 1) 标准直纹面方法（HybridShapeRuledSurface，部分 CATIA 版本无此方法）
+    # 直纹面：CATIA V5-6R2020 无 AddNewRuledSurface，用 Line Sweep（直线扫掠，两极限）
     try:
-        ruled = hsf.AddNewRuledSurface(r0, r1)
+        sw = hsf.AddNewSweepLine(r0)
+        sw.SecondGuideCrv = r1
+        sw.Mode = 1   # 1 = Two limits（两极限，即直纹面）
+        ruled = sw
     except Exception:
         ruled = None
-    # 2) 回退：多截面曲面（Loft，两条截面 + 比例耦合 ≈ 直纹几何）
+    # 回退：多截面曲面（Loft，两条截面 + 比例耦合 ≈ 直纹几何）
     if ruled is None:
         try:
             loft = hsf.AddNewLoft()
@@ -93,7 +93,7 @@ def build_ruled(part, hsf, gs, c0_pts, c1_pts, name):
             ruled = None
     if ruled is None:
         raise RuntimeError(
-            "CATIA 无 AddNewRuledSurface 且 Loft 回退失败；"
+            "CATIA 无 AddNewRuledSurface/AddNewSweepLine 且 Loft 回退失败；"
             "请改用 STEP 导入或 GSD 手动直纹面命令")
     set_name(ruled, name)
     gs.AppendHybridShape(ruled)
@@ -129,7 +129,8 @@ def main():
 
     # 晚绑定下把易误判的方法名显式标记为方法
     flag_methods(part.HybridBodies, "Add")
-    flag_methods(hsf, "AddNewSpline", "AddNewPointCoord", "AddNewRuledSurface")
+    flag_methods(hsf, "AddNewSpline", "AddNewPointCoord",
+                 "AddNewSweepLine", "AddNewLoft")
     flag_methods(part, "CreateReferenceFromObject")
 
     gs = part.HybridBodies.Add()
