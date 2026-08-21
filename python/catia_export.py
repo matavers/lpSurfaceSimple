@@ -74,9 +74,27 @@ def make_spline(hsf, gs, part, pts):
 def build_ruled(part, hsf, gs, c0_pts, c1_pts, name):
     s0 = make_spline(hsf, gs, part, c0_pts)
     s1 = make_spline(hsf, gs, part, c1_pts)
-    ruled = hsf.AddNewRuledSurface(
-        part.CreateReferenceFromObject(s0),
-        part.CreateReferenceFromObject(s1))
+    r0 = part.CreateReferenceFromObject(s0)
+    r1 = part.CreateReferenceFromObject(s1)
+    ruled = None
+    # 1) 标准直纹面方法（HybridShapeRuledSurface，部分 CATIA 版本无此方法）
+    try:
+        ruled = hsf.AddNewRuledSurface(r0, r1)
+    except Exception:
+        ruled = None
+    # 2) 回退：多截面曲面（Loft，两条截面 + 比例耦合 ≈ 直纹几何）
+    if ruled is None:
+        try:
+            loft = hsf.AddNewLoft()
+            loft.AddSectionToLoft(r0, 1, r0)
+            loft.AddSectionToLoft(r1, 1, r1)
+            ruled = loft
+        except Exception:
+            ruled = None
+    if ruled is None:
+        raise RuntimeError(
+            "CATIA 无 AddNewRuledSurface 且 Loft 回退失败；"
+            "请改用 STEP 导入或 GSD 手动直纹面命令")
     set_name(ruled, name)
     gs.AppendHybridShape(ruled)
     part.Update()
