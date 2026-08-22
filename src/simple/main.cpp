@@ -30,6 +30,7 @@
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <STEPControl_Writer.hxx>
 #include <STEPControl_StepModelType.hxx>
@@ -95,16 +96,49 @@ TopoDS_Face pickLargestFace(
 }
 
 // 导出「各直纹格 NURBS 面」到 STEP（不含原曲面，原曲面单独导出）
-static void exportFittedSTEP(const std::string& path,
-                             const SurfaceWrapper& sw,
-                             const GridResult& gr,
-                             const std::string& label)
+// 把一堆面缝合成一个（或几个）shell 再写 STEP，避免 CATIA 导入成几百个零散
+// 的 OPEN_SHELL，方便整体选中做加工仿真。
+static void writeSewedSTEP(const std::string& path,
+                           const std::vector<TopoDS_Face>& faces,
+                           const std::string& label,
+                           const std::string& info)
 {
     TopoDS_Compound comp;
     BRep_Builder b;
     b.MakeCompound(comp);
 
+    int nShells = 0;
+    if (!faces.empty()) {
+        try {
+            BRepBuilderAPI_Sewing sewer(0.05);
+            for (const auto& f : faces) sewer.Add(f);
+            sewer.Perform();
+            for (TopExp_Explorer ex(sewer.SewedShape(), TopAbs_SHELL); ex.More(); ex.Next()) {
+                b.Add(comp, ex.Current());
+                ++nShells;
+            }
+        } catch (...) {}
+    }
+    if (nShells == 0) {   // 缝合失败则退回散面
+        for (const auto& f : faces) b.Add(comp, f);
+    }
+
+    STEPControl_Writer writer;
+    writer.Transfer(comp, STEPControl_AsIs);
+    IFSelect_ReturnStatus st = writer.Write(path.c_str());
+    std::cout << "  [" << label << "] wrote " << path
+              << " (" << faces.size() << " faces -> " << nShells << " shell(s); "
+              << info << ") status=" << (int)st << std::endl;
+}
+
+// 导出「各直纹格 NURBS 面」到 STEP（不含原曲面，原曲面单独导出）
+static void exportFittedSTEP(const std::string& path,
+                             const SurfaceWrapper& sw,
+                             const GridResult& gr,
+                             const std::string& label)
+{
     // 每个直纹格：由优化后的两条准线采样点近似成 B 样条直纹面（v 向线性）
+    std::vector<TopoDS_Face> faces;
     int added = 0;
     for (const auto& cell : gr.cells) {
         const auto& r = cell.ruled;
@@ -124,24 +158,21 @@ static void exportFittedSTEP(const std::string& path,
             if (!approx.IsDone()) continue;
             BRepBuilderAPI_MakeFace cf(approx.Surface(), 1e-6);
             if (cf.IsDone()) {
-                b.Add(comp, cf.Face());
+                faces.push_back(cf.Face());
                 ++added;
             }
         } catch (...) {}
     }
 
-    STEPControl_Writer writer;
-    writer.Transfer(comp, STEPControl_AsIs);
-    IFSelect_ReturnStatus st = writer.Write(path.c_str());
-    std::cout << "  [" << label << "] wrote " << path
-              << " (" << added << "/" << gr.cells.size()
-              << " ruled cells) status=" << (int)st << std::endl;
+    std::ostringstream info;
+    info << added << "/" << gr.cells.size() << " ruled cells";
+    writeSewedSTEP(path, faces, label, info.str());
 }
 
-// 把一张规则点网格近似成 NURBS 面并加入 compound（verts 按 [i*nCols+j] 排列）。
+// 把一张规则点网格近似成 NURBS 面并加入 faces（verts 按 [i*nCols+j] 排列）。
 // 用三次 C1 近似 + 宽松容差避免薄条/退化片近似发散；再加包围盒校验，
 // 若曲面控制点远超出输入点（发散），则跳过该片。
-static void addGridFace(TopoDS_Compound& comp, BRep_Builder& b,
+static void addGridFace(std::vector<TopoDS_Face>& faces,
                         const Vec3Arr& verts, int nRows, int nCols, int& added)
 {
     if ((int)verts.size() < nRows * nCols || nRows < 2 || nCols < 2) return;
@@ -176,7 +207,7 @@ static void addGridFace(TopoDS_Compound& comp, BRep_Builder& b,
         if (pDiag > inDiag * 3.0 + 1.0) return;   // 发散，跳过
 
         BRepBuilderAPI_MakeFace cf(S, 1e-6);
-        if (cf.IsDone()) { b.Add(comp, cf.Face()); ++added; }
+        if (cf.IsDone()) { faces.push_back(cf.Face()); ++added; }
     } catch (...) {}
 }
 
@@ -187,29 +218,23 @@ static void exportCompositeSTEP(const std::string& path,
                                 const BlendConfig& cfg,
                                 const std::string& label)
 {
-    TopoDS_Compound comp;
-    BRep_Builder b;
-    b.MakeCompound(comp);
-
+    std::vector<TopoDS_Face> faces;
     int added = 0;
     int side = cfg.nMeshRes + 1;
     for (const auto& tc : br.cells)
-        addGridFace(comp, b, tc.meshVerts, side, side, added);
+        addGridFace(faces, tc.meshVerts, side, side, added);
     for (const auto& s : br.strips)
-        addGridFace(comp, b, s.meshVerts, cfg.nAlong, cfg.nAcross, added);
+        addGridFace(faces, s.meshVerts, cfg.nAlong, cfg.nAcross, added);
     for (const auto& cp : br.corners)
-        addGridFace(comp, b, cp.meshVerts, side, side, added);
+        addGridFace(faces, cp.meshVerts, side, side, added);
 
-    STEPControl_Writer writer;
-    writer.Transfer(comp, STEPControl_AsIs);
-    IFSelect_ReturnStatus st = writer.Write(path.c_str());
     int total = (int)br.cells.size() + (int)br.strips.size() + (int)br.corners.size();
-    std::cout << "  [" << label << "] wrote " << path
-              << " (" << added << "/" << total << " composite faces added; "
-              << (total - added) << " skipped: "
-              << br.cells.size() << " trim + " << br.strips.size()
-              << " strip + " << br.corners.size() << " corner)"
-              << " status=" << (int)st << std::endl;
+    std::ostringstream info;
+    info << added << "/" << total << " composite faces; "
+         << (total - added) << " skipped: "
+         << br.cells.size() << " trim + " << br.strips.size()
+         << " strip + " << br.corners.size() << " corner";
+    writeSewedSTEP(path, faces, label, info.str());
 }
 
 // 导出「原曲面」到独立 STEP：保留原始裁剪边界，并裁剪到与拟合相同的 u/v 范围
