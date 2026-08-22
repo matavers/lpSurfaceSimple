@@ -164,7 +164,8 @@ class MainWindow(QMainWindow):
         self._nSplitU = 2
         self._nSplitV = 2
         self._tolerance = 0.1
-        self._maxDepth = 20
+        self._maxDepth = 200
+        self._maxCells = 10000
         self._doBlend = False
         self._fMax = 0.3
         self._exportStep = False
@@ -367,9 +368,14 @@ class MainWindow(QMainWindow):
         form.addRow("Tolerance:", self._spn_tol)
 
         self._spn_depth = QSpinBox()
-        self._spn_depth.setRange(1, 200)
+        self._spn_depth.setRange(1, 100000)
         self._spn_depth.setValue(self._maxDepth)
-        form.addRow("Max Depth:", self._spn_depth)
+        form.addRow("Max Depth (安全上限):", self._spn_depth)
+
+        self._spn_maxcells = QSpinBox()
+        self._spn_maxcells.setRange(10, 1000000)
+        self._spn_maxcells.setValue(self._maxCells)
+        form.addRow("Max Cells (安全上限):", self._spn_maxcells)
 
         self._chk_blend = QCheckBox("Trim+Blend post-pass")
         self._chk_blend.setChecked(self._doBlend)
@@ -470,7 +476,8 @@ class MainWindow(QMainWindow):
             self._nSplitU = cfg.get("nSplitU", 2)
             self._nSplitV = cfg.get("nSplitV", 2)
             self._tolerance = cfg.get("tolerance", 0.1)
-            self._maxDepth = cfg.get("maxDepth", 20)
+            self._maxDepth = cfg.get("maxDepth", 200)
+            self._maxCells = cfg.get("maxCells", 10000)
             self._doBlend = cfg.get("doBlend", False)
             self._fMax = cfg.get("fMax", 0.3)
             self._exportStep = cfg.get("exportStep", False)
@@ -483,6 +490,7 @@ class MainWindow(QMainWindow):
             self._spn_split_v.setValue(self._nSplitV)
             self._spn_tol.setValue(self._tolerance)
             self._spn_depth.setValue(self._maxDepth)
+            self._spn_maxcells.setValue(self._maxCells)
             self._chk_blend.setChecked(self._doBlend)
             self._spn_fmax.setValue(self._fMax)
             self._chk_export_step.setChecked(self._exportStep)
@@ -502,6 +510,7 @@ class MainWindow(QMainWindow):
             "nSplitV": self._spn_split_v.value(),
             "tolerance": self._spn_tol.value(),
             "maxDepth": self._spn_depth.value(),
+            "maxCells": self._spn_maxcells.value(),
             "doBlend": self._chk_blend.isChecked(),
             "fMax": self._spn_fmax.value(),
             "exportStep": self._chk_export_step.isChecked(),
@@ -1028,6 +1037,7 @@ class MainWindow(QMainWindow):
         self._nSplitV = self._spn_split_v.value()
         self._tolerance = self._spn_tol.value()
         self._maxDepth = self._spn_depth.value()
+        self._maxCells = self._spn_maxcells.value()
         self._doBlend = self._chk_blend.isChecked()
         self._fMax = self._spn_fmax.value()
         self._exportStep = self._chk_export_step.isChecked()
@@ -1080,7 +1090,8 @@ class MainWindow(QMainWindow):
             f'--nsplit-u {self._nSplitU} '
             f'--nsplit-v {self._nSplitV} '
             f'--tolerance {self._tolerance} '
-            f'--max-depth {self._maxDepth}'
+            f'--max-depth {self._maxDepth} '
+            f'--max-cells {self._maxCells}'
         )
         if self._doBlend and self._mode == "ruled":
             cmd += f' --blend --fmax {self._fMax}'

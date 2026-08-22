@@ -23,9 +23,9 @@ struct GridCell {
 struct GridConfig {
     int nSplitU = 2;          // U 向分割次数（竖直分割）→ 列数 = nSplitU+1
     int nSplitV = 2;          // V 向分割次数（水平分割）→ 行数 = nSplitV+1
-    double tolerance = 0.1;   // 容差
-    int maxDepth = 20;        // 最大细分步数（每次插入一整行或一整列）
-    int maxCells = 400;       // 格子数量上限
+    double tolerance = 0.1;   // 容差（目标最大误差，单位 mm）
+    int maxDepth = 1000;      // 最大细分步数（安全上限，正常由 tolerance 控制）
+    int maxCells = 10000;     // 格子数量安全上限
     int nUSamples = 50;
     int nVSamples = 10;
     int nRibs = 20;           // 直纹面准线优化的 rib 采样数
@@ -39,6 +39,8 @@ struct GridResult {
     std::vector<double> uEdges;   // nCols+1
     std::vector<double> vEdges;   // nRows+1
     std::vector<GridCell> cells;  // 行优先，size = nRows*nCols
+    double maxError = 0.0;        // 细分后实际达到的最大误差（mm）
+    bool toleranceMet = true;     // 是否满足 tolerance
 };
 
 // 二维网格分区拟合主入口：先均匀 M×N，再按容差整行/整列自适应细分。

@@ -356,9 +356,10 @@ void printUsage() {
               << "    --nvsamples <N>         V-direction samples (default: 10)\n"
               << "    --nsplit-u <N>          U-direction (vertical) splits -> columns (default: 2)\n"
               << "    --nsplit-v <N>          V-direction (horizontal) splits -> rows (default: 2)\n"
-              << "    --tolerance <T>         Tolerance for adaptive refinement (default: 0.1)\n"
-              << "    --max-depth <N>         Max refinement steps (default: 20)\n"
-              << "    --blend                 Enable trim+blend post-pass (ruled mode only)\n"
+               << "    --tolerance <T>         Tolerance for adaptive refinement (default: 0.1)\n"
+               << "    --max-depth <N>         Max refinement steps (default: 1000, safety cap)\n"
+               << "    --max-cells <N>         Max grid cells (default: 10000, safety cap)\n"
+               << "    --blend                 Enable trim+blend post-pass (ruled mode only)\n"
               << "    --fmax <F>              Max per-cell trim fraction for blend (default: 0.3)\n"
               << "    --export-step           Export original NURBS + ruled cells as STEP for CATIA\n"
               << "    --help                  Show this help\n"
@@ -369,7 +370,7 @@ int main(int argc, char* argv[]) {
     std::string stepFile1, stepFile2, outDir = "output";
     std::string modeStr = "ruled";
     int nUSamples = 50, nVSamples = 10;
-    int nSplitU = 2, nSplitV = 2, maxDepth = 20;
+    int nSplitU = 2, nSplitV = 2, maxDepth = 1000, maxCells = 10000;
     double tolerance = 0.1;
     bool doBlend = false;
     double fMax = 0.3;
@@ -429,6 +430,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--nsplit-v" && i + 1 < argc) { nSplitV = std::stoi(argv[++i]); }
         else if (arg == "--tolerance" && i + 1 < argc) { tolerance = std::stod(argv[++i]); }
         else if (arg == "--max-depth" && i + 1 < argc) { maxDepth = std::stoi(argv[++i]); }
+        else if (arg == "--max-cells" && i + 1 < argc) { maxCells = std::stoi(argv[++i]); }
         else if (arg == "--blend") { doBlend = true; }
         else if (arg == "--fmax" && i + 1 < argc) { fMax = std::stod(argv[++i]); }
         else if (arg == "--export-step") { exportStep = true; }
@@ -748,13 +750,15 @@ int main(int argc, char* argv[]) {
               << "  U-samples: " << nUSamples
               << "  V-samples: " << nVSamples
               << "  tolerance: " << tolerance
-              << "  max-depth: " << maxDepth << std::endl;
+              << "  max-depth: " << maxDepth
+              << "  max-cells: " << maxCells << std::endl;
 
     GridConfig gcfg;
     gcfg.nSplitU = nSplitU;
     gcfg.nSplitV = nSplitV;
     gcfg.tolerance = tolerance;
     gcfg.maxDepth = maxDepth;
+    gcfg.maxCells = maxCells;
     gcfg.nUSamples = nUSamples;
     gcfg.nVSamples = nVSamples;
 
@@ -769,7 +773,9 @@ int main(int argc, char* argv[]) {
 
     for (const auto& gr : {gr1, gr2}) {
         std::cout << "  " << gr.name << ": " << gr.nRows << "x" << gr.nCols
-                  << " = " << gr.cells.size() << " cells" << std::endl;
+                  << " = " << gr.cells.size() << " cells"
+                  << "  achievedMaxError=" << std::fixed << std::setprecision(6) << gr.maxError
+                  << "  toleranceMet=" << (gr.toleranceMet ? "YES" : "NO") << std::endl;
         for (const auto& c : gr.cells) {
             std::cout << "    cell[" << c.row << "," << c.col << "]"
                       << " dir=" << (c.fitDir == ParamDir::U ? "U" : "V")

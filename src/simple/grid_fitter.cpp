@@ -192,6 +192,12 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
         rebuild(pq);
     }
 
+    // 汇总实际达到的最大误差与是否满足容差
+    g.maxError = 0.0;
+    for (const auto& cell : g.cells)
+        g.maxError = std::max(g.maxError, cell.maxError);
+    g.toleranceMet = (g.maxError <= cfg.tolerance);
+
     return g;
 }
 
@@ -313,7 +319,10 @@ std::string buildGridMetaJson(const std::vector<GridResult>& results,
         if (s) o << ",";
         const auto& gr = results[s];
         o << "{\"name\":\"" << gr.name << "\",\"nRows\":" << gr.nRows
-          << ",\"nCols\":" << gr.nCols << ",\"cells\":[";
+          << ",\"nCols\":" << gr.nCols
+          << ",\"maxError\":" << gr.maxError
+          << ",\"toleranceMet\":" << (gr.toleranceMet ? "true" : "false")
+          << ",\"cells\":[";
         for (size_t i = 0; i < gr.cells.size(); ++i) {
             if (i) o << ",";
             const auto& c = gr.cells[i];
