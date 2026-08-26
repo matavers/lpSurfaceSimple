@@ -11,6 +11,11 @@ __pycache__/
 api/ruledSurfaceFitting.dll
 api/ruledSurfaceFitting.lib
 api/API_DOC.docx
+api/*.dll
+api.zip
+3rdPart/
+*.CATPart
+*.CATProcess
 *.STEP
 *.igs
 *.step

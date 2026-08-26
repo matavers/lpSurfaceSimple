@@ -388,10 +388,12 @@ class MainWindow(QMainWindow):
         self._spn_fmax.setValue(self._fMax)
         form.addRow("Blend fMax:", self._spn_fmax)
 
-        self._chk_export_step = QCheckBox("Export STEP for CATIA")
+        self._chk_export_step = QCheckBox("Export STEP for CAM (NX)")
         self._chk_export_step.setToolTip(
             "Export original NURBS (same u/v range) + fitted surfaces "
-            "(blend composite or ruled cells) as STEP")
+            "(blend composite or ruled cells) + directrices JSON as STEP/JSON. "
+            "Import the STEP into Siemens NX for machining simulation, or run "
+            "nx_export.py inside NX to rebuild native ruled-surface features.")
         self._chk_export_step.setChecked(self._exportStep)
         form.addRow(self._chk_export_step)
 

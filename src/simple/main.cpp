@@ -17,6 +17,7 @@
 
 #include <IGESControl_Writer.hxx>
 #include <BRep_Builder.hxx>
+#include <TopoDS.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Tool.hxx>
 #include <GeomConvert.hxx>
@@ -31,6 +32,8 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <gp_Trsf.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <STEPControl_Writer.hxx>
 #include <STEPControl_StepModelType.hxx>
@@ -131,37 +134,106 @@ static void writeSewedSTEP(const std::string& path,
               << info << ") status=" << (int)st << std::endl;
 }
 
+// 是否把导出的 STEP 平移到原点（CATIA 加工仿真默认轴系在原点，叶片太远会刀轨全 0）
+static bool g_translateToOrigin = true;
+
+// 曲面包围盒中心（对 sw 均匀采样 17×17 求 bbox）
+static gp_Pnt surfaceBBoxCenter(const SurfaceWrapper& sw) {
+    auto [u0, u1] = sw.paramDomainU();
+    auto [v0, v1] = sw.paramDomainV();
+    Vec3 mn(1e30, 1e30, 1e30), mx(-1e30, -1e30, -1e30);
+    for (int i = 0; i <= 16; ++i) {
+        for (int j = 0; j <= 16; ++j) {
+            double u = u0 + (u1 - u0) * i / 16.0;
+            double v = v0 + (v1 - v0) * j / 16.0;
+            Vec3 p = sw.evaluate(u, v);
+            mn = mn.cwiseMin(p);
+            mx = mx.cwiseMax(p);
+        }
+    }
+    return gp_Pnt((mn.x() + mx.x()) / 2.0,
+                  (mn.y() + mx.y()) / 2.0,
+                  (mn.z() + mx.z()) / 2.0);
+}
+
+static void translateFaces(std::vector<TopoDS_Face>& faces, const gp_Vec& v) {
+    if (v.SquareMagnitude() < 1e-24) return;
+    gp_Trsf trsf;
+    trsf.SetTranslation(v);
+    for (auto& f : faces) {
+        BRepBuilderAPI_Transform xf(f, trsf);
+        if (xf.IsDone()) f = TopoDS::Face(xf.Shape());
+    }
+}
+
+static TopoDS_Shape translatedShape(const TopoDS_Shape& s, const gp_Vec& v) {
+    if (v.SquareMagnitude() < 1e-24) return s;
+    gp_Trsf trsf;
+    trsf.SetTranslation(v);
+    BRepBuilderAPI_Transform xf(s, trsf);
+    return xf.IsDone() ? xf.Shape() : s;
+}
+
+// 由两条准线采样点构建「真直纹面」：2×n 点阵近似，母线方向线性（1 次）。
+// 用三次 C1 近似 + 宽松容差 + 包围盒校验：母线方向只有 2 个点天然 1 次；
+// 准线方向 3 次即可，8 次 C2 会过拟合鼓包（控制点远超出输入点）。
+static void addRuledFaceFromDirectrices(std::vector<TopoDS_Face>& faces,
+                                        const Vec3Arr& c0, const Vec3Arr& c1,
+                                        int& added)
+{
+    int n = static_cast<int>(c0.size());
+    if (n < 2 || static_cast<int>(c1.size()) != n) return;
+    try {
+        // 输入点包围盒
+        Vec3 inMin(1e30, 1e30, 1e30), inMax(-1e30, -1e30, -1e30);
+        for (int i = 0; i < n; ++i) {
+            inMin = inMin.cwiseMin(c0[i]); inMax = inMax.cwiseMax(c0[i]);
+            inMin = inMin.cwiseMin(c1[i]); inMax = inMax.cwiseMax(c1[i]);
+        }
+        double inDiag = (inMax - inMin).norm();
+
+        TColgp_Array2OfPnt grid(1, n, 1, 2);
+        for (int i = 0; i < n; ++i) {
+            grid.SetValue(i + 1, 1, gp_Pnt(c0[i].x(), c0[i].y(), c0[i].z()));
+            grid.SetValue(i + 1, 2, gp_Pnt(c1[i].x(), c1[i].y(), c1[i].z()));
+        }
+        GeomAPI_PointsToBSplineSurface approx(grid, 3, 3, GeomAbs_C1, 1e-2);
+        if (!approx.IsDone()) return;
+        Handle(Geom_BSplineSurface) S = approx.Surface();
+
+        // 控制点包围盒校验，防止发散鼓包
+        Vec3 pMin(1e30, 1e30, 1e30), pMax(-1e30, -1e30, -1e30);
+        for (int i = 1; i <= S->NbUPoles(); ++i)
+            for (int j = 1; j <= S->NbVPoles(); ++j) {
+                gp_Pnt p = S->Pole(i, j);
+                pMin = pMin.cwiseMin(Vec3(p.X(), p.Y(), p.Z()));
+                pMax = pMax.cwiseMax(Vec3(p.X(), p.Y(), p.Z()));
+            }
+        double pDiag = (pMax - pMin).norm();
+        if (pDiag > inDiag * 3.0 + 1.0) return;   // 发散，跳过
+
+        BRepBuilderAPI_MakeFace cf(S, 1e-6);
+        if (cf.IsDone()) { faces.push_back(cf.Face()); ++added; }
+    } catch (...) {}
+}
+
 // 导出「各直纹格 NURBS 面」到 STEP（不含原曲面，原曲面单独导出）
 static void exportFittedSTEP(const std::string& path,
                              const SurfaceWrapper& sw,
                              const GridResult& gr,
                              const std::string& label)
 {
-    // 每个直纹格：由优化后的两条准线采样点近似成 B 样条直纹面（v 向线性）
+    // 每个直纹格：由优化后的两条准线采样点近似成 B 样条直纹面（母线方向 1 次）
     std::vector<TopoDS_Face> faces;
     int added = 0;
     for (const auto& cell : gr.cells) {
         const auto& r = cell.ruled;
-        int n = static_cast<int>(r.curveC0Samples.size());
-        if (n < 2 || (int)r.curveC1Samples.size() != n) continue;
-        try {
-            TColgp_Array2OfPnt grid(1, n, 1, 2);
-            for (int i = 0; i < n; ++i) {
-                grid.SetValue(i + 1, 1, gp_Pnt(r.curveC0Samples[i].x(),
-                                               r.curveC0Samples[i].y(),
-                                               r.curveC0Samples[i].z()));
-                grid.SetValue(i + 1, 2, gp_Pnt(r.curveC1Samples[i].x(),
-                                               r.curveC1Samples[i].y(),
-                                               r.curveC1Samples[i].z()));
-            }
-            GeomAPI_PointsToBSplineSurface approx(grid, 3, 8, GeomAbs_C2, 1e-4);
-            if (!approx.IsDone()) continue;
-            BRepBuilderAPI_MakeFace cf(approx.Surface(), 1e-6);
-            if (cf.IsDone()) {
-                faces.push_back(cf.Face());
-                ++added;
-            }
-        } catch (...) {}
+        addRuledFaceFromDirectrices(faces, r.curveC0Samples, r.curveC1Samples, added);
+    }
+
+    if (g_translateToOrigin) {
+        gp_Pnt c = surfaceBBoxCenter(sw);
+        translateFaces(faces, gp_Vec(-c.X(), -c.Y(), -c.Z()));
     }
 
     std::ostringstream info;
@@ -211,9 +283,36 @@ static void addGridFace(std::vector<TopoDS_Face>& faces,
     } catch (...) {}
 }
 
+// 把一个 trimmed 直纹格导出为「真直纹面」：从 meshVerts 里取出两条母线端界
+// 曲线（沿母线方向的两个边界），按 2×n 点阵近似成一次直纹 B 样条（母线方向线性）。
+// 这样 CATIA 导入后仍是可被「侧刃 / Tanto」识别的直纹面，而不是三次近似面。
+static void addRuledCellFace(std::vector<TopoDS_Face>& faces,
+                             const GridCell& cell, const TrimmedCell& tc,
+                             int side, int& added)
+{
+    if (side < 2 || (int)tc.meshVerts.size() < side * side) return;
+    Vec3Arr c0(side), c1(side);
+    if (cell.fitDir == ParamDir::V) {
+        // 母线沿 v：两条准线在 v=v0 (j=0) 与 v=v1 (j=side-1)
+        for (int i = 0; i < side; ++i) {
+            c0[i] = tc.meshVerts[i * side + 0];
+            c1[i] = tc.meshVerts[i * side + (side - 1)];
+        }
+    } else {
+        // 母线沿 u：两条准线在 u=u0 (i=0) 与 u=u1 (i=side-1)
+        for (int j = 0; j < side; ++j) {
+            c0[j] = tc.meshVerts[0 * side + j];
+            c1[j] = tc.meshVerts[(side - 1) * side + j];
+        }
+    }
+    addRuledFaceFromDirectrices(faces, c0, c1, added);
+}
+
 // 导出「复合面（trimmed cell + strip + corner）」到 STEP（不含原曲面）
+// trimmed 格导出为真直纹面（母线方向一次），过渡条/角点仍为三次近似面。
 static void exportCompositeSTEP(const std::string& path,
                                 const SurfaceWrapper& sw,
+                                const GridResult& gr,
                                 const BlendResult& br,
                                 const BlendConfig& cfg,
                                 const std::string& label)
@@ -222,7 +321,7 @@ static void exportCompositeSTEP(const std::string& path,
     int added = 0;
     int side = cfg.nMeshRes + 1;
     for (const auto& tc : br.cells)
-        addGridFace(faces, tc.meshVerts, side, side, added);
+        addRuledCellFace(faces, gr.cells[tc.row * gr.nCols + tc.col], tc, side, added);
     for (const auto& s : br.strips)
         addGridFace(faces, s.meshVerts, cfg.nAlong, cfg.nAcross, added);
     for (const auto& cp : br.corners)
@@ -232,8 +331,14 @@ static void exportCompositeSTEP(const std::string& path,
     std::ostringstream info;
     info << added << "/" << total << " composite faces; "
          << (total - added) << " skipped: "
-         << br.cells.size() << " trim + " << br.strips.size()
+         << br.cells.size() << " trim(ruled) + " << br.strips.size()
          << " strip + " << br.corners.size() << " corner";
+
+    if (g_translateToOrigin) {
+        gp_Pnt c = surfaceBBoxCenter(sw);
+        translateFaces(faces, gp_Vec(-c.X(), -c.Y(), -c.Z()));
+    }
+
     writeSewedSTEP(path, faces, label, info.str());
 }
 
@@ -267,6 +372,11 @@ static void exportOriginalSTEP(const std::string& path,
 
     if (!clipped) {
         b.Add(comp, face);   // 兜底：原样导出（至少保留原始形状）
+    }
+
+    if (g_translateToOrigin) {
+        gp_Pnt c = surfaceBBoxCenter(sw);
+        comp = TopoDS::Compound(translatedShape(comp, gp_Vec(-c.X(), -c.Y(), -c.Z())));
     }
 
     STEPControl_Writer writer;
@@ -361,8 +471,10 @@ void printUsage() {
                << "    --max-cells <N>         Max grid cells (default: 10000, safety cap)\n"
                << "    --blend                 Enable trim+blend post-pass (ruled mode only)\n"
               << "    --fmax <F>              Max per-cell trim fraction for blend (default: 0.3)\n"
-              << "    --export-step           Export original NURBS + ruled cells as STEP for CATIA\n"
-              << "    --help                  Show this help\n"
+               << "    --export-step           Export original NURBS + ruled cells as STEP for CAM (NX)\n"
+               << "    --translate-to-origin   Translate exported STEP to origin (default on)\n"
+               << "    --no-translate          Keep original coordinates in exported STEP\n"
+               << "    --help                  Show this help\n"
               << std::endl;
 }
 
@@ -434,6 +546,8 @@ int main(int argc, char* argv[]) {
         else if (arg == "--blend") { doBlend = true; }
         else if (arg == "--fmax" && i + 1 < argc) { fMax = std::stod(argv[++i]); }
         else if (arg == "--export-step") { exportStep = true; }
+        else if (arg == "--no-translate") { g_translateToOrigin = false; }
+        else if (arg == "--translate-to-origin") { g_translateToOrigin = true; }
         else if (stepFile1.empty()) { stepFile1 = arg; }
         else if (stepFile2.empty()) { stepFile2 = arg; }
     }
@@ -811,7 +925,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (exportStep && !isPlanar) {
-        std::cout << "[Step 3c] Exporting surfaces to STEP (CATIA)..." << std::endl;
+        std::cout << "[Step 3c] Exporting surfaces to STEP (CAM/NX)..." << std::endl;
         exportOriginalSTEP(outDir + "/blade1_original.step", face1, sw1, "Blade-1");
         exportOriginalSTEP(outDir + "/blade2_original.step", face2, sw2, "Blade-2");
         exportDirectricesSTEP(outDir + "/blade1_directrices.step", gr1, "Blade-1");
@@ -819,8 +933,8 @@ int main(int argc, char* argv[]) {
         exportDirectricesJSON(outDir + "/blade1_directrices.json", gr1, "Blade-1");
         exportDirectricesJSON(outDir + "/blade2_directrices.json", gr2, "Blade-2");
         if (doBlend) {
-            exportCompositeSTEP(outDir + "/blade1_fitted.step", sw1, br1, bcfg, "Blade-1");
-            exportCompositeSTEP(outDir + "/blade2_fitted.step", sw2, br2, bcfg, "Blade-2");
+            exportCompositeSTEP(outDir + "/blade1_fitted.step", sw1, gr1, br1, bcfg, "Blade-1");
+            exportCompositeSTEP(outDir + "/blade2_fitted.step", sw2, gr2, br2, bcfg, "Blade-2");
         } else {
             exportFittedSTEP(outDir + "/blade1_fitted.step", sw1, gr1, "Blade-1");
             exportFittedSTEP(outDir + "/blade2_fitted.step", sw2, gr2, "Blade-2");
