@@ -48,9 +48,8 @@ void optimizeDirectrices(
 bool exportOBJ(const std::string& path,
                const Vec3Arr& verts, const FaceArr& faces);
 
-bool exportCurveParamsTXT(const std::string& path,
-                          const Handle(Geom_BSplineCurve)& curveC0,
-                          const Handle(Geom_BSplineCurve)& curveC1,
-                          int nSamples);
+// 导出优化后的直纹面准线（采样点形式），供 CAM 使用。
+bool exportDirectrixTXT(const std::string& path,
+                        const Vec3Arr& c0Samples, const Vec3Arr& c1Samples);
 
 } // namespace simple
