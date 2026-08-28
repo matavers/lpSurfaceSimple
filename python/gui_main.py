@@ -172,6 +172,7 @@ class MainWindow(QMainWindow):
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
         self._surfaceDims = [(0, 0), (0, 0)]
+        self._surfaceDirs = ["", ""]
         self._blendTrim = [0, 0]
         self._blendStrips = [0, 0]
         self._blendCorners = [0, 0]
@@ -1066,6 +1067,7 @@ class MainWindow(QMainWindow):
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
         self._surfaceDims = [(0, 0), (0, 0)]
+        self._surfaceDirs = ["", ""]
         self._blendTrim = [0, 0]
         self._blendStrips = [0, 0]
         self._blendCorners = [0, 0]
@@ -1178,7 +1180,9 @@ class MainWindow(QMainWindow):
             mesh_item.setData(2, Qt.UserRole, "mesh")
             bnode.addChild(mesh_item)
 
-            grid_item = QTreeWidgetItem(["Grid"])
+            dim = self._surfaceDims[bi] if bi < len(self._surfaceDims) else (0, 0)
+            d = self._surfaceDirs[bi] if bi < len(self._surfaceDirs) else ""
+            grid_item = QTreeWidgetItem([f"Grid ({dim[0]}x{dim[1]}, dir={d})"])
             grid_item.setFlags(grid_item.flags() | Qt.ItemIsUserCheckable)
             grid_item.setCheckState(0, Qt.Checked)
             grid_item.setData(1, Qt.UserRole, f"blade{bi + 1}_grid")
@@ -1186,7 +1190,7 @@ class MainWindow(QMainWindow):
             bnode.addChild(grid_item)
 
             if self._surfaceCellCounts[bi] > 0:
-                ruled_item = QTreeWidgetItem([f"Ruled Cells ({self._surfaceCellCounts[bi]})"])
+                ruled_item = QTreeWidgetItem([f"Ruled Cells ({self._surfaceCellCounts[bi]}, dir={d})"])
                 ruled_item.setFlags(ruled_item.flags() | Qt.ItemIsUserCheckable)
                 ruled_item.setCheckState(0, Qt.Checked)
                 ruled_item.setData(1, Qt.UserRole, f"blade{bi + 1}_ruled")
@@ -1246,13 +1250,15 @@ class MainWindow(QMainWindow):
             self._log(f"  Mode: {self._mode}")
         self._cellMeta = [[], []]
         self._surfaceDims = [(0, 0), (0, 0)]
+        self._surfaceDirs = ["", ""]
         for i, s in enumerate(meta.get("surfaces", [])):
             cells = s.get('cells', [])
             if i < 2:
                 self._surfaceCellCounts[i] = len(cells)
                 self._cellMeta[i] = cells
                 self._surfaceDims[i] = (s.get('nRows', 0), s.get('nCols', 0))
-            self._log(f"  {s['name']}: {len(cells)} cells")
+                self._surfaceDirs[i] = s.get('fitDir', '')
+            self._log(f"  {s['name']}: {len(cells)} cells, fitDir={self._surfaceDirs[i] if i < 2 else '?'}")
 
         self._load_all_objs()
 
