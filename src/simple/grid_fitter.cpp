@@ -10,9 +10,10 @@ namespace simple {
 
 namespace {
 
+// 拟合单个格子（指定方向 dir）。
 GridCell fitOneCell(const SurfaceWrapper& surf, int r, int c,
                     double u0, double u1, double v0, double v1,
-                    const GridConfig& cfg, bool planar)
+                    const GridConfig& cfg, bool planar, ParamDir dir)
 {
     GridCell cell;
     cell.row = r;
@@ -24,20 +25,55 @@ GridCell fitOneCell(const SurfaceWrapper& surf, int r, int c,
         cell.maxError = cell.plane.maxError;
         cell.rmsError = cell.plane.rmsError;
     } else {
-        cell.ruled = fitCellRuledAuto(surf, u0, u1, v0, v1,
-                                      cfg.nUSamples, cfg.nVSamples,
-                                      cfg.nRibs, cfg.lambda);
-        cell.fitDir = cell.ruled.fitDir;
+        cell.ruled = fitCellRuled(surf, u0, u1, v0, v1, dir,
+                                  cfg.nUSamples, cfg.nVSamples,
+                                  cfg.nRibs, cfg.lambda);
+        cell.fitDir = dir;
         cell.maxError = cell.ruled.maxError;
         cell.rmsError = cell.ruled.rmsError;
     }
     return cell;
 }
 
+// 全局方向试算：对当前网格所有格子分别按 U、V 方向拟合，取误差总和更小者。
+ParamDir determineDir(const SurfaceWrapper& surf,
+                      const std::vector<double>& uEdges,
+                      const std::vector<double>& vEdges,
+                      int nRows, int nCols,
+                      const GridConfig& cfg)
+{
+    double sumU = 0.0, sumV = 0.0;
+    for (int r = 0; r < nRows; ++r) {
+        for (int c = 0; c < nCols; ++c) {
+            double u0 = uEdges[c], u1 = uEdges[c + 1];
+            double v0 = vEdges[r], v1 = vEdges[r + 1];
+            RuledCellFit fu = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::U,
+                                           cfg.nUSamples, cfg.nVSamples,
+                                           cfg.nRibs, cfg.lambda);
+            RuledCellFit fv = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::V,
+                                           cfg.nUSamples, cfg.nVSamples,
+                                           cfg.nRibs, cfg.lambda);
+            sumU += fu.maxError;
+            sumV += fv.maxError;
+        }
+    }
+    return (sumV <= sumU) ? ParamDir::V : ParamDir::U;
+}
+
+// 用指定方向重新拟合网格所有格子。
+void fitAllCells(GridResult& g, const SurfaceWrapper& surf,
+                 const GridConfig& cfg, bool planar, ParamDir dir)
+{
+    for (int r = 0; r < g.nRows; ++r)
+        for (int c = 0; c < g.nCols; ++c)
+            g.cells[r * g.nCols + c] = fitOneCell(surf, r, c,
+                g.uEdges[c], g.uEdges[c + 1], g.vEdges[r], g.vEdges[r + 1],
+                cfg, planar, dir);
+}
+
 // 整列切分（在第 c 列插入竖直分割线）：拟合该列所有行的两个子格。
-// 返回 metric = 新格子 maxError 的最大值；out 为 2*nRows 个新格（每行左、右各一）。
 double buildColumnSplit(const SurfaceWrapper& surf, const GridResult& g, int c,
-                        const GridConfig& cfg, bool planar,
+                        const GridConfig& cfg, bool planar, ParamDir dir,
                         std::vector<GridCell>& out)
 {
     double um = (g.uEdges[c] + g.uEdges[c + 1]) * 0.5;
@@ -46,8 +82,8 @@ double buildColumnSplit(const SurfaceWrapper& surf, const GridResult& g, int c,
     double metric = 0.0;
     for (int r = 0; r < g.nRows; ++r) {
         double v0 = g.vEdges[r], v1 = g.vEdges[r + 1];
-        GridCell a = fitOneCell(surf, r, c,     g.uEdges[c], um, v0, v1, cfg, planar);
-        GridCell b = fitOneCell(surf, r, c + 1, um, g.uEdges[c + 1], v0, v1, cfg, planar);
+        GridCell a = fitOneCell(surf, r, c,     g.uEdges[c], um, v0, v1, cfg, planar, dir);
+        GridCell b = fitOneCell(surf, r, c + 1, um, g.uEdges[c + 1], v0, v1, cfg, planar, dir);
         metric = std::max(metric, std::max(a.maxError, b.maxError));
         out.push_back(a);
         out.push_back(b);
@@ -57,7 +93,7 @@ double buildColumnSplit(const SurfaceWrapper& surf, const GridResult& g, int c,
 
 // 整行切分（在第 r 行插入水平分割线）：拟合该行所有列的两个子格。
 double buildRowSplit(const SurfaceWrapper& surf, const GridResult& g, int r,
-                     const GridConfig& cfg, bool planar,
+                     const GridConfig& cfg, bool planar, ParamDir dir,
                      std::vector<GridCell>& out)
 {
     double vm = (g.vEdges[r] + g.vEdges[r + 1]) * 0.5;
@@ -66,8 +102,8 @@ double buildRowSplit(const SurfaceWrapper& surf, const GridResult& g, int r,
     double metric = 0.0;
     for (int c = 0; c < g.nCols; ++c) {
         double u0 = g.uEdges[c], u1 = g.uEdges[c + 1];
-        GridCell a = fitOneCell(surf, r,     c, u0, u1, g.vEdges[r], vm, cfg, planar);
-        GridCell b = fitOneCell(surf, r + 1, c, u0, u1, vm, g.vEdges[r + 1], cfg, planar);
+        GridCell a = fitOneCell(surf, r,     c, u0, u1, g.vEdges[r], vm, cfg, planar, dir);
+        GridCell b = fitOneCell(surf, r + 1, c, u0, u1, vm, g.vEdges[r + 1], cfg, planar, dir);
         metric = std::max(metric, std::max(a.maxError, b.maxError));
         out.push_back(a);
         out.push_back(b);
@@ -141,11 +177,12 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
     for (int c = 0; c <= nCols; ++c) g.uEdges[c] = u0 + (u1 - u0) * c / nCols;
     for (int r = 0; r <= nRows; ++r) g.vEdges[r] = v0 + (v1 - v0) * r / nRows;
 
+    // 初始方向：直纹面由全局试算决定，平面恒为 U
+    ParamDir gDir = planar ? ParamDir::U
+                           : determineDir(surf, g.uEdges, g.vEdges, nRows, nCols, cfg);
+    g.fitDir = gDir;
     g.cells.resize(nRows * nCols);
-    for (int r = 0; r < nRows; ++r)
-        for (int c = 0; c < nCols; ++c)
-            g.cells[r * nCols + c] = fitOneCell(surf, r, c,
-                g.uEdges[c], g.uEdges[c + 1], g.vEdges[r], g.vEdges[r + 1], cfg, planar);
+    fitAllCells(g, surf, cfg, planar, gDir);
 
     double minULen = (u1 - u0) * 1e-3;
     double minVLen = (v1 - v0) * 1e-3;
@@ -183,16 +220,25 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
         std::vector<GridCell> candU, candV;
         double mU = std::numeric_limits<double>::infinity();
         double mV = std::numeric_limits<double>::infinity();
-        if (canU) mU = buildColumnSplit(surf, g, c, cfg, planar, candU);
-        if (canV) mV = buildRowSplit(surf, g, r, cfg, planar, candV);
+        if (canU) mU = buildColumnSplit(surf, g, c, cfg, planar, gDir, candU);
+        if (canV) mV = buildRowSplit(surf, g, r, cfg, planar, gDir, candV);
 
         if (mU <= mV) applyColumnSplit(g, c, candU);
         else          applyRowSplit(g, r, candV);
 
+        // 每次二分后重新试算方向（非固定值）
+        if (!planar) {
+            ParamDir nd = determineDir(surf, g.uEdges, g.vEdges, g.nRows, g.nCols, cfg);
+            if (nd != gDir) {
+                gDir = nd;
+                g.fitDir = nd;
+                fitAllCells(g, surf, cfg, planar, gDir);
+            }
+        }
+
         rebuild(pq);
     }
 
-    // 汇总实际达到的最大误差与是否满足容差
     g.maxError = 0.0;
     for (const auto& cell : g.cells)
         g.maxError = std::max(g.maxError, cell.maxError);
@@ -285,7 +331,7 @@ bool exportGridLinesVTK(const std::string& path,
         nPts += (int)L.pts.size();
         int segs = (int)L.pts.size() - 1;
         nCells += segs;
-        cellSize += segs * 3;   // 每个线段：2 + 两个索引 = 3 个整数
+        cellSize += segs * 3;
     }
 
     out << "# vtk DataFile Version 3.0\n";
@@ -320,6 +366,7 @@ std::string buildGridMetaJson(const std::vector<GridResult>& results,
         const auto& gr = results[s];
         o << "{\"name\":\"" << gr.name << "\",\"nRows\":" << gr.nRows
           << ",\"nCols\":" << gr.nCols
+          << ",\"fitDir\":\"" << (gr.fitDir == ParamDir::U ? "U" : "V") << "\""
           << ",\"maxError\":" << gr.maxError
           << ",\"toleranceMet\":" << (gr.toleranceMet ? "true" : "false")
           << ",\"cells\":[";

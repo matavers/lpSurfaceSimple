@@ -11,7 +11,7 @@
 namespace simple {
 
 // 单个格子（参数域矩形）的直纹面拟合结果。
-// fitDir 由优化器自动指定（U 或 V）。
+// fitDir 为全局一致的直纹面方向（U 或 V），由网格拟合在每次二分后统一试算确定。
 struct RuledCellFit {
     ParamDir fitDir;
     Handle(Geom_BSplineCurve) curveC0;
@@ -30,12 +30,6 @@ RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
                           ParamDir dir,
                           int nUSamples, int nVSamples,
                           int nRibs, double lambda);
-
-// 单格直纹面拟合（自动方向）：U、V 各拟合一次，取 maxError 更小者。
-RuledCellFit fitCellRuledAuto(const SurfaceWrapper& surf,
-                              double u0, double u1, double v0, double v1,
-                              int nUSamples, int nVSamples,
-                              int nRibs, double lambda);
 
 Vec3Arr generateRuledMesh(const Vec3Arr& c0Samples,
                            const Vec3Arr& c1Samples,

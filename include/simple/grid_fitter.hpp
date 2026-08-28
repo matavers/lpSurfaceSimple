@@ -13,7 +13,7 @@ struct GridCell {
     int row = 0;
     int col = 0;
     double u0 = 0, u1 = 0, v0 = 0, v1 = 0;
-    ParamDir fitDir = ParamDir::U;   // 直纹面：优化器自动指定；平面：无效
+    ParamDir fitDir = ParamDir::U;   // 直纹面：全局一致方向；平面：无效
     PlaneCellFit plane;
     RuledCellFit ruled;
     double maxError = 0.0;
@@ -39,6 +39,7 @@ struct GridResult {
     std::vector<double> uEdges;   // nCols+1
     std::vector<double> vEdges;   // nRows+1
     std::vector<GridCell> cells;  // 行优先，size = nRows*nCols
+    ParamDir fitDir = ParamDir::V;   // 全局一致直纹面方向（每次二分后重试算）
     double maxError = 0.0;        // 细分后实际达到的最大误差（mm）
     bool toleranceMet = true;     // 是否满足 tolerance
 };

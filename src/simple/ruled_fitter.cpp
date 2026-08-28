@@ -256,16 +256,4 @@ RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
     return r;
 }
 
-RuledCellFit fitCellRuledAuto(const SurfaceWrapper& surf,
-                              double u0, double u1, double v0, double v1,
-                              int nUSamples, int nVSamples,
-                              int nRibs, double lambda)
-{
-    RuledCellFit fv = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::V,
-                                   nUSamples, nVSamples, nRibs, lambda);
-    RuledCellFit fu = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::U,
-                                   nUSamples, nVSamples, nRibs, lambda);
-    return (fv.maxError <= fu.maxError) ? fv : fu;
-}
-
 } // namespace simple

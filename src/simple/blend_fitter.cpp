@@ -87,38 +87,6 @@ void evalRuledCell(const GridCell& cell, double u, double v,
     }
 }
 
-// 直纹面扭矢 ∂²P/∂u∂v：∂/∂v[∂P/∂u]（或 ∂/∂u[∂P/∂v]）。
-// 直纹面 P 对母线方向线性、对准线方向分段线性，故扭矢为
-// 两准线切线之差 / 母线跨度，用于角点面片的完全 G1。
-Vec3 evalRuledCellTwist(const GridCell& cell, double u, double v) {
-    const Vec3Arr& c0 = cell.ruled.curveC0Samples;
-    const Vec3Arr& c1 = cell.ruled.curveC1Samples;
-    int n = static_cast<int>(c0.size());
-    if (n < 2) return Vec3(0, 0, 0);
-
-    if (cell.fitDir == ParamDir::V) {
-        // 准线沿 u，母线沿 v：∂²P/∂u∂v = (C1' - C0') / (v1 - v0)
-        double uN = clamp((u - cell.u0) / (cell.u1 - cell.u0), 0.0, 1.0);
-        double idx = uN * (n - 1);
-        int i0 = (int)std::floor(idx);
-        int i1 = std::min(i0 + 1, n - 1);
-        double du = (cell.u1 - cell.u0) / (n - 1);
-        Vec3 C0d = (c0[i1] - c0[i0]) / du;
-        Vec3 C1d = (c1[i1] - c1[i0]) / du;
-        return (C1d - C0d) / (cell.v1 - cell.v0);
-    } else {
-        // 准线沿 v，母线沿 u：∂²P/∂u∂v = (C1' - C0') / (u1 - u0)
-        double vN = clamp((v - cell.v0) / (cell.v1 - cell.v0), 0.0, 1.0);
-        double idx = vN * (n - 1);
-        int i0 = (int)std::floor(idx);
-        int i1 = std::min(i0 + 1, n - 1);
-        double dv = (cell.v1 - cell.v0) / (n - 1);
-        Vec3 C0d = (c0[i1] - c0[i0]) / dv;
-        Vec3 C1d = (c1[i1] - c1[i0]) / dv;
-        return (C1d - C0d) / (cell.u1 - cell.u0);
-    }
-}
-
 // 每格只内缩「内部边」，外边界不缩，保证复合面仍覆盖整个参数域
 struct TrimmedBounds { double u0, u1, v0, v1; };
 
@@ -207,8 +175,10 @@ BlendStrip buildVerticalStrip(const SurfaceWrapper& surf, const GridResult& gr,
         evalRuledCell(L, uL, v, PL, dUL, dVL);
         Vec3 PR, dUR, dVR;
         evalRuledCell(R, uR, v, PR, dUR, dVR);
-        Vec3 TP = dUL * gapU;
-        Vec3 TQ = dUR * gapU;
+        // 方向一致后：竖直缝在 fitDir=V 时两侧是母线（直线），退化为双线性 Coons（去切线）
+        bool rulingSeam = (L.fitDir == ParamDir::V);
+        Vec3 TP = rulingSeam ? Vec3(0, 0, 0) : dUL * gapU;
+        Vec3 TQ = rulingSeam ? Vec3(0, 0, 0) : dUR * gapU;
 
         for (int j = 0; j < nB; ++j) {
             double t = (nB == 1) ? 0.5 : (double)j / (nB - 1);
@@ -265,8 +235,10 @@ BlendStrip buildHorizontalStrip(const SurfaceWrapper& surf, const GridResult& gr
         evalRuledCell(T, u, vT, PT, dUT, dVT);
         Vec3 PB, dUB, dVB;
         evalRuledCell(B, u, vB, PB, dUB, dVB);
-        Vec3 TP = dVT * gapV;
-        Vec3 TQ = dVB * gapV;
+        // 方向一致后：水平缝在 fitDir=U 时两侧是母线（直线），退化为双线性 Coons（去切线）
+        bool rulingSeam = (T.fitDir == ParamDir::U);
+        Vec3 TP = rulingSeam ? Vec3(0, 0, 0) : dVT * gapV;
+        Vec3 TQ = rulingSeam ? Vec3(0, 0, 0) : dVB * gapV;
 
         for (int j = 0; j < nB; ++j) {
             double t = (nB == 1) ? 0.5 : (double)j / (nB - 1);
@@ -319,26 +291,27 @@ BlendCorner buildCornerPatch(const SurfaceWrapper& surf, const GridResult& gr,
     int n = cfg.nMeshRes + 1;
     cp.meshVerts.resize(n * n);
 
-    // 双三次 Hermite (Ferguson) 角点面片：
-    // 插值 4 角点位置 + 8 个一阶偏导 + 4 个扭矢（从 cell 直纹面差分估计），
+    // 双三次 Hermite (Ferguson) 角点面片（扭矢置 0）：
+    // 插值 4 角点位置 + 8 个一阶偏导（方向一致后扭矢置 0 简化），
     // 四条边即条带端边的 Hermite 曲线（G0 严丝合缝），跨界切线在角点处严格、
-    // 沿边与条带完全 G1。
+    // 沿边与条带 G1。
     double du = uR - uL, dv = vT - vB;
 
     Vec3 P00, P10, P01, P11;                 // 角点位置 (s,t)=(i,j)
     Vec3 Su00, Su10, Su01, Su11;             // ∂/∂s = ∂/∂u * du
     Vec3 Sv00, Sv10, Sv01, Sv11;             // ∂/∂t = ∂/∂v * dv
-    Vec3 W00, W10, W01, W11;                 // ∂²/∂s∂t = ∂²P/∂u∂v * du*dv
+    Vec3 W00, W10, W01, W11;                 // 扭矢置 0（方向一致后简化）
     {
         Vec3 dU, dV;
         evalRuledCell(TL, uL, vB, P00, dU, dV);
-        Su00 = dU * du; Sv00 = dV * dv; W00 = evalRuledCellTwist(TL, uL, vB) * (du * dv);
+        Su00 = dU * du; Sv00 = dV * dv;
         evalRuledCell(TR, uR, vB, P10, dU, dV);
-        Su10 = dU * du; Sv10 = dV * dv; W10 = evalRuledCellTwist(TR, uR, vB) * (du * dv);
+        Su10 = dU * du; Sv10 = dV * dv;
         evalRuledCell(BL, uL, vT, P01, dU, dV);
-        Su01 = dU * du; Sv01 = dV * dv; W01 = evalRuledCellTwist(BL, uL, vT) * (du * dv);
+        Su01 = dU * du; Sv01 = dV * dv;
         evalRuledCell(BR, uR, vT, P11, dU, dV);
-        Su11 = dU * du; Sv11 = dV * dv; W11 = evalRuledCellTwist(BR, uR, vT) * (du * dv);
+        Su11 = dU * du; Sv11 = dV * dv;
+        W00 = W10 = W01 = W11 = Vec3(0, 0, 0);
     }
 
     ErrorStat e;
