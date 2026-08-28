@@ -91,6 +91,21 @@ add_custom_command(TARGET simple_dll POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${OCCT_3RDPARTY}/jemalloc-vc14-64/bin/jemalloc.dll"
         "$<TARGET_FILE_DIR:simple_dll>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/openvr-1.14.15-64/bin/win64/openvr_api.dll"
+        "$<TARGET_FILE_DIR:simple_dll>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/avcodec-57.dll"
+        "$<TARGET_FILE_DIR:simple_dll>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/avformat-57.dll"
+        "$<TARGET_FILE_DIR:simple_dll>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/avutil-55.dll"
+        "$<TARGET_FILE_DIR:simple_dll>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/swscale-4.dll"
+        "$<TARGET_FILE_DIR:simple_dll>"
     COMMENT "Deploying runtime dependencies for DLL"
 )
 
@@ -125,6 +140,21 @@ add_custom_command(TARGET simple POST_BUILD
         "$<TARGET_FILE_DIR:simple>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${OCCT_3RDPARTY}/jemalloc-vc14-64/bin/jemalloc.dll"
+        "$<TARGET_FILE_DIR:simple>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/openvr-1.14.15-64/bin/win64/openvr_api.dll"
+        "$<TARGET_FILE_DIR:simple>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/avcodec-57.dll"
+        "$<TARGET_FILE_DIR:simple>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/avformat-57.dll"
+        "$<TARGET_FILE_DIR:simple>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/avutil-55.dll"
+        "$<TARGET_FILE_DIR:simple>"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${OCCT_3RDPARTY}/ffmpeg-3.3.4-64/bin/swscale-4.dll"
         "$<TARGET_FILE_DIR:simple>"
     COMMENT "Deploying runtime dependencies for EXE"
 )
