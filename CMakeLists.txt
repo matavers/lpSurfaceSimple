@@ -5,20 +5,25 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# OCCT root (relative to Simple, pointing to ../OCCT/opencascade-8.0.0-vc14-64-combined)
-set(OCCT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../OCCT/opencascade-8.0.0-vc14-64-combined/opencascade-8.0.0-vc14-64"
-    CACHE PATH "Path to OCCT root")
-set(OCCT_BIN_DIR "${OCCT_ROOT}/win64/vc14/bin")
+# OCCT static build root (relative to Simple, pointing to Simple/3rdPart/OCCT-build-static)
+set(OCCT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/3rdPart/OCCT-build-static"
+    CACHE PATH "Path to OCCT static build root")
 set(OCCT_LIB_DIR "${OCCT_ROOT}/win64/vc14/lib")
-set(OCCT_INC_DIR "${OCCT_ROOT}/inc")
+# Headers from the combined package (OCCT 8.0.0, complete, includes deprecated
+# collection aliases like TColgp_Array1OfPnt.hxx absent from the build-tree inc).
+set(OCCT_INC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OCCT/opencascade-8.0.0-vc14-64-combined/opencascade-8.0.0-vc14-64/inc")
 
 set(OCCT_3RDPARTY "${CMAKE_CURRENT_SOURCE_DIR}/../OCCT/opencascade-8.0.0-vc14-64-combined/3rdparty-vc14-64")
 
 set(OCCT_MODULES
-    TKernel TKMath TKGeomBase TKGeomAlgo
-    TKG2d TKG3d TKMesh TKBRep TKTopAlgo
-    TKBO TKService TKXSBase TKDESTEP TKShHealing
-    TKDEIGES TKXSDRAW
+    TKernel TKMath TKG2d TKG3d TKGeomBase TKBRep
+    TKGeomAlgo TKTopAlgo TKPrim TKBO TKShHealing TKBool
+    TKHLR TKHelix TKFillet TKOffset TKFeat TKMesh TKXMesh TKExpress
+    TKService TKV3d TKOpenGl TKMeshVS
+    TKCDF TKLCAF TKCAF TKBinL TKXmlL TKBin TKXml TKStdL TKStd
+    TKTObj TKBinTObj TKXmlTObj TKVCAF
+    TKDE TKXSBase TKDESTEP TKXCAF TKDEIGES TKDESTL TKDEVRML TKRWMesh
+    TKDECascade TKBinXCAF TKXmlXCAF TKDEOBJ TKDEPLY
 )
 
 foreach(mod ${OCCT_MODULES})
@@ -37,7 +42,12 @@ endforeach()
 
 add_library(OCCT INTERFACE)
 target_include_directories(OCCT INTERFACE "${OCCT_INC_DIR}")
+target_compile_definitions(OCCT INTERFACE OCCT_STATIC_BUILD OCCT_NO_PLUGINS)
 target_link_libraries(OCCT INTERFACE ${OCCT_LIBRARIES})
+if(MSVC)
+    # Windows system libraries required by OCCT static libraries.
+    target_link_libraries(OCCT INTERFACE wsock32 advapi32 gdi32 user32 shell32 psapi winmm opengl32)
+endif()
 
 # Eigen (bundled in VTK)
 set(EIGEN3_ROOT "${OCCT_3RDPARTY}/vtk-9.4.1-x64/include/vtk-9.4/vtkeigen")
@@ -71,29 +81,6 @@ if(MSVC)
     target_compile_definitions(simple_dll PRIVATE RULED_DLL_EXPORTS)
 endif()
 
-add_custom_command(TARGET simple_dll POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo "Copying OCCT runtime DLLs to DLL output..."
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${OCCT_BIN_DIR}"
-        "$<TARGET_FILE_DIR:simple_dll>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/freetype-2.13.3-x64/bin/freetype.dll"
-        "$<TARGET_FILE_DIR:simple_dll>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/freeimage-3.18.0-x64/bin/FreeImage.dll"
-        "$<TARGET_FILE_DIR:simple_dll>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/tbb-2021.13.0-x64/bin/tbb12.dll"
-        "$<TARGET_FILE_DIR:simple_dll>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/tbb-2021.13.0-x64/bin/tbbmalloc.dll"
-        "$<TARGET_FILE_DIR:simple_dll>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/jemalloc-vc14-64/bin/jemalloc.dll"
-        "$<TARGET_FILE_DIR:simple_dll>"
-    COMMENT "Deploying runtime dependencies for DLL"
-)
-
 # ── Executable (CLI) ─────────────────────────────
 add_executable(simple ${CORE_SOURCES})
 target_include_directories(simple PRIVATE ${SIMPLE_INCLUDE_DIR})
@@ -106,25 +93,4 @@ if(MSVC)
     )
 endif()
 
-add_custom_command(TARGET simple POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo "Copying OCCT runtime DLLs to EXE output..."
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${OCCT_BIN_DIR}"
-        "$<TARGET_FILE_DIR:simple>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/freetype-2.13.3-x64/bin/freetype.dll"
-        "$<TARGET_FILE_DIR:simple>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/freeimage-3.18.0-x64/bin/FreeImage.dll"
-        "$<TARGET_FILE_DIR:simple>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/tbb-2021.13.0-x64/bin/tbb12.dll"
-        "$<TARGET_FILE_DIR:simple>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/tbb-2021.13.0-x64/bin/tbbmalloc.dll"
-        "$<TARGET_FILE_DIR:simple>"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${OCCT_3RDPARTY}/jemalloc-vc14-64/bin/jemalloc.dll"
-        "$<TARGET_FILE_DIR:simple>"
-    COMMENT "Deploying runtime dependencies for EXE"
-)
+# OCCT static libraries are self-contained (no runtime DLL deployment needed).

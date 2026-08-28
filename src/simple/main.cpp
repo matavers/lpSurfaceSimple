@@ -749,7 +749,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "  wrote " << segPath << std::endl;
                 std::string paramPath = outDir + "/" + bladeName
                     + "_seg" + std::to_string(seg.segmentIndex) + "_params.txt";
-                simple::exportCurveParamsTXT(paramPath, seg.curveC0, seg.curveC1, nUSamples);
+                simple::exportDirectrixTXT(paramPath, seg.curveC0Samples, seg.curveC1Samples);
                 std::cout << "  wrote " << paramPath << std::endl;
             }
         }

@@ -24,36 +24,12 @@ typedef enum {
     RULED_ERR_INVALID_PARAMS = 5
 } RuledErrorCode;
 
-/* ─── Parameter direction ──────────────────────────────────── */
-typedef enum {
-    RULED_DIR_U = 0,
-    RULED_DIR_V = 1
-} RuledDirection;
-
 /* ─── Config ───────────────────────────────────────────────── */
 typedef struct {
-    const char* stepFile1;
-    const char* stepFile2;
-    const char* outputDir;
-    int nUSamples;          /* default 50 */
-    int nVSamples;          /* default 10 */
-    int nRibs;              /* default 20 */
-    double lambda;          /* default 1.0 */
-    RuledDirection splitDir[2];
-    int directrixDirs[2][10];
-    int numDirectrixDirs[2];
-    int faceIdx[2];         /* -1 = auto-pick largest */
-} RuledConfig;
-
-typedef struct {
-    const char* stepFile1;
-    const char* stepFile2;
-    const char* outputDir;
-    int nUSamples;          /* default 50 */
-    int nVSamples;          /* default 10 */
-    RuledDirection splitDir[2];
-    int faceIdx[2];         /* -1 = auto-pick largest */
-} PlanarConfig;
+    const char* inputPath;   /* 输入叶片 STEP/IGES 文件路径（单文件） */
+    const char* outputDir;   /* 输出目录 */
+    double      tolerance;   /* 容差 (mm)，<=0 时取默认 0.1 */
+} RuledFitConfig;
 
 /* ─── Per-segment result ───────────────────────────────────── */
 typedef struct {
@@ -65,8 +41,9 @@ typedef struct {
 /* ─── Per-surface result ───────────────────────────────────── */
 typedef struct {
     char name[64];
-    RuledSegmentResult segments[10];
-    int numSegments;
+    double maxError;                /* 该面整体最大误差（用于判断是否满足容差） */
+    RuledSegmentResult segments[64]; /* 各面片误差（前 64 个） */
+    int numSegments;                /* 实际面片数（可能超过 64，详见 metaJson） */
 } RuledSurfaceResult;
 
 /* ─── Overall result ───────────────────────────────────────── */
@@ -75,20 +52,18 @@ typedef struct {
     char errorMsg[256];
     int numSurfaces;
     RuledSurfaceResult surfaces[2];
-    char metaJson[2048];
+    char metaJson[4096];
 } RuledFittingResult;
 
 /* ─── API functions ────────────────────────────────────────── */
 
-/* Legacy: two-file input, manual face selection */
-RULED_API RuledFittingResult* ruled_surface_fitting(const RuledConfig* config);
-RULED_API RuledFittingResult* plane_surface_fitting(const PlanarConfig* config);
+/* 主接口：单文件自动识别压力面/吸力面并拟合。
+   流程：先 3 等分拟合；若最大误差 < tolerance 直接输出；
+   否则按 tolerance 做井字形网格自适应细分。仅输出 .obj 与 .txt。 */
+RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* config);
 
-/* New: single-file auto blade processing (auto-identify + split + fit) */
-RULED_API RuledFittingResult* pressure_ruled_fitting(const RuledConfig* config);
-RULED_API RuledFittingResult* pressure_plane_fitting(const PlanarConfig* config);
-RULED_API RuledFittingResult* suction_ruled_fitting(const RuledConfig* config);
-RULED_API RuledFittingResult* suction_plane_fitting(const PlanarConfig* config);
+/* 简化接口：批量处理输入目录下的 STEP/IGES 文件，固定 3 等分拟合（无容差判断）。 */
+RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const char* outputDir);
 
 RULED_API void free_result(RuledFittingResult* result);
 

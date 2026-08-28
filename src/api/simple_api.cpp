@@ -1,17 +1,17 @@
 #include "ruledSurfaceFitting.h"
 
 #include <cstring>
-#include <cstdlib>
-#include <algorithm>
+#include <cctype>
+#include <string>
 #include <sstream>
-#include <fstream>
 #include <filesystem>
+#include <algorithm>
 
 #include "simple/common.hpp"
 #include "simple/step_reader.hpp"
 #include "simple/surface_wrapper.hpp"
 #include "simple/ruled_fitter.hpp"
-#include "simple/planar_fitter.hpp"
+#include "simple/grid_fitter.hpp"
 #include "simple/blade_identifier.hpp"
 #include "simple/blade_splitter.hpp"
 
@@ -19,33 +19,20 @@
 #include <BRep_Tool.hxx>
 #include <GeomConvert.hxx>
 #include <Geom_Surface.hxx>
-#include <TopExp_Explorer.hxx>
+#include <TopoDS_Face.hxx>
 
 using namespace simple;
+namespace fs = std::filesystem;
 
 namespace {
 
-TopoDS_Face pickFace(const std::vector<TopoDS_Face>& faces, int forceIdx) {
-    if (faces.empty()) return TopoDS_Face();
-    if (forceIdx >= 0 && forceIdx < (int)faces.size()) return faces[forceIdx];
-    if (faces.size() == 1) return faces[0];
-    int bestIdx = 0; double bestDiag = 0.0;
-    for (size_t i = 0; i < faces.size(); ++i) {
-        BRepAdaptor_Surface a(faces[i], true);
-        Vec3 bmin(1e30,1e30,1e30), bmax(-1e30,-1e30,-1e30);
-        for (int ui = 0; ui <= 4; ++ui)
-            for (int vi = 0; vi <= 4; ++vi) {
-                double u = a.FirstUParameter() + (a.LastUParameter()-a.FirstUParameter())*ui/4.0;
-                double v = a.FirstVParameter() + (a.LastVParameter()-a.FirstVParameter())*vi/4.0;
-                gp_Pnt p = a.Value(u, v);
-                bmin=Vec3(std::min(bmin.x(),p.X()),std::min(bmin.y(),p.Y()),std::min(bmin.z(),p.Z()));
-                bmax=Vec3(std::max(bmax.x(),p.X()),std::max(bmax.y(),p.Y()),std::max(bmax.z(),p.Z()));
-            }
-        double d = (bmax-bmin).norm();
-        if (d > bestDiag) { bestDiag = d; bestIdx = (int)i; }
-    }
-    return faces[bestIdx];
-}
+struct Defaults {
+    static constexpr int nUSamples = 50;
+    static constexpr int nVSamples = 10;
+    static constexpr int nRibs = 20;
+    static constexpr double lambda = 1.0;
+    static constexpr double tolerance = 0.1;
+};
 
 Handle(Geom_BSplineSurface) faceToSurf(const TopoDS_Face& f) {
     BRepAdaptor_Surface a(f, true);
@@ -53,418 +40,272 @@ Handle(Geom_BSplineSurface) faceToSurf(const TopoDS_Face& f) {
     return GeomConvert::SurfaceToBSplineSurface(BRep_Tool::Surface(f));
 }
 
-ParamDir toDir(RuledDirection d) { return (d == RULED_DIR_U) ? ParamDir::U : ParamDir::V; }
-
-void exportCurveJSON(const std::string& path, const Vec3Arr& c0, const Vec3Arr& c1) {
-    std::ofstream o(path);
-    if (!o) return;
-    o << "{\"C0\":["; for (size_t i = 0; i < c0.size(); ++i) {
-        if (i) o << ","; o << "[" << c0[i].x() << "," << c0[i].y() << "," << c0[i].z() << "]"; }
-    o << "],\"C1\":["; for (size_t i = 0; i < c1.size(); ++i) {
-        if (i) o << ","; o << "[" << c1[i].x() << "," << c1[i].y() << "," << c1[i].z() << "]"; }
-    o << "]}\n";
-}
-
-void exportPlaneTXT(const std::string& path, const Vec3& centroid, const Vec3& normal,
-                     const Vec3Arr& corners) {
-    std::ofstream o(path);
-    if (!o) return;
-    o << std::fixed << std::setprecision(6);
-    o << "centroid = " << centroid.x() << " " << centroid.y() << " " << centroid.z() << "\n";
-    o << "normal = " << normal.x() << " " << normal.y() << " " << normal.z() << "\n";
-    if (corners.size() >= 4) {
-        for (size_t i = 0; i < 4; ++i)
-            o << "corner" << i << " = " << corners[i].x() << " "
-              << corners[i].y() << " " << corners[i].z() << "\n";
-    }
-}
-
-void exportMeta(const std::string& path, const std::string& mode,
-                const std::string& f1, const std::string& f2,
-                const std::vector<double>& errors1, const std::vector<double>& errors2) {
-    auto jsonSafe = [](std::string s) {
-        for (char& c : s) { if (c == '\\') c = '/'; if (c == '"') c = '\''; }
-        return s;
-    };
-    std::ofstream o(path);
-    o << "{\"mode\":\"" << mode << "\",\"files\":[\"" << jsonSafe(f1) << "\",\"" << jsonSafe(f2) << "\"],\"surfaces\":[";
-    for (int s = 0; s < 2; ++s) {
-        if (s) o << ",";
-        o << "{\"name\":\"" << ((s==0)?"Blade-1":"Blade-2") << "\",\"segments\":[";
-        const auto& e = (s==0) ? errors1 : errors2;
-        for (size_t j = 0; j < e.size(); j+=2) {
-            if (j) o << ",";
-            o << "{\"index\":" << (j/2) << ",\"maxErr\":" << e[j] << ",\"rmsErr\":" << e[j+1] << "}";
+// 取压力/吸力侧在弦向分割中的参数区间（沿用 splitBladeFaceBySection 的 uStart/uEnd 语义，即 V 区间）
+bool sideVRange(const TopoDS_Face& face, bool wantPressure,
+                double& v0, double& v1, std::string& err) {
+    BladeSplitResult split = splitBladeFaceBySection(face);
+    if (!split.success) { err = split.message; return false; }
+    v0 = -1; v1 = -1;
+    for (const auto& reg : split.regions) {
+        if ((wantPressure && reg.label == "pressure") ||
+            (!wantPressure && reg.label == "suction")) {
+            v0 = reg.uStart; v1 = reg.uEnd; break;
         }
-        o << "]}";
     }
-    o << "]}\n";
+    if (v0 < 0) {
+        err = wantPressure ? "pressure region not found" : "suction region not found";
+        return false;
+    }
+    return true;
+}
+
+struct SideOutcome {
+    bool ok = false;
+    int numPieces = 0;
+    double maxError = 0.0;
+    std::vector<double> pieceMaxErr;
+    std::vector<double> pieceRmsErr;
+};
+
+// 拟合单个侧面：先 3 等分；若最大误差 < tolerance 直接输出，否则井字形网格细分。
+SideOutcome fitAndExportSide(const SurfaceWrapper& sw, const std::string& prefix,
+                             const std::string& outDir, double tolerance) {
+    SideOutcome out;
+    const int nU = Defaults::nUSamples, nV = Defaults::nVSamples, nRibs = Defaults::nRibs;
+    const double lam = Defaults::lambda;
+
+    std::vector<ParamDir> dd = { ParamDir::V, ParamDir::V, ParamDir::V };
+    RuledResult rr = fitRuledSegments(sw, 3, ParamDir::V, dd, nU, nV, 0, prefix);
+
+    double maxErr = 0.0;
+    for (const auto& seg : rr.segments) maxErr = std::max(maxErr, seg.maxError);
+
+    if (maxErr < tolerance) {
+        for (size_t i = 0; i < rr.segments.size(); ++i) {
+            const auto& seg = rr.segments[i];
+            exportOBJ(outDir + "/" + prefix + "_seg" + std::to_string(i) + ".obj",
+                      seg.ruledMeshVerts, seg.ruledMeshFaces);
+            exportDirectrixTXT(outDir + "/" + prefix + "_seg" + std::to_string(i) + "_params.txt",
+                               seg.curveC0Samples, seg.curveC1Samples);
+            out.pieceMaxErr.push_back(seg.maxError);
+            out.pieceRmsErr.push_back(seg.rmsError);
+        }
+        out.numPieces = (int)rr.segments.size();
+        out.maxError = maxErr;
+        out.ok = true;
+        return out;
+    }
+
+    GridConfig gcfg;
+    gcfg.nSplitU = 2;
+    gcfg.nSplitV = 2;
+    gcfg.tolerance = tolerance;
+    gcfg.nUSamples = nU;
+    gcfg.nVSamples = nV;
+    gcfg.nRibs = nRibs;
+    gcfg.lambda = lam;
+
+    GridResult gr = fitGridRuled(sw, gcfg, prefix);
+    for (const auto& cell : gr.cells) {
+        int idx = cell.row * gr.nCols + cell.col;
+        exportOBJ(outDir + "/" + prefix + "_seg" + std::to_string(idx) + ".obj",
+                  cell.ruled.ruledMeshVerts, cell.ruled.ruledMeshFaces);
+        exportDirectrixTXT(outDir + "/" + prefix + "_seg" + std::to_string(idx) + "_params.txt",
+                           cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
+        out.pieceMaxErr.push_back(cell.maxError);
+        out.pieceRmsErr.push_back(cell.rmsError);
+    }
+    out.numPieces = (int)gr.cells.size();
+    out.maxError = gr.maxError;
+    out.ok = true;
+    return out;
+}
+
+std::string jsonSafeStr(std::string s) {
+    for (char& c : s) { if (c == '\\') c = '/'; if (c == '"') c = '\''; }
+    return s;
+}
+
+std::string buildSummaryJson(const std::string& mode, const std::string& file,
+                             const std::vector<std::pair<std::string, SideOutcome>>& sides,
+                             double tolerance) {
+    std::ostringstream o;
+    o << "{\"mode\":\"" << mode << "\",\"tolerance\":" << tolerance
+      << ",\"file\":\"" << jsonSafeStr(file) << "\",\"surfaces\":[";
+    for (size_t i = 0; i < sides.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"name\":\"" << sides[i].first << "\",\"numSegments\":" << sides[i].second.numPieces
+          << ",\"maxError\":" << sides[i].second.maxError << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
+bool hasSupportedExt(const fs::path& p) {
+    std::string ext = p.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return ext == ".step" || ext == ".stp" || ext == ".igs" || ext == ".iges";
 }
 
 } // anon
 
 extern "C" {
 
-RULED_API RuledFittingResult* ruled_surface_fitting(const RuledConfig* cfg) {
-    RuledFittingResult* res = new RuledFittingResult(); std::memset(res, 0, sizeof(RuledFittingResult));
-    if (!cfg || !cfg->stepFile1 || !cfg->stepFile2) {
-        res->errorCode = RULED_ERR_INVALID_PARAMS; return res;
+RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* cfg) {
+    RuledFittingResult* res = new RuledFittingResult();
+    std::memset(res, 0, sizeof(*res));
+
+    if (!cfg || !cfg->inputPath || !cfg->inputPath[0] || !cfg->outputDir || !cfg->outputDir[0]) {
+        res->errorCode = RULED_ERR_INVALID_PARAMS;
+        return res;
     }
 
-    RuledConfig c = *cfg;
-    if (c.nUSamples <= 0) c.nUSamples = 50;
-    if (c.nVSamples <= 0) c.nVSamples = 10;
-    if (c.nRibs <= 0) c.nRibs = 20;
-    if (c.lambda <= 0.0) c.lambda = 1.0;
-    for (int i = 0; i < 2; ++i) if (c.numDirectrixDirs[i] <= 0) c.numDirectrixDirs[i] = 3;
-    std::filesystem::create_directories(std::filesystem::path(c.outputDir ? c.outputDir : "."));
+    double tol = cfg->tolerance;
+    if (tol <= 0.0) tol = Defaults::tolerance;
 
-    StepLoadResult r1 = loadStepFile(c.stepFile1), r2 = loadStepFile(c.stepFile2);
-    if (!r1.loaded || !r2.loaded) { res->errorCode = RULED_ERR_STEP_READ_FAILED; return res; }
+    std::string inPath = cfg->inputPath;
+    std::string outDir = cfg->outputDir;
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
 
-    TopoDS_Face f1 = pickFace(r1.faces, c.faceIdx[0]), f2 = pickFace(r2.faces, c.faceIdx[1]);
-    if (f1.IsNull() || f2.IsNull()) { res->errorCode = RULED_ERR_NO_VALID_FACE; return res; }
-
-    Handle(Geom_BSplineSurface) sf1 = faceToSurf(f1), sf2 = faceToSurf(f2);
-    BRepAdaptor_Surface a1(f1, true), a2(f2, true);
-
-    SurfaceWrapper sw1(sf1, a1.FirstUParameter(), a1.LastUParameter(), a1.FirstVParameter(), a1.LastVParameter());
-    SurfaceWrapper sw2(sf2, a2.FirstUParameter(), a2.LastUParameter(), a2.FirstVParameter(), a2.LastVParameter());
-
-    std::vector<ParamDir> dd1, dd2;
-    for (int j = 0; j < c.numDirectrixDirs[0]; ++j) dd1.push_back(toDir((RuledDirection)c.directrixDirs[0][j]));
-    for (int j = 0; j < c.numDirectrixDirs[1]; ++j) dd2.push_back(toDir((RuledDirection)c.directrixDirs[1][j]));
-
-    int ns = c.numDirectrixDirs[0];
-    auto rr1 = fitRuledSegments(sw1, ns, toDir(c.splitDir[0]), dd1, c.nUSamples, c.nVSamples, 0, "Blade-1");
-    auto rr2 = fitRuledSegments(sw2, ns, toDir(c.splitDir[1]), dd2, c.nUSamples, c.nVSamples, 0, "Blade-2");
-
-    std::string od = c.outputDir ? c.outputDir : ".";
-    // mesh + seg OBJs
-    for (int bi = 0; bi < 2; ++bi) {
-        auto& f = (bi==0)?f1:f2; auto& a = (bi==0)?a1:a2; auto& rr = (bi==0)?rr1:rr2;
-        std::string pfx = (bi==0)?"blade1":"blade2";
-        Vec3Arr mv; std::vector<std::array<int,3>> mf;
-        double defl = (a.FirstUParameter() + a.FirstVParameter()) * 0.005;
-        if (defl < 0.1) defl = 0.1;
-        generateFaceMesh(f, defl, mv, mf);
-        exportOBJ(od + "/" + pfx + "_mesh.obj", mv, mf);
-        for (auto& seg : rr.segments) {
-            std::string sp = od + "/" + pfx + "_seg" + std::to_string(seg.segmentIndex) + ".obj";
-            exportOBJ(sp, seg.ruledMeshVerts, seg.ruledMeshFaces);
-            std::string cp = od + "/" + pfx + "_seg" + std::to_string(seg.segmentIndex) + "_params.txt";
-            exportCurveParamsTXT(cp, seg.curveC0, seg.curveC1, c.nUSamples);
-        }
+    StepLoadResult r = loadStepFile(inPath);
+    if (!r.loaded) {
+        res->errorCode = RULED_ERR_STEP_READ_FAILED;
+        std::strncpy(res->errorMsg, r.errorMsg.c_str(), sizeof(res->errorMsg) - 1);
+        return res;
     }
-    std::vector<double> e1, e2;
-    for (auto& s : rr1.segments) { e1.push_back(s.maxError); e1.push_back(s.rmsError); }
-    for (auto& s : rr2.segments) { e2.push_back(s.maxError); e2.push_back(s.rmsError); }
-    exportMeta(od + "/meta.json", "ruled", c.stepFile1, c.stepFile2, e1, e2);
-
-    std::ostringstream o; o << "{\"ok\":true,\"mode\":\"ruled\",\"surfaces\":[{";
-    o << "\"name\":\"Blade-1\",\"segments\":[";
-    for (size_t j = 0; j < rr1.segments.size(); ++j) {
-        if (j) o << ","; o << "{\"maxErr\":" << rr1.segments[j].maxError << ",\"rmsErr\":" << rr1.segments[j].rmsError << "}"; }
-    o << "]},{"; o << "\"name\":\"Blade-2\",\"segments\":[";
-    for (size_t j = 0; j < rr2.segments.size(); ++j) {
-        if (j) o << ","; o << "{\"maxErr\":" << rr2.segments[j].maxError << ",\"rmsErr\":" << rr2.segments[j].rmsError << "}"; }
-    o << "]}]}";
-    std::string j = o.str(); std::strncpy(res->metaJson, j.c_str(), sizeof(res->metaJson)-1);
-
-    res->errorCode = RULED_OK; res->numSurfaces = 2;
-    for (int si = 0; si < 2; ++si) {
-        auto& r = (si==0)?rr1:rr2;
-        std::strncpy(res->surfaces[si].name, r.name.c_str(), 63);
-        res->surfaces[si].numSegments = (int)r.segments.size();
-        for (size_t k = 0; k < r.segments.size() && k < 10; ++k) {
-            res->surfaces[si].segments[k].segmentIndex = (int)k;
-            res->surfaces[si].segments[k].maxError = r.segments[k].maxError;
-            res->surfaces[si].segments[k].rmsError = r.segments[k].rmsError;
-        }
-    }
-    return res;
-}
-
-RULED_API RuledFittingResult* plane_surface_fitting(const PlanarConfig* cfg) {
-    // ... existing implementation ... unchanged
-    RuledFittingResult* res = new RuledFittingResult(); std::memset(res, 0, sizeof(RuledFittingResult));
-    if (!cfg || !cfg->stepFile1 || !cfg->stepFile2) {
-        res->errorCode = RULED_ERR_INVALID_PARAMS; return res;
-    }
-    PlanarConfig c = *cfg;
-    if (c.nUSamples <= 0) c.nUSamples = 50;
-    if (c.nVSamples <= 0) c.nVSamples = 10;
-    std::filesystem::create_directories(std::filesystem::path(c.outputDir ? c.outputDir : "."));
-
-    StepLoadResult r1 = loadStepFile(c.stepFile1), r2 = loadStepFile(c.stepFile2);
-    if (!r1.loaded || !r2.loaded) { res->errorCode = RULED_ERR_STEP_READ_FAILED; return res; }
-
-    TopoDS_Face f1 = pickFace(r1.faces, c.faceIdx[0]), f2 = pickFace(r2.faces, c.faceIdx[1]);
-    if (f1.IsNull() || f2.IsNull()) { res->errorCode = RULED_ERR_NO_VALID_FACE; return res; }
-
-    Handle(Geom_BSplineSurface) sf1 = faceToSurf(f1), sf2 = faceToSurf(f2);
-    BRepAdaptor_Surface a1(f1, true), a2(f2, true);
-
-    SurfaceWrapper sw1(sf1, a1.FirstUParameter(), a1.LastUParameter(), a1.FirstVParameter(), a1.LastVParameter());
-    SurfaceWrapper sw2(sf2, a2.FirstUParameter(), a2.LastUParameter(), a2.FirstVParameter(), a2.LastVParameter());
-
-    auto pr1 = fitPlanarSegments(sw1, 3, toDir(c.splitDir[0]), c.nUSamples, c.nVSamples, 0, "Blade-1");
-    auto pr2 = fitPlanarSegments(sw2, 3, toDir(c.splitDir[1]), c.nUSamples, c.nVSamples, 0, "Blade-2");
-
-    std::string od = c.outputDir ? c.outputDir : ".";
-    for (int bi = 0; bi < 2; ++bi) {
-        auto& f = (bi==0)?f1:f2; auto& a = (bi==0)?a1:a2; auto& pr = (bi==0)?pr1:pr2;
-        std::string pfx = (bi==0)?"blade1":"blade2";
-        Vec3Arr mv; std::vector<std::array<int,3>> mf;
-        double defl = (a.FirstUParameter() + a.FirstVParameter()) * 0.005;
-        if (defl < 0.1) defl = 0.1;
-        generateFaceMesh(f, defl, mv, mf);
-        exportOBJ(od + "/" + pfx + "_mesh.obj", mv, mf);
-        for (auto& seg : pr.segments) {
-            std::string sp = od + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + ".obj";
-            exportOBJ(sp, seg.meshVerts, seg.meshFaces);
-            std::string dp = od + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + "_desc.txt";
-            exportPlaneTXT(dp, seg.centroid, seg.normal, seg.meshVerts);
-        }
-    }
-    std::vector<double> e1, e2;
-    for (auto& s : pr1.segments) { e1.push_back(s.maxError); e1.push_back(s.rmsError); }
-    for (auto& s : pr2.segments) { e2.push_back(s.maxError); e2.push_back(s.rmsError); }
-    exportMeta(od + "/meta.json", "planar", c.stepFile1, c.stepFile2, e1, e2);
-
-    std::ostringstream o; o << "{\"ok\":true,\"mode\":\"planar\",\"surfaces\":[{";
-    o << "\"name\":\"Blade-1\",\"segments\":[";
-    for (size_t j = 0; j < pr1.segments.size(); ++j) {
-        if (j) o << ","; o << "{\"maxErr\":" << pr1.segments[j].maxError << ",\"rmsErr\":" << pr1.segments[j].rmsError << "}"; }
-    o << "]},{"; o << "\"name\":\"Blade-2\",\"segments\":[";
-    for (size_t j = 0; j < pr2.segments.size(); ++j) {
-        if (j) o << ","; o << "{\"maxErr\":" << pr2.segments[j].maxError << ",\"rmsErr\":" << pr2.segments[j].rmsError << "}"; }
-    o << "]}]}";
-    std::string j = o.str(); std::strncpy(res->metaJson, j.c_str(), sizeof(res->metaJson)-1);
-
-    res->errorCode = RULED_OK; res->numSurfaces = 2;
-    for (int si = 0; si < 2; ++si) {
-        auto& p = (si==0)?pr1:pr2;
-        std::strncpy(res->surfaces[si].name, p.name.c_str(), 63);
-        res->surfaces[si].numSegments = (int)p.segments.size();
-        for (size_t k = 0; k < p.segments.size() && k < 10; ++k) {
-            res->surfaces[si].segments[k].segmentIndex = (int)k;
-            res->surfaces[si].segments[k].maxError = p.segments[k].maxError;
-            res->surfaces[si].segments[k].rmsError = p.segments[k].rmsError;
-        }
-    }
-    return res;
-}
-
-namespace {
-
-bool prepareBladeSurface(const char* filepath, bool wantPressure,
-                          TopoDS_Face& face, double& vStart, double& vEnd,
-                          int& faceIdx, std::string& errMsg)
-{
-    StepLoadResult r = loadStepFile(filepath);
-    if (!r.loaded) { errMsg = r.errorMsg; return false; }
 
     BladeIdentifyResult ident = identifyBladeSurfaces(r.faces);
-    if (!ident.success) { errMsg = ident.message; return false; }
-
-    faceIdx = ident.pressureFaceIndex;
-    if (faceIdx < 0 || faceIdx >= (int)r.faces.size()) {
-        errMsg = "Invalid face index from auto-identify"; return false;
+    if (!ident.success) {
+        res->errorCode = RULED_ERR_NO_VALID_FACE;
+        std::strncpy(res->errorMsg, ident.message.c_str(), sizeof(res->errorMsg) - 1);
+        return res;
     }
-    face = r.faces[faceIdx];
 
-    BladeSplitResult split = splitBladeFaceBySection(face);
-    if (!split.success) { errMsg = split.message; return false; }
+    struct SideSpec { int faceIdx; bool pressure; const char* prefix; const char* name; };
+    SideSpec sides[2] = {
+        { ident.pressureFaceIndex, true,  "pressure", "Pressure" },
+        { ident.suctionFaceIndex,  false, "suction",  "Suction"  },
+    };
 
-    vStart = -1; vEnd = -1;
-    for (auto& reg : split.regions) {
-        if ((wantPressure && reg.label == "pressure") ||
-            (!wantPressure && reg.label == "suction")) {
-            vStart = reg.uStart; vEnd = reg.uEnd; break;
+    std::vector<std::pair<std::string, SideOutcome>> outcomes;
+    for (int si = 0; si < 2; ++si) {
+        int fi = sides[si].faceIdx;
+        if (fi < 0 || fi >= (int)r.faces.size()) continue;
+
+        TopoDS_Face face = r.faces[fi];
+        double v0, v1;
+        std::string err;
+        if (!sideVRange(face, sides[si].pressure, v0, v1, err)) continue;
+
+        Handle(Geom_BSplineSurface) sf = faceToSurf(face);
+        BRepAdaptor_Surface ad(face, true);
+        SurfaceWrapper sw(sf, ad.FirstUParameter(), ad.LastUParameter(), v0, v1, false);
+
+        SideOutcome oc = fitAndExportSide(sw, sides[si].prefix, outDir, tol);
+        if (!oc.ok) continue;
+
+        RuledSurfaceResult& sr = res->surfaces[res->numSurfaces];
+        std::strncpy(sr.name, sides[si].name, sizeof(sr.name) - 1);
+        sr.maxError = oc.maxError;
+        sr.numSegments = oc.numPieces;
+        int cap = std::min(oc.numPieces, 64);
+        for (int k = 0; k < cap; ++k) {
+            sr.segments[k].segmentIndex = k;
+            sr.segments[k].maxError = oc.pieceMaxErr[k];
+            sr.segments[k].rmsError = oc.pieceRmsErr[k];
         }
-    }
-    if (vStart < 0) {
-        errMsg = wantPressure ? "Pressure region not found in split"
-                              : "Suction region not found in split";
-        return false;
-    }
-    return true;
-}
-
-RuledFittingResult* runRuledOnSide(const char* filepath, bool wantPressure,
-                                    const RuledConfig* cfg) {
-    RuledFittingResult* res = new RuledFittingResult();
-    std::memset(res, 0, sizeof(RuledFittingResult));
-
-    if (!cfg || !cfg->outputDir) {
-        res->errorCode = RULED_ERR_INVALID_PARAMS; return res;
+        res->numSurfaces++;
+        outcomes.push_back({ sides[si].name, oc });
     }
 
-    RuledConfig c = *cfg;
-    if (c.nUSamples <= 0) c.nUSamples = 50;
-    if (c.nVSamples <= 0) c.nVSamples = 10;
-    if (c.nRibs <= 0) c.nRibs = 20;
-    if (c.lambda <= 0.0) c.lambda = 1.0;
-    if (c.numDirectrixDirs[0] <= 0) c.numDirectrixDirs[0] = 3;
-    if (c.numDirectrixDirs[1] <= 0) c.numDirectrixDirs[1] = 3;
-
-    std::filesystem::create_directories(std::filesystem::path(c.outputDir));
-
-    TopoDS_Face face;
-    double v0, v1;
-    int fi;
-    std::string err;
-    if (!prepareBladeSurface(filepath, wantPressure, face, v0, v1, fi, err)) {
+    if (res->numSurfaces == 0) {
         res->errorCode = RULED_ERR_NO_VALID_FACE;
-        std::strncpy(res->errorMsg, err.c_str(), 255);
+        std::strncpy(res->errorMsg, "no pressure/suction surface fitted", sizeof(res->errorMsg) - 1);
         return res;
     }
 
-    Handle(Geom_BSplineSurface) sf = faceToSurf(face);
-    BRepAdaptor_Surface ad(face, true);
+    std::string meta = buildSummaryJson("ruled", inPath, outcomes, tol);
+    std::strncpy(res->metaJson, meta.c_str(), sizeof(res->metaJson) - 1);
 
-    SurfaceWrapper sw(sf, ad.FirstUParameter(), ad.LastUParameter(), v0, v1,
-                      false);
-
-    std::vector<ParamDir> dd;
-    for (int j = 0; j < c.numDirectrixDirs[0]; ++j)
-        dd.push_back(toDir((RuledDirection)c.directrixDirs[0][j]));
-
-    int ns = c.numDirectrixDirs[0];
-    const char* sideName = wantPressure ? "Pressure" : "Suction";
-    auto rr = fitRuledSegments(sw, ns, toDir(c.splitDir[0]), dd, c.nUSamples,
-                                c.nVSamples, 0, sideName);
-
-    std::string od = c.outputDir;
-    std::string pfx = wantPressure ? "pressure" : "suction";
-
-    Vec3Arr mv; std::vector<std::array<int,3>> mf;
-    double defl = std::max(0.2, (ad.LastUParameter() - ad.FirstUParameter()
-                               + ad.LastVParameter() - ad.FirstVParameter()) * 0.01);
-    generateFaceMesh(face, defl, mv, mf);
-    exportOBJ(od + "/" + pfx + "_mesh.obj", mv, mf);
-
-    for (auto& seg : rr.segments) {
-        std::string sp = od + "/" + pfx + "_seg" + std::to_string(seg.segmentIndex) + ".obj";
-        exportOBJ(sp, seg.ruledMeshVerts, seg.ruledMeshFaces);
-        std::string cp = od + "/" + pfx + "_seg" + std::to_string(seg.segmentIndex) + "_params.txt";
-        exportCurveParamsTXT(cp, seg.curveC0, seg.curveC1, c.nUSamples);
-    }
-
-    std::vector<double> e1, e2;
-    for (auto& s : rr.segments) { e1.push_back(s.maxError); e1.push_back(s.rmsError); }
-    exportMeta(od + "/meta.json", "ruled", filepath, "", e1, e2);
-
-    std::ostringstream o;
-    o << "{\"ok\":true,\"mode\":\"ruled\",\"side\":\"" << sideName
-      << "\",\"surfaces\":[{\"name\":\"" << sideName << "\",\"segments\":[";
-    for (size_t j = 0; j < rr.segments.size(); ++j) {
-        if (j) o << ",";
-        o << "{\"maxErr\":" << rr.segments[j].maxError << ",\"rmsErr\":" << rr.segments[j].rmsError << "}";
-    }
-    o << "]}]}";
-    std::string j = o.str();
-    std::strncpy(res->metaJson, j.c_str(), sizeof(res->metaJson)-1);
-
-    res->errorCode = RULED_OK; res->numSurfaces = 1;
-    std::strncpy(res->surfaces[0].name, sideName, 63);
-    res->surfaces[0].numSegments = (int)rr.segments.size();
-    for (size_t k = 0; k < rr.segments.size() && k < 10; ++k) {
-        res->surfaces[0].segments[k].segmentIndex = (int)k;
-        res->surfaces[0].segments[k].maxError = rr.segments[k].maxError;
-        res->surfaces[0].segments[k].rmsError = rr.segments[k].rmsError;
-    }
+    res->errorCode = RULED_OK;
     return res;
 }
 
-RuledFittingResult* runPlanarOnSide(const char* filepath, bool wantPressure,
-                                     const PlanarConfig* cfg) {
+RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const char* outputDir) {
     RuledFittingResult* res = new RuledFittingResult();
-    std::memset(res, 0, sizeof(RuledFittingResult));
+    std::memset(res, 0, sizeof(*res));
 
-    if (!cfg || !cfg->outputDir) {
-        res->errorCode = RULED_ERR_INVALID_PARAMS; return res;
-    }
-
-    PlanarConfig c = *cfg;
-    if (c.nUSamples <= 0) c.nUSamples = 50;
-    if (c.nVSamples <= 0) c.nVSamples = 10;
-    std::filesystem::create_directories(std::filesystem::path(c.outputDir));
-
-    TopoDS_Face face;
-    double v0, v1;
-    int fi;
-    std::string err;
-    if (!prepareBladeSurface(filepath, wantPressure, face, v0, v1, fi, err)) {
-        res->errorCode = RULED_ERR_NO_VALID_FACE;
-        std::strncpy(res->errorMsg, err.c_str(), 255);
+    if (!inputDir || !inputDir[0] || !outputDir || !outputDir[0]) {
+        res->errorCode = RULED_ERR_INVALID_PARAMS;
         return res;
     }
 
-    Handle(Geom_BSplineSurface) sf = faceToSurf(face);
-    BRepAdaptor_Surface ad(face, true);
+    std::string inDir = inputDir;
+    std::string outDir = outputDir;
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
 
-    SurfaceWrapper sw(sf, ad.FirstUParameter(), ad.LastUParameter(), v0, v1, false);
+    const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
+    std::vector<ParamDir> dd = { ParamDir::V, ParamDir::V, ParamDir::V };
 
-    const char* sideName = wantPressure ? "Pressure" : "Suction";
-    auto pr = fitPlanarSegments(sw, 3, toDir(c.splitDir[0]), c.nUSamples, c.nVSamples, 0, sideName);
+    int processed = 0;
+    for (const auto& entry : fs::directory_iterator(inDir)) {
+        if (!entry.is_regular_file() || !hasSupportedExt(entry.path())) continue;
 
-    std::string od = c.outputDir;
-    std::string pfx = wantPressure ? "pressure" : "suction";
+        std::string file = entry.path().string();
+        std::string stem = entry.path().stem().string();
 
-    Vec3Arr mv; std::vector<std::array<int,3>> mf;
-    double defl = std::max(0.2, (ad.LastUParameter() - ad.FirstUParameter()
-                               + ad.LastVParameter() - ad.FirstVParameter()) * 0.01);
-    generateFaceMesh(face, defl, mv, mf);
-    exportOBJ(od + "/" + pfx + "_mesh.obj", mv, mf);
+        StepLoadResult r = loadStepFile(file);
+        if (!r.loaded) continue;
 
-    for (auto& seg : pr.segments) {
-        std::string sp = od + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + ".obj";
-        exportOBJ(sp, seg.meshVerts, seg.meshFaces);
-        std::string dp = od + "/" + pfx + "_plane" + std::to_string(seg.segmentIndex) + "_desc.txt";
-        exportPlaneTXT(dp, seg.centroid, seg.normal, seg.meshVerts);
+        BladeIdentifyResult ident = identifyBladeSurfaces(r.faces);
+        if (!ident.success) continue;
+
+        struct SideSpec { int faceIdx; bool pressure; const char* prefix; };
+        SideSpec sides[2] = {
+            { ident.pressureFaceIndex, true,  "pressure" },
+            { ident.suctionFaceIndex,  false, "suction"  },
+        };
+
+        for (int si = 0; si < 2; ++si) {
+            int fi = sides[si].faceIdx;
+            if (fi < 0 || fi >= (int)r.faces.size()) continue;
+
+            TopoDS_Face face = r.faces[fi];
+            double v0, v1;
+            std::string err;
+            if (!sideVRange(face, sides[si].pressure, v0, v1, err)) continue;
+
+            Handle(Geom_BSplineSurface) sf = faceToSurf(face);
+            BRepAdaptor_Surface ad(face, true);
+            SurfaceWrapper sw(sf, ad.FirstUParameter(), ad.LastUParameter(), v0, v1, false);
+
+            RuledResult rr = fitRuledSegments(sw, 3, ParamDir::V, dd, nU, nV, 0, sides[si].prefix);
+            std::string pfx = stem + "_" + sides[si].prefix;
+            for (size_t k = 0; k < rr.segments.size(); ++k) {
+                const auto& seg = rr.segments[k];
+                exportOBJ(outDir + "/" + pfx + "_seg" + std::to_string(k) + ".obj",
+                          seg.ruledMeshVerts, seg.ruledMeshFaces);
+                exportDirectrixTXT(outDir + "/" + pfx + "_seg" + std::to_string(k) + "_params.txt",
+                                   seg.curveC0Samples, seg.curveC1Samples);
+            }
+        }
+        ++processed;
     }
 
-    std::vector<double> e1, e2;
-    for (auto& s : pr.segments) { e1.push_back(s.maxError); e1.push_back(s.rmsError); }
-    exportMeta(od + "/meta.json", "planar", filepath, "", e1, e2);
-
-    std::ostringstream o;
-    o << "{\"ok\":true,\"mode\":\"planar\",\"side\":\"" << sideName
-      << "\",\"surfaces\":[{\"name\":\"" << sideName << "\",\"segments\":[";
-    for (size_t j = 0; j < pr.segments.size(); ++j) {
-        if (j) o << ",";
-        o << "{\"maxErr\":" << pr.segments[j].maxError << ",\"rmsErr\":" << pr.segments[j].rmsError << "}";
+    if (processed == 0) {
+        res->errorCode = RULED_ERR_FILE_NOT_FOUND;
+        return res;
     }
-    o << "]}]}";
-    std::string j = o.str();
-    std::strncpy(res->metaJson, j.c_str(), sizeof(res->metaJson)-1);
 
-    res->errorCode = RULED_OK; res->numSurfaces = 1;
-    std::strncpy(res->surfaces[0].name, sideName, 63);
-    res->surfaces[0].numSegments = (int)pr.segments.size();
-    for (size_t k = 0; k < pr.segments.size() && k < 10; ++k) {
-        res->surfaces[0].segments[k].segmentIndex = (int)k;
-        res->surfaces[0].segments[k].maxError = pr.segments[k].maxError;
-        res->surfaces[0].segments[k].rmsError = pr.segments[k].rmsError;
-    }
+    res->errorCode = RULED_OK;
+    res->numSurfaces = 0;
+    std::ostringstream meta;
+    meta << "{\"mode\":\"ruled-simple\",\"filesProcessed\":" << processed << "}";
+    std::strncpy(res->metaJson, meta.str().c_str(), sizeof(res->metaJson) - 1);
     return res;
-}
-
-} // anon
-
-RULED_API RuledFittingResult* pressure_ruled_fitting(const RuledConfig* cfg) {
-    return runRuledOnSide(cfg ? cfg->stepFile1 : nullptr, true, cfg);
-}
-RULED_API RuledFittingResult* pressure_plane_fitting(const PlanarConfig* cfg) {
-    return runPlanarOnSide(cfg ? cfg->stepFile1 : nullptr, true, cfg);
-}
-RULED_API RuledFittingResult* suction_ruled_fitting(const RuledConfig* cfg) {
-    return runRuledOnSide(cfg ? cfg->stepFile1 : nullptr, false, cfg);
-}
-RULED_API RuledFittingResult* suction_plane_fitting(const PlanarConfig* cfg) {
-    return runPlanarOnSide(cfg ? cfg->stepFile1 : nullptr, false, cfg);
 }
 
 RULED_API void free_result(RuledFittingResult* result) { delete result; }
