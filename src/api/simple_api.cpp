@@ -247,7 +247,7 @@ RuledFittingResult* runSingleFile(const char* inputPath, const char* outputDir,
         return res;
     }
 
-    BladeIdentifyResult ident = identifyBladeSurfaces(r.faces);
+    BladeIdentifyResult ident = identifyBladeSurfaces(r.faces, 9, 0.1, 20.0, 5);
     if (!ident.success) {
         res->errorCode = RULED_ERR_NO_VALID_FACE;
         std::strncpy(res->errorMsg, ident.message.c_str(), sizeof(res->errorMsg) - 1);
@@ -333,7 +333,7 @@ RuledFittingResult* runBatch(const char* inputDir, const char* outputDir,
         StepLoadResult r = loadStepFile(file);
         if (!r.loaded) continue;
 
-        BladeIdentifyResult ident = identifyBladeSurfaces(r.faces);
+        BladeIdentifyResult ident = identifyBladeSurfaces(r.faces, 9, 0.1, 20.0, 5);
         if (!ident.success) continue;
 
         SideSpec sides[2] = {

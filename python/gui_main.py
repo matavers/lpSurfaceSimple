@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QFileDialog, QTextEdit,
     QTreeWidget, QTreeWidgetItem, QSplitter, QFormLayout,
-    QSpinBox, QMessageBox,
+    QSpinBox, QDoubleSpinBox, QMessageBox,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QTextCursor
@@ -109,6 +109,7 @@ class MainWindow(QMainWindow):
         self._nSamplesU = 50
         self._nSamplesV = 10
         self._numSegments = 3
+        self._tolerance = 0.1
         self._surfaceSegCounts = [3, 3]
         self._currentVersion = 0
         self._mode = "ruled"
@@ -287,6 +288,13 @@ class MainWindow(QMainWindow):
         self._spn_seg.setRange(1, 10)
         self._spn_seg.setValue(self._numSegments)
         form.addRow("Segments:", self._spn_seg)
+
+        self._spn_tol = QDoubleSpinBox()
+        self._spn_tol.setRange(0.001, 10.0)
+        self._spn_tol.setDecimals(3)
+        self._spn_tol.setSingleStep(0.01)
+        self._spn_tol.setValue(self._tolerance)
+        form.addRow("Tolerance (mm):", self._spn_tol)
 
         self._cmb_split1 = QComboBox()
         self._cmb_split1.addItems(["V", "U"])
@@ -926,6 +934,7 @@ class MainWindow(QMainWindow):
         self._nSamplesU = self._spn_u.value()
         self._nSamplesV = self._spn_v.value()
         self._numSegments = self._spn_seg.value()
+        self._tolerance = self._spn_tol.value()
 
         if not os.path.exists(self._file1):
             QMessageBox.warning(self, "Error", "File not found.")
@@ -968,6 +977,7 @@ class MainWindow(QMainWindow):
             f'--nusamples {self._nSamplesU} '
             f'--nvsamples {self._nSamplesV} '
             f'--numsegments {self._numSegments} '
+            f'--tolerance {self._tolerance} '
             f'--split-dir1 {self._cmb_split1.currentText().lower()} '
             f'--split-dir2 {self._cmb_split2.currentText().lower()} '
             f'--dirx-dir1 {self._get_dirx_str(1)} '
