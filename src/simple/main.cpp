@@ -10,6 +10,7 @@
 #include "simple/surface_wrapper.hpp"
 #include "simple/ruled_fitter.hpp"
 #include "simple/planar_fitter.hpp"
+#include "simple/grid_fitter.hpp"
 #include "simple/blade_identifier.hpp"
 #include "simple/blade_splitter.hpp"
 
@@ -86,7 +87,7 @@ void printUsage() {
     std::cout << "Usage: simple.exe <step_file1> <step_file2> [options]\n"
               << "  step_file1, step_file2 : Path to STEP blade model files\n"
               << "  Options:\n"
-              << "    --mode <ruled|planar|planar-adaptive|info|face-obj|extract-faces|auto-identify|split-blade>  Algorithm mode (default: ruled)\n"
+              << "    --mode <ruled|ruled-adaptive|planar|planar-adaptive|info|face-obj|extract-faces|auto-identify|split-blade>  Algorithm mode (default: ruled)\n"
               << "    --outdir <DIR>          Output directory (default: ./output)\n"
               << "    --face-idx1 <N>         Face index for file 1 (default: auto-pick largest)\n"
               << "    --face-idx2 <N>         Face index for file 2 (default: auto-pick largest)\n"
@@ -183,6 +184,7 @@ int main(int argc, char* argv[]) {
 
     bool isPlanar = (modeStr == "planar");
     bool isAdaptivePlanar = (modeStr == "planar-adaptive");
+    bool isRuledAdaptive = (modeStr == "ruled-adaptive");
 
     auto writePlaneTXT = [](const std::string& path, const Vec3& c, const Vec3& n,
                             const Vec3Arr& corners) {
@@ -692,6 +694,54 @@ int main(int argc, char* argv[]) {
                 metaOut << "]}";
             }
             metaOut << "]}\n";
+        }
+        std::cout << "  wrote " << metaPath << std::endl;
+
+    } else if (isRuledAdaptive) {
+        std::cout << "[Step 3] Ruled grid fitting (井字形自适应细分) tolerance=" << tolerance << std::endl;
+        GridConfig gcfg;
+        gcfg.nSplitU = 2;
+        gcfg.nSplitV = 2;
+        gcfg.tolerance = tolerance;
+        gcfg.nUSamples = nUSamples;
+        gcfg.nVSamples = nVSamples;
+        gcfg.nRibs = 20;
+        gcfg.lambda = 1.0;
+
+        GridResult gr1 = fitGridRuled(sw1, gcfg, "Blade-1");
+        GridResult gr2 = fitGridRuled(sw2, gcfg, "Blade-2");
+        for (const auto& gr : {gr1, gr2}) {
+            std::cout << "  " << gr.name << ": " << gr.nRows << "x" << gr.nCols
+                      << " = " << gr.cells.size() << " cells, maxError="
+                      << std::fixed << std::setprecision(5) << gr.maxError
+                      << ", toleranceMet=" << (gr.toleranceMet ? "YES" : "NO") << std::endl;
+        }
+
+        std::cout << "[Step 4] Generating trimmed face meshes..." << std::endl;
+        Vec3Arr mv1, mv2; FaceArr mf1, mf2; Vec2Arr dummyUV;
+        sw1.generateMesh(40, 20, mv1, mf1, dummyUV);
+        sw2.generateMesh(40, 20, mv2, mf2, dummyUV);
+        std::cout << "[Step 5] Exporting data to: " << outDir << std::endl;
+        simple::exportOBJ(outDir + "/blade1_mesh.obj", mv1, mf1);
+        simple::exportOBJ(outDir + "/blade2_mesh.obj", mv2, mf2);
+
+        auto exportGrid = [&](const GridResult& gr, const std::string& pfx) {
+            for (const auto& cell : gr.cells) {
+                int idx = cell.row * gr.nCols + cell.col;
+                std::string sp = outDir + "/" + pfx + "_seg" + std::to_string(idx) + ".obj";
+                simple::exportOBJ(sp, cell.ruled.ruledMeshVerts, cell.ruled.ruledMeshFaces);
+                std::string cp = outDir + "/" + pfx + "_seg" + std::to_string(idx) + "_params.txt";
+                simple::exportDirectrixTXT(cp, cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
+            }
+        };
+        exportGrid(gr1, "blade1");
+        exportGrid(gr2, "blade2");
+
+        std::string metaPath = outDir + "/meta.json";
+        std::string metaJson = buildGridMetaJson({gr1, gr2}, "ruled-adaptive", stepFile1, stepFile2);
+        {
+            std::ofstream metaOut(metaPath);
+            metaOut << metaJson;
         }
         std::cout << "  wrote " << metaPath << std::endl;
 

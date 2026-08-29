@@ -336,7 +336,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._btn_run, 2)
 
         self._cmb_mode = QComboBox()
-        self._cmb_mode.addItems(["Ruled Surface", "Planar (Fixed)", "Planar (Adaptive)"])
+        self._cmb_mode.addItems(["Ruled (Fixed)", "Ruled (Adaptive)", "Planar (Fixed)", "Planar (Adaptive)"])
         self._cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         bar.addWidget(self._cmb_mode, 1)
 
@@ -425,6 +425,8 @@ class MainWindow(QMainWindow):
         if idx == 0:
             self._mode = "ruled"
         elif idx == 1:
+            self._mode = "ruled-adaptive"
+        elif idx == 2:
             self._mode = "planar"
         else:
             self._mode = "planar-adaptive"
@@ -1093,12 +1095,14 @@ class MainWindow(QMainWindow):
             self._log(f"[Meta] surfaces={len(meta.get('surfaces', []))}")
             if "mode" in meta:
                 self._mode = meta["mode"]
-                if self._mode.startswith("ruled"):
+                if self._mode == "ruled":
                     self._cmb_mode.setCurrentIndex(0)
-                elif self._mode == "planar":
+                elif self._mode == "ruled-adaptive":
                     self._cmb_mode.setCurrentIndex(1)
-                else:
+                elif self._mode == "planar":
                     self._cmb_mode.setCurrentIndex(2)
+                else:
+                    self._cmb_mode.setCurrentIndex(3)
                 self._log(f"  Mode: {self._mode}")
             for i, s in enumerate(meta.get("surfaces", [])):
                 ns = len(s.get('segments', []))
