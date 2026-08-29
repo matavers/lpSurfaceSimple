@@ -1,15 +1,15 @@
 """
-test_api.py — use ctypes to call ruledSurfaceFitting.dll (API v3).
+test_api.py — use ctypes to call ruledSurfaceFitting.dll (API v3, 简化接口).
 
 Usage:
-    D:\anaconda\envs\simple\python.exe tests/test_api.py [input.step] [--outdir DIR] [--tolerance T] [--gui]
+    D:\anaconda\envs\simple\python.exe tests/test_api.py [input_dir] [--outdir DIR] [--mode ruled|plane]
 """
 import sys, os, json, ctypes
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DLL_PATH = PROJECT_DIR / "build" / "Release" / "ruledSurfaceFitting.dll"
-DEFAULT_STEP = PROJECT_DIR / "Blade.igs"
+DEFAULT_INPUT_DIR = PROJECT_DIR / "input"
 OUT_DIR = PROJECT_DIR / "output"
 
 
@@ -42,36 +42,22 @@ class RuledFittingResult(ctypes.Structure):
     ]
 
 
-class RuledFitConfig(ctypes.Structure):
-    _fields_ = [
-        ("inputPath", ctypes.c_char_p),
-        ("outputDir", ctypes.c_char_p),
-        ("tolerance", ctypes.c_double),
-    ]
-
-
-def make_config(input_path, output_dir, tolerance):
-    cfg = RuledFitConfig()
-    cfg.inputPath = str(input_path).encode()
-    cfg.outputDir = str(output_dir).encode()
-    cfg.tolerance = tolerance
-    return cfg
-
-
-def run(config):
-    """Call the DLL and return a copied RuledFittingResult (pointer freed)."""
+def _load_lib():
     if not DLL_PATH.exists():
         raise FileNotFoundError(
             f"DLL not found: {DLL_PATH}. Build first: cmake --build build --config Release")
-
     os.add_dll_directory(str(DLL_PATH.parent))
-
     lib = ctypes.CDLL(str(DLL_PATH))
-    lib.ruled_fitting.restype = ctypes.POINTER(RuledFittingResult)
-    lib.ruled_fitting.argtypes = [ctypes.POINTER(RuledFitConfig)]
     lib.free_result.argtypes = [ctypes.POINTER(RuledFittingResult)]
+    return lib
 
-    res_ptr = lib.ruled_fitting(ctypes.byref(config))
+
+def run_simple(fn_name, input_dir, output_dir):
+    lib = _load_lib()
+    fn = getattr(lib, fn_name)
+    fn.restype = ctypes.POINTER(RuledFittingResult)
+    fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    res_ptr = fn(str(input_dir).encode(), str(output_dir).encode())
     if not res_ptr:
         return None
     result = res_ptr.contents
@@ -83,17 +69,11 @@ def print_summary(result):
     if result.errorCode != 0:
         print(f"[ERROR] code={result.errorCode}  {result.errorMsg.decode()}")
         return
-
     print(f"[OK]  {result.numSurfaces} surfaces processed\n")
     for si in range(result.numSurfaces):
         srf = result.surfaces[si]
         print(f"  {srf.name.decode().strip()}  "
-              f"(maxError={srf.maxError:.5f}, {srf.numSegments} segments):")
-        for j in range(min(srf.numSegments, 64)):
-            seg = srf.segments[j]
-            print(f"    Seg {seg.segmentIndex}  "
-                  f"maxErr={seg.maxError:.5f}  rmsErr={seg.rmsError:.5f}")
-
+              f"(maxError={srf.maxError:.5f}, {srf.numSegments} segments)")
     try:
         meta = json.loads(result.metaJson.decode())
         print(f"\n  meta: {json.dumps(meta, indent=2)}")
@@ -101,52 +81,36 @@ def print_summary(result):
         pass
 
 
-def launch_gui():
-    gui_script = PROJECT_DIR / "python" / "gui_main.py"
-    if not gui_script.exists():
-        print(f"GUI script not found: {gui_script}")
-        return
-    import subprocess
-    py = r"D:\anaconda\envs\simple\python.exe"
-    subprocess.Popen([py, str(gui_script)], cwd=str(gui_script.parent))
-
-
 if __name__ == "__main__":
     import argparse
-    ap = argparse.ArgumentParser(description="ruledSurfaceFitting API v3 test")
-    ap.add_argument("input", nargs="?", default=str(DEFAULT_STEP),
-                    help="Input blade STEP/IGES file (default: Blade.igs)")
+    ap = argparse.ArgumentParser(description="ruledSurfaceFitting API v3 (simplified) test")
+    ap.add_argument("input", nargs="?", default=str(DEFAULT_INPUT_DIR),
+                    help="Input directory of STEP/IGES files")
     ap.add_argument("--outdir", default=str(OUT_DIR), help="Output directory")
-    ap.add_argument("--tolerance", type=float, default=0.5, help="Tolerance (mm)")
-    ap.add_argument("--gui", action="store_true", help="Launch GUI after run")
+    ap.add_argument("--mode", default="ruled", choices=["ruled", "plane"],
+                    help="ruled=直纹面 fitting, plane=平面 fitting")
     args = ap.parse_args()
 
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"[ERROR] Input file not found: {input_path}")
+    input_dir = Path(args.input)
+    if not input_dir.is_dir():
+        print(f"[ERROR] Input directory not found: {input_dir}")
         sys.exit(1)
-
-    cfg = make_config(input_path, args.outdir, args.tolerance)
-
-    print("=== ruledSurfaceFitting API v3 Test ===")
-    print(f"  DLL:     {DLL_PATH}")
-    print(f"  Input:   {input_path}")
-    print(f"  Output:  {args.outdir}")
-    print(f"  Tolerance: {args.tolerance}")
-    print()
 
     import shutil
     out = Path(args.outdir)
     if out.exists():
         shutil.rmtree(str(out))
 
-    result = run(cfg)
+    fn_name = "ruled_fitting_simple" if args.mode == "ruled" else "plane_fitting_simple"
+    print("=== ruledSurfaceFitting API v3 (simplified) Test ===")
+    print(f"  DLL:     {DLL_PATH}")
+    print(f"  Input:   {input_dir}")
+    print(f"  Output:  {args.outdir}")
+    print(f"  Mode:    {args.mode} ({fn_name})")
+    print()
+
+    result = run_simple(fn_name, input_dir, args.outdir)
     if result is None:
         print("DLL call returned NULL")
         sys.exit(1)
-
     print_summary(result)
-
-    if args.gui:
-        print("\nLaunching GUI...")
-        launch_gui()

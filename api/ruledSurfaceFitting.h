@@ -24,13 +24,6 @@ typedef enum {
     RULED_ERR_INVALID_PARAMS = 5
 } RuledErrorCode;
 
-/* ─── Config ───────────────────────────────────────────────── */
-typedef struct {
-    const char* inputPath;   /* 输入叶片 STEP/IGES 文件路径（单文件） */
-    const char* outputDir;   /* 输出目录 */
-    double      tolerance;   /* 容差 (mm)，<=0 时取默认 0.1 */
-} RuledFitConfig;
-
 /* ─── Per-segment result ───────────────────────────────────── */
 typedef struct {
     int segmentIndex;
@@ -55,15 +48,15 @@ typedef struct {
     char metaJson[4096];
 } RuledFittingResult;
 
-/* ─── API functions ────────────────────────────────────────── */
+/* ─── API functions（简化接口）────────────────────────────── */
 
-/* 主接口：单文件自动识别压力面/吸力面并拟合。
-   流程：先 3 等分拟合；若最大误差 < tolerance 直接输出；
-   否则按 tolerance 做井字形网格自适应细分。仅输出 .obj 与 .txt。 */
-RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* config);
-
-/* 简化接口：批量处理输入目录下的 STEP/IGES 文件，固定 3 等分拟合（无容差判断）。 */
+/* 直纹面拟合：批量处理输入目录下的 STEP/IGES 文件，自动识别压力/吸力面并拟合。
+   仅输出 .obj 与 .txt。 */
 RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const char* outputDir);
+
+/* 平面拟合：批量处理输入目录下的 STEP/IGES 文件，自动识别压力/吸力面并按平面拟合。
+   仅输出 .obj 与 .txt。 */
+RULED_API RuledFittingResult* plane_fitting_simple(const char* inputDir, const char* outputDir);
 
 RULED_API void free_result(RuledFittingResult* result);
 

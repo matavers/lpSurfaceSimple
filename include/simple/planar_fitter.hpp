@@ -55,4 +55,9 @@ PlanarResult fitPlanarSegmentsAdaptive(const SurfaceWrapper& surf,
 bool exportPlanarOBJs(const std::string& outDir,
                        const std::vector<PlanarResult>& results);
 
+// 导出平面描述（质心 + 法向 + 四角点），供 CAM 使用。
+bool exportPlaneTXT(const std::string& path,
+                    const Vec3& centroid, const Vec3& normal,
+                    const Vec3Arr& corners);
+
 } // namespace simple

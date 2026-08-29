@@ -11,6 +11,7 @@
 #include "simple/step_reader.hpp"
 #include "simple/surface_wrapper.hpp"
 #include "simple/ruled_fitter.hpp"
+#include "simple/planar_fitter.hpp"
 #include "simple/grid_fitter.hpp"
 #include "simple/blade_identifier.hpp"
 #include "simple/blade_splitter.hpp"
@@ -23,6 +24,19 @@
 
 using namespace simple;
 namespace fs = std::filesystem;
+
+// 内部配置结构体（3 参数接口，暂不在头文件中暴露）
+struct RuledFitConfig {
+    const char* inputPath;
+    const char* outputDir;
+    double      tolerance;
+};
+
+struct PlaneFitConfig {
+    const char* inputPath;
+    const char* outputDir;
+    double      tolerance;
+};
 
 namespace {
 
@@ -67,9 +81,9 @@ struct SideOutcome {
     std::vector<double> pieceRmsErr;
 };
 
-// 拟合单个侧面：先 3 等分；若最大误差 < tolerance 直接输出，否则井字形网格细分。
-SideOutcome fitAndExportSide(const SurfaceWrapper& sw, const std::string& prefix,
-                             const std::string& outDir, double tolerance) {
+// 拟合单个侧面（直纹面）：先 3 等分；若最大误差 < tolerance 直接输出，否则井字形网格细分。
+SideOutcome fitAndExportSideRuled(const SurfaceWrapper& sw, const std::string& prefix,
+                                  const std::string& outDir, double tolerance) {
     SideOutcome out;
     const int nU = Defaults::nUSamples, nV = Defaults::nVSamples, nRibs = Defaults::nRibs;
     const double lam = Defaults::lambda;
@@ -121,6 +135,61 @@ SideOutcome fitAndExportSide(const SurfaceWrapper& sw, const std::string& prefix
     return out;
 }
 
+// 拟合单个侧面（平面）：先 3 等分；若最大误差 < tolerance 直接输出，否则井字形网格细分。
+SideOutcome fitAndExportSidePlane(const SurfaceWrapper& sw, const std::string& prefix,
+                                  const std::string& outDir, double tolerance) {
+    SideOutcome out;
+    const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
+
+    PlanarResult pr = fitPlanarSegments(sw, 3, ParamDir::V, nU, nV, 0, prefix);
+
+    double maxErr = 0.0;
+    for (const auto& seg : pr.segments) maxErr = std::max(maxErr, seg.maxError);
+
+    auto exportOne = [&](const std::string& pfx, int idx,
+                         const Vec3& centroid, const Vec3& normal,
+                         const Vec3Arr& meshVerts, const FaceArr& meshFaces,
+                         double maxE, double rmsE) {
+        exportOBJ(outDir + "/" + pfx + "_plane" + std::to_string(idx) + ".obj",
+                  meshVerts, meshFaces);
+        exportPlaneTXT(outDir + "/" + pfx + "_plane" + std::to_string(idx) + "_desc.txt",
+                       centroid, normal, {});
+        out.pieceMaxErr.push_back(maxE);
+        out.pieceRmsErr.push_back(rmsE);
+    };
+
+    if (maxErr < tolerance) {
+        for (size_t i = 0; i < pr.segments.size(); ++i) {
+            const auto& seg = pr.segments[i];
+            exportOne(prefix, (int)i, seg.centroid, seg.normal, seg.meshVerts, seg.meshFaces,
+                      seg.maxError, seg.rmsError);
+        }
+        out.numPieces = (int)pr.segments.size();
+        out.maxError = maxErr;
+        out.ok = true;
+        return out;
+    }
+
+    GridConfig gcfg;
+    gcfg.nSplitU = 2;
+    gcfg.nSplitV = 2;
+    gcfg.tolerance = tolerance;
+    gcfg.nUSamples = nU;
+    gcfg.nVSamples = nV;
+
+    GridResult gr = fitGridPlanar(sw, gcfg, prefix);
+    for (const auto& cell : gr.cells) {
+        int idx = cell.row * gr.nCols + cell.col;
+        exportOne(prefix, idx, cell.plane.centroid, cell.plane.normal,
+                  cell.plane.meshVerts, cell.plane.meshFaces,
+                  cell.maxError, cell.rmsError);
+    }
+    out.numPieces = (int)gr.cells.size();
+    out.maxError = gr.maxError;
+    out.ok = true;
+    return out;
+}
+
 std::string jsonSafeStr(std::string s) {
     for (char& c : s) { if (c == '\\') c = '/'; if (c == '"') c = '\''; }
     return s;
@@ -148,24 +217,26 @@ bool hasSupportedExt(const fs::path& p) {
     return ext == ".step" || ext == ".stp" || ext == ".igs" || ext == ".iges";
 }
 
-} // anon
+struct SideSpec { int faceIdx; bool pressure; const char* prefix; const char* name; };
 
-extern "C" {
-
-RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* cfg) {
+// 通用：单文件 → 识别压力/吸力 → 每面拟合（fitSide 回调），填结果
+template <typename FitFn>
+RuledFittingResult* runSingleFile(const char* inputPath, const char* outputDir,
+                                  double tolerance, const std::string& mode,
+                                  FitFn&& fitSide) {
     RuledFittingResult* res = new RuledFittingResult();
     std::memset(res, 0, sizeof(*res));
 
-    if (!cfg || !cfg->inputPath || !cfg->inputPath[0] || !cfg->outputDir || !cfg->outputDir[0]) {
+    if (!inputPath || !inputPath[0] || !outputDir || !outputDir[0]) {
         res->errorCode = RULED_ERR_INVALID_PARAMS;
         return res;
     }
 
-    double tol = cfg->tolerance;
+    double tol = tolerance;
     if (tol <= 0.0) tol = Defaults::tolerance;
 
-    std::string inPath = cfg->inputPath;
-    std::string outDir = cfg->outputDir;
+    std::string inPath = inputPath;
+    std::string outDir = outputDir;
     std::error_code ec;
     fs::create_directories(outDir, ec);
 
@@ -183,7 +254,6 @@ RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* cfg) {
         return res;
     }
 
-    struct SideSpec { int faceIdx; bool pressure; const char* prefix; const char* name; };
     SideSpec sides[2] = {
         { ident.pressureFaceIndex, true,  "pressure", "Pressure" },
         { ident.suctionFaceIndex,  false, "suction",  "Suction"  },
@@ -203,7 +273,7 @@ RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* cfg) {
         BRepAdaptor_Surface ad(face, true);
         SurfaceWrapper sw(sf, ad.FirstUParameter(), ad.LastUParameter(), v0, v1, false);
 
-        SideOutcome oc = fitAndExportSide(sw, sides[si].prefix, outDir, tol);
+        SideOutcome oc = fitSide(sw, sides[si].prefix, outDir, tol);
         if (!oc.ok) continue;
 
         RuledSurfaceResult& sr = res->surfaces[res->numSurfaces];
@@ -226,14 +296,17 @@ RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* cfg) {
         return res;
     }
 
-    std::string meta = buildSummaryJson("ruled", inPath, outcomes, tol);
+    std::string meta = buildSummaryJson(mode, inPath, outcomes, tol);
     std::strncpy(res->metaJson, meta.c_str(), sizeof(res->metaJson) - 1);
 
     res->errorCode = RULED_OK;
     return res;
 }
 
-RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const char* outputDir) {
+// 通用：批量（目录）→ 每文件固定 3 等分拟合（fitSide 回调）
+template <typename FitFn>
+RuledFittingResult* runBatch(const char* inputDir, const char* outputDir,
+                             const std::string& mode, FitFn&& fitSide) {
     RuledFittingResult* res = new RuledFittingResult();
     std::memset(res, 0, sizeof(*res));
 
@@ -263,7 +336,6 @@ RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const c
         BladeIdentifyResult ident = identifyBladeSurfaces(r.faces);
         if (!ident.success) continue;
 
-        struct SideSpec { int faceIdx; bool pressure; const char* prefix; };
         SideSpec sides[2] = {
             { ident.pressureFaceIndex, true,  "pressure" },
             { ident.suctionFaceIndex,  false, "suction"  },
@@ -282,15 +354,8 @@ RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const c
             BRepAdaptor_Surface ad(face, true);
             SurfaceWrapper sw(sf, ad.FirstUParameter(), ad.LastUParameter(), v0, v1, false);
 
-            RuledResult rr = fitRuledSegments(sw, 3, ParamDir::V, dd, nU, nV, 0, sides[si].prefix);
             std::string pfx = stem + "_" + sides[si].prefix;
-            for (size_t k = 0; k < rr.segments.size(); ++k) {
-                const auto& seg = rr.segments[k];
-                exportOBJ(outDir + "/" + pfx + "_seg" + std::to_string(k) + ".obj",
-                          seg.ruledMeshVerts, seg.ruledMeshFaces);
-                exportDirectrixTXT(outDir + "/" + pfx + "_seg" + std::to_string(k) + "_params.txt",
-                                   seg.curveC0Samples, seg.curveC1Samples);
-            }
+            fitSide(sw, pfx, outDir, Defaults::tolerance);
         }
         ++processed;
     }
@@ -303,9 +368,78 @@ RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const c
     res->errorCode = RULED_OK;
     res->numSurfaces = 0;
     std::ostringstream meta;
-    meta << "{\"mode\":\"ruled-simple\",\"filesProcessed\":" << processed << "}";
+    meta << "{\"mode\":\"" << mode << "\",\"filesProcessed\":" << processed << "}";
     std::strncpy(res->metaJson, meta.str().c_str(), sizeof(res->metaJson) - 1);
     return res;
+}
+
+} // anon
+
+extern "C" {
+
+// ── 直纹面（3 参数，暂不在头文件暴露）────────────────────────
+RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* cfg) {
+    if (!cfg) {
+        RuledFittingResult* res = new RuledFittingResult();
+        std::memset(res, 0, sizeof(*res));
+        res->errorCode = RULED_ERR_INVALID_PARAMS;
+        return res;
+    }
+    return runSingleFile(cfg->inputPath, cfg->outputDir, cfg->tolerance, "ruled",
+                         [](const SurfaceWrapper& sw, const std::string& pfx,
+                            const std::string& od, double tol) {
+                             return fitAndExportSideRuled(sw, pfx, od, tol);
+                         });
+}
+
+// ── 平面（3 参数，暂不在头文件暴露）──────────────────────────
+RULED_API RuledFittingResult* plane_fitting(const PlaneFitConfig* cfg) {
+    if (!cfg) {
+        RuledFittingResult* res = new RuledFittingResult();
+        std::memset(res, 0, sizeof(*res));
+        res->errorCode = RULED_ERR_INVALID_PARAMS;
+        return res;
+    }
+    return runSingleFile(cfg->inputPath, cfg->outputDir, cfg->tolerance, "planar",
+                         [](const SurfaceWrapper& sw, const std::string& pfx,
+                            const std::string& od, double tol) {
+                             return fitAndExportSidePlane(sw, pfx, od, tol);
+                         });
+}
+
+// ── 直纹面（简化，批处理固定 3 等分）─────────────────────────
+RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const char* outputDir) {
+    return runBatch(inputDir, outputDir, "ruled-simple",
+                    [](const SurfaceWrapper& sw, const std::string& pfx,
+                       const std::string& od, double /*tol*/) {
+                        const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
+                        std::vector<ParamDir> dd = { ParamDir::V, ParamDir::V, ParamDir::V };
+                        RuledResult rr = fitRuledSegments(sw, 3, ParamDir::V, dd, nU, nV, 0, pfx);
+                        for (size_t k = 0; k < rr.segments.size(); ++k) {
+                            const auto& seg = rr.segments[k];
+                            exportOBJ(od + "/" + pfx + "_seg" + std::to_string(k) + ".obj",
+                                      seg.ruledMeshVerts, seg.ruledMeshFaces);
+                            exportDirectrixTXT(od + "/" + pfx + "_seg" + std::to_string(k) + "_params.txt",
+                                               seg.curveC0Samples, seg.curveC1Samples);
+                        }
+                    });
+}
+
+// ── 平面（简化，批处理固定 3 等分）───────────────────────────
+RULED_API RuledFittingResult* plane_fitting_simple(const char* inputDir, const char* outputDir) {
+    return runBatch(inputDir, outputDir, "plane-simple",
+                    [](const SurfaceWrapper& sw, const std::string& pfx,
+                       const std::string& od, double /*tol*/) {
+                        const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
+                        PlanarResult pr = fitPlanarSegments(sw, 3, ParamDir::V, nU, nV, 0, pfx);
+                        for (size_t k = 0; k < pr.segments.size(); ++k) {
+                            const auto& seg = pr.segments[k];
+                            exportOBJ(od + "/" + pfx + "_plane" + std::to_string(k) + ".obj",
+                                      seg.meshVerts, seg.meshFaces);
+                            exportPlaneTXT(od + "/" + pfx + "_plane" + std::to_string(k) + "_desc.txt",
+                                           seg.centroid, seg.normal, {});
+                        }
+                    });
 }
 
 RULED_API void free_result(RuledFittingResult* result) { delete result; }

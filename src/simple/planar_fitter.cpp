@@ -367,4 +367,21 @@ bool exportPlanarOBJs(const std::string& outDir,
     return true;
 }
 
+bool exportPlaneTXT(const std::string& path,
+                    const Vec3& centroid, const Vec3& normal,
+                    const Vec3Arr& corners)
+{
+    std::ofstream o(path);
+    if (!o) return false;
+    o << std::fixed << std::setprecision(6);
+    o << "centroid = " << centroid.x() << " " << centroid.y() << " " << centroid.z() << "\n";
+    o << "normal = " << normal.x() << " " << normal.y() << " " << normal.z() << "\n";
+    if (corners.size() >= 4) {
+        for (size_t i = 0; i < 4; ++i)
+            o << "corner" << i << " = " << corners[i].x() << " "
+              << corners[i].y() << " " << corners[i].z() << "\n";
+    }
+    return true;
+}
+
 } // namespace simple
