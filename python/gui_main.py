@@ -1118,6 +1118,18 @@ class MainWindow(QMainWindow):
             else:
                 ruled_files.append(fn)
 
+        # 根据实际输出文件数量更新面片数（不依赖 meta.json 的 segments 字段，避免可视化面片数与实际不符）
+        cnt = [0, 0]
+        for fn in ruled_files:
+            if fn.startswith('blade1_'):
+                cnt[0] += 1
+            elif fn.startswith('blade2_'):
+                cnt[1] += 1
+        if cnt[0] > 0:
+            self._surfaceSegCounts[0] = cnt[0]
+        if cnt[1] > 0:
+            self._surfaceSegCounts[1] = cnt[1]
+
         for fn in ruled_files:
             path = os.path.normpath(os.path.join(out_dir, fn))
             name = fn.replace('.obj', '')
