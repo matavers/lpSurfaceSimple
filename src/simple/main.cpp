@@ -118,7 +118,7 @@ int main(int argc, char* argv[]) {
     std::string modeStr = "ruled";
     int nUSamples = 50, nVSamples = 10, numSegments = 3;
     double tolerance = 0.1;
-    std::string splitDirStr1 = "v", splitDirStr2 = "v";
+    std::string splitDirStr1 = "u", splitDirStr2 = "u";
     std::string directrixDirsStr1 = "v,v,v", directrixDirsStr2 = "v,v,v";
     int faceIdx1 = -1, faceIdx2 = -1;
     std::string faceOutPath;
@@ -509,8 +509,6 @@ int main(int argc, char* argv[]) {
 
     ParamDir sd1 = (splitDirStr1 == "u" || splitDirStr1 == "U") ? ParamDir::U : ParamDir::V;
     ParamDir sd2 = (splitDirStr2 == "u" || splitDirStr2 == "U") ? ParamDir::U : ParamDir::V;
-    if (vRange1Min >= 0.0) sd1 = ParamDir::V;
-    if (vRange2Min >= 0.0) sd2 = ParamDir::V;
     auto dd1 = parseDirectrixDirs(directrixDirsStr1);
     auto dd2 = parseDirectrixDirs(directrixDirsStr2);
 

@@ -120,7 +120,7 @@ SideOutcome fitAndExportSidePlane(const SurfaceWrapper& sw, const std::string& p
     const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
 
     std::vector<double> targets(3, tolerance);
-    PlanarResult pr = fitPlanarSegmentsAdaptive(sw, targets, 3, ParamDir::V,
+    PlanarResult pr = fitPlanarSegmentsAdaptive(sw, targets, 3, ParamDir::U,
                                                  nU, nV, 10, prefix);
 
     auto exportOne = [&](const std::string& pfx, int idx,
@@ -372,7 +372,7 @@ RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const c
                        const std::string& od, double /*tol*/) {
                         const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
                         std::vector<ParamDir> dd = { ParamDir::V, ParamDir::V, ParamDir::V };
-                        RuledResult rr = fitRuledSegments(sw, 3, ParamDir::V, dd, nU, nV, 0, pfx);
+                        RuledResult rr = fitRuledSegments(sw, 3, ParamDir::U, dd, nU, nV, 0, pfx);
                         for (size_t k = 0; k < rr.segments.size(); ++k) {
                             const auto& seg = rr.segments[k];
                             exportOBJ(od + "/" + pfx + "_seg" + std::to_string(k) + ".obj",
@@ -389,7 +389,7 @@ RULED_API RuledFittingResult* plane_fitting_simple(const char* inputDir, const c
                     [](const SurfaceWrapper& sw, const std::string& pfx,
                        const std::string& od, double /*tol*/) {
                         const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
-                        PlanarResult pr = fitPlanarSegments(sw, 3, ParamDir::V, nU, nV, 0, pfx);
+                        PlanarResult pr = fitPlanarSegments(sw, 3, ParamDir::U, nU, nV, 0, pfx);
                         for (size_t k = 0; k < pr.segments.size(); ++k) {
                             const auto& seg = pr.segments[k];
                             exportOBJ(od + "/" + pfx + "_plane" + std::to_string(k) + ".obj",

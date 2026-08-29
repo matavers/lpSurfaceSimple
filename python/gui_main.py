@@ -297,11 +297,11 @@ class MainWindow(QMainWindow):
         form.addRow("Tolerance (mm):", self._spn_tol)
 
         self._cmb_split1 = QComboBox()
-        self._cmb_split1.addItems(["V", "U"])
+        self._cmb_split1.addItems(["U", "V"])
         form.addRow("Split Dir (Surface 1):", self._cmb_split1)
 
         self._cmb_split2 = QComboBox()
-        self._cmb_split2.addItems(["V", "U"])
+        self._cmb_split2.addItems(["U", "V"])
         form.addRow("Split Dir (Surface 2):", self._cmb_split2)
 
         self._cmb_dirx1 = []
