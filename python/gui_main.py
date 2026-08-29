@@ -296,6 +296,10 @@ class MainWindow(QMainWindow):
         self._spn_tol.setValue(self._tolerance)
         form.addRow("Tolerance (mm):", self._spn_tol)
 
+        self._chk_noadaptive = QCheckBox("固定分段数（不自适应细分）")
+        self._chk_noadaptive.setChecked(False)
+        form.addRow("", self._chk_noadaptive)
+
         self._cmb_split1 = QComboBox()
         self._cmb_split1.addItems(["V", "U"])
         form.addRow("Split Dir (Surface 1):", self._cmb_split1)
@@ -983,6 +987,8 @@ class MainWindow(QMainWindow):
             f'--dirx-dir1 {self._get_dirx_str(1)} '
             f'--dirx-dir2 {self._get_dirx_str(2)}'
         )
+        if self._chk_noadaptive.isChecked():
+            cmd += ' --no-adaptive'
         if self._single_file_mode:
             f1 = self._cmb_face1.currentData()
             f2 = self._cmb_face2.currentData()
