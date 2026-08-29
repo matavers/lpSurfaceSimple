@@ -1,8 +1,8 @@
-﻿# ruledSurfaceFitting — 直纹面拟合 API 技术文档
+﻿# ruledSurfaceFitting — 直纹面/平面分片拟合 API 技术文档
 
 ## 1. 算法概述
 
-本库 `ruledSurfaceFitting` 实现基于 NURBS 曲面的**直纹面分片拟合**算法，用于航空发动机叶片曲面的几何简化与可加工性改造。将自由曲面转化为分片直纹面集合后，可用侧刃铣削（侧铣）替代点铣。
+本库 `ruledSurfaceFitting` 实现基于 NURBS 曲面的**直纹面分片拟合**与**平面分片拟合**算法，用于航空发动机叶片曲面的几何简化与可加工性改造。将自由曲面转化为分片直纹面（或平面）集合后，可用侧刃铣削（侧铣）替代点铣。
 
 ### 1.1 支持的导入文件类型
 
@@ -11,19 +11,38 @@
 | **STEP** | `.step`, `.stp` | ISO 10303 AP203/AP214 |
 | **IGES** | `.igs`, `.iges` | ANSI US PRO/IPO-100 |
 
-### 1.2 算法流程（主接口）
+### 1.2 接口总览
+
+动态库导出 **4 个接口**（固定分段与自适应细分相互独立），头文件 `ruledSurfaceFitting.h` 暂时只暴露 2 个简化接口（面向客户交付）：
+
+| 函数 | 暴露位置 | 拟合类型 | 分段方式 |
+|------|---------|---------|---------|
+| `ruled_fitting(RuledFitConfig)` | 仅 DLL（暂不暴露） | 直纹面 | 井字形网格自适应细分（按容差） |
+| `plane_fitting(PlaneFitConfig)` | 仅 DLL（暂不暴露） | 平面 | 自适应细分（按容差，每细分面拟合为平面） |
+| `ruled_fitting_simple(dir, dir)` | 头文件 | 直纹面 | 固定 3 等分（不分细分） |
+| `plane_fitting_simple(dir, dir)` | 头文件 | 平面 | 固定 3 等分（不分细分） |
+
+### 1.3 固定分段流程（简化接口）
 
 ```
-单文件 CAD 导入(STEP/IGES)
-  → 法向聚类自动识别压力面/吸力面
-  → 弦向截面分割，提取叶盆/叶背参数区间
-  → 对每面：等距 3 等分直纹面拟合
-       → 若最大误差 < tolerance：直接输出 3 段
-       → 若最大误差 ≥ tolerance：井字形网格自适应细分（整行/整列二分，直至满足容差）
-  → 每段/每格导出 .obj 网格 + .txt 准线参数
+输入目录遍历 STEP/IGES
+  → 单文件自动识别压力面/吸力面（法向聚类 + 弦向截面分割）
+  → 每面沿叶片高度方向（U 向）等距 3 等分
+  → 每段：直纹面拟合（准线优化） 或 平面拟合（PCA）
+  → 导出 .obj 网格 + .txt 参数
 ```
 
-### 1.3 直纹面算法原理
+### 1.4 自适应细分流程（3 参数接口）
+
+```
+单文件 CAD 导入
+  → 自动识别压力面/吸力面
+  → 直纹面：井字形网格（整行/整列二分）按容差细分
+  → 平面：沿高度方向自适应二分，每个细分面拟合为平面
+  → 导出 .obj 网格 + .txt 参数
+```
+
+### 1.5 直纹面算法原理
 
 对每段子曲面参数域 `[uSeg0,uSeg1]×[vSeg0,vSeg1]`（准线沿 u、母线沿 v）：
 
@@ -32,27 +51,47 @@
 3. **最小二乘优化**：对每条母线独立求解 2×2 线性方程组，调整 C₀[i]、C₁[i] 使肋条点到直纹面的距离平方和最小，并用 λ 正则化约束准线不偏离初始边界
 4. **直纹面**：`S(p,t) = (1−t)·C₀(p) + t·C₁(p)`，p 沿准线、t 沿母线
 
+### 1.6 平面算法原理
+
+对每段子曲面采样点做主成分分析（PCA）：协方差矩阵最小特征值对应法向量 n，过质心 c，平面方程 `n·(x−c)=0`；误差 = 点到平面距离 `|n·(P−c)|`。
+
 ---
 
 ## 2. 接口函数
 
-### 2.1 `ruled_fitting` — 主接口（单文件自动处理）
+### 2.1 `ruled_fitting` — 直纹面自适应（单文件，仅 DLL）
 
 ```c
 RULED_API RuledFittingResult* ruled_fitting(const RuledFitConfig* config);
 ```
 
-加载单个 STEP/IGES 文件 → 自动识别压力面/吸力面 → 每面先 3 等分拟合；若最大误差小于容差直接输出，否则按容差做井字形网格自适应细分。仅输出 `.obj` 与 `.txt` 文件。
+加载单个 STEP/IGES 文件 → 自动识别压力面/吸力面 → 每面按容差做**井字形网格自适应细分**。仅输出 `.obj` 与 `.txt`。
 
-### 2.2 `ruled_fitting_simple` — 简化接口（批处理，固定 3 等分）
+### 2.2 `plane_fitting` — 平面自适应（单文件，仅 DLL）
+
+```c
+RULED_API RuledFittingResult* plane_fitting(const PlaneFitConfig* config);
+```
+
+加载单个 STEP/IGES 文件 → 自动识别压力面/吸力面 → 每面按容差**自适应细分**，每个细分面拟合为平面。仅输出 `.obj` 与 `.txt`。
+
+### 2.3 `ruled_fitting_simple` — 直纹面固定 3 等分（批处理）
 
 ```c
 RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const char* outputDir);
 ```
 
-遍历输入目录下的 STEP/IGES 文件，对每个文件自动识别并**固定 3 等分拟合**（无容差判断、不细分），输出到输出目录。输出文件名以输入文件名 + `_pressure`/`_suction` 为前缀。
+遍历输入目录下的 STEP/IGES 文件，对每个文件自动识别并**沿叶片高度方向固定 3 等分直纹面拟合**（无容差判断、不细分）。输出文件名以输入文件名 + `_pressure`/`_suction` 为前缀。
 
-### 2.3 `free_result`
+### 2.4 `plane_fitting_simple` — 平面固定 3 等分（批处理）
+
+```c
+RULED_API RuledFittingResult* plane_fitting_simple(const char* inputDir, const char* outputDir);
+```
+
+遍历输入目录下的 STEP/IGES 文件，对每个文件自动识别并**沿叶片高度方向固定 3 等分平面拟合**（无容差判断、不细分）。
+
+### 2.5 `free_result`
 
 ```c
 RULED_API void free_result(RuledFittingResult* result);
@@ -64,7 +103,7 @@ RULED_API void free_result(RuledFittingResult* result);
 
 ## 3. 参数结构体
 
-### 3.1 `RuledFitConfig` — 拟合配置
+### 3.1 `RuledFitConfig` / `PlaneFitConfig` — 拟合配置（仅 DLL）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -72,7 +111,7 @@ RULED_API void free_result(RuledFittingResult* result);
 | `outputDir` | `const char*` | — | 输出目录 |
 | `tolerance` | `double` | 0.1（≤0 时） | 容差 (mm)，最大误差阈值 |
 
-其余拟合参数（采样数、rib 数、正则强度、分割方向、准线方向等）均由算法内部取默认值。
+其余拟合参数（采样数 50×10、rib 数 20、正则强度 1.0、分割方向 U=叶片高度、准线方向 V=弦向等）均由算法内部取默认值。
 
 ### 3.2 `RuledFittingResult` — 返回结果
 
@@ -90,7 +129,7 @@ RULED_API void free_result(RuledFittingResult* result);
 |------|------|------|
 | `name[64]` | `char[64]` | 曲面名称（Pressure / Suction） |
 | `maxError` | `double` | 该面整体最大误差（mm） |
-| `numSegments` | `int` | 实际面片数（3 或网格单元数） |
+| `numSegments` | `int` | 实际面片数（固定 3 或细分后的单元数） |
 | `segments[64]` | `RuledSegmentResult[64]` | 各面片误差（前 64 个） |
 
 ### 3.4 `RuledSegmentResult` — 单面片结果
@@ -116,14 +155,16 @@ RULED_API void free_result(RuledFittingResult* result);
 
 ## 4. 输出文件
 
-| 文件 | 格式 | 说明 |
-|------|------|------|
-| `{prefix}_segN.obj` | Wavefront OBJ | 第 N 个面片的直纹面四边形网格 |
-| `{prefix}_segN_params.txt` | TXT | 第 N 个面片的优化准线参数（采样点） |
+| 拟合类型 | 文件 | 格式 | 说明 |
+|---------|------|------|------|
+| 直纹面 | `{prefix}_segN.obj` | Wavefront OBJ | 第 N 个面片的直纹面四边形网格 |
+| 直纹面 | `{prefix}_segN_params.txt` | TXT | 第 N 个面片的优化准线采样点 |
+| 平面 | `{prefix}_planeN.obj` | Wavefront OBJ | 第 N 个面片的平面网格 |
+| 平面 | `{prefix}_planeN_desc.txt` | TXT | 第 N 个面片的平面质心 + 法向 |
 
 `{prefix}` 为 `pressure` / `suction`（简化接口为 `<文件名>_pressure` / `<文件名>_suction`）。仅导出 `.obj` 与 `.txt` 两类文件，无其他内部产物。
 
-### 4.1 准线参数 TXT（`*_params.txt`）
+### 4.1 直纹面准线参数 TXT（`*_params.txt`）
 
 ```
 [C0]
@@ -142,57 +183,50 @@ description = identity, C0 and C1 share the same parameterization (i-th sample p
 - `[C0]` / `[C1]`：上下两条**优化后**准线的采样点坐标（每行 x y z）
 - 直纹面由 `S(i,t) = (1−t)·C0[i] + t·C1[i]` 定义，第 i 对采样点构成一条母线
 
+### 4.2 平面描述 TXT（`*_desc.txt`）
+
+```
+centroid = 302.034950 8.112750 236.289690
+normal = -0.834570 -0.550860 -0.006960
+```
+
+- `centroid`：平面质心坐标
+- `normal`：平面单位法向量，平面方程 `n·(x−centroid)=0`
+
 ---
 
 ## 5. 使用示例
 
-### 5.1 C 语言
+### 5.1 C 语言（简化接口）
 
 ```c
 #include "ruledSurfaceFitting.h"
 
 int main() {
-    RuledFitConfig cfg = {0};
-    cfg.inputPath = "Blade.step";
-    cfg.outputDir = "./output";
-    cfg.tolerance = 0.5;
-
-    RuledFittingResult* res = ruled_fitting(&cfg);
+    RuledFittingResult* res = ruled_fitting_simple("./input", "./output");
     if (res->errorCode == RULED_OK) {
-        for (int s = 0; s < res->numSurfaces; ++s) {
+        for (int s = 0; s < res->numSurfaces; ++s)
             printf("%s: %d pieces, maxError=%.4f\n",
                    res->surfaces[s].name,
                    res->surfaces[s].numSegments,
                    res->surfaces[s].maxError);
-        }
     }
     free_result(res);
     return 0;
 }
 ```
 
-### 5.2 Python ctypes 调用
+### 5.2 Python ctypes 调用（简化接口）
 
 ```python
 import ctypes
 
 lib = ctypes.CDLL("./ruledSurfaceFitting.dll")
-lib.ruled_fitting.restype = ctypes.c_void_p
+lib.ruled_fitting_simple.restype = ctypes.c_void_p
+lib.ruled_fitting_simple.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
 lib.free_result.argtypes = [ctypes.c_void_p]
 
-class RuledFitConfig(ctypes.Structure):
-    _fields_ = [
-        ("inputPath", ctypes.c_char_p),
-        ("outputDir", ctypes.c_char_p),
-        ("tolerance", ctypes.c_double),
-    ]
-
-cfg = RuledFitConfig()
-cfg.inputPath = b"Blade.step"
-cfg.outputDir = b"./output"
-cfg.tolerance = 0.5
-
-ptr = lib.ruled_fitting(ctypes.byref(cfg))
+ptr = lib.ruled_fitting_simple(b"./input", b"./output")
 lib.free_result(ptr)
 ```
 
@@ -212,6 +246,8 @@ cmake --build build --config Release
 - `build/Release/ruledSurfaceFitting.dll` + `.lib` — 动态库（OCCT 静态内嵌，无 OCCT 运行时 DLL 依赖）
 - `build/Release/simple.exe` — 命令行工具
 
+命令行模式：`ruled`（直纹面固定）、`ruled-adaptive`（直纹面井字形自适应）、`planar`（平面固定）、`planar-adaptive`（平面自适应）。
+
 ---
 
 ## 7. 误差计算方法
@@ -227,6 +263,7 @@ cmake --build build --config Release
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v3.0 | 2026-08-28 | 单文件 API：`ruled_fitting`（3 字段 RuledFitConfig）+ `ruled_fitting_simple`。两段式流程（3 等分 → 容差判断 → 井字形细分）。仅导出 obj/txt。txt 改为导出优化后准线采样点（修复不同段 txt 相同问题）。删除旧 6 个接口。 |
+| v4.0 | 2026-08-29 | 固定分段与自适应细分拆分为独立接口：新增 `plane_fitting`（平面自适应）、`plane_fitting_simple`（平面固定 3 段）、`ruled_fitting`（直纹面井字形自适应，纯网格）、`ruled_fitting_simple`（直纹面固定 3 段）。3 段分割默认方向改为叶片高度（U 向）。头文件暂只暴露两个简化接口。 |
+| v3.0 | 2026-08-28 | 单文件 API：`ruled_fitting`（3 字段 RuledFitConfig）+ `ruled_fitting_simple`。仅导出 obj/txt。txt 改为导出优化后准线采样点（修复不同段 txt 相同问题）。删除旧 6 个接口。 |
 | v2.0 | 2026-08-09 | 新增 4 个全自动函数（pressure/suction × ruled/plane）。 |
 | v1.0 | 2026-07 | 初始版本：双文件手动模式。 |
