@@ -94,7 +94,6 @@ void printUsage() {
               << "    --nvsamples <N>         V-direction samples (default: 10)\n"
               << "    --numsegments <N>       Number of segments (default: 3)\n"
               << "    --tolerance <T>         Tolerance (mm) for planar adaptive refinement (default: 0.1)\n"
-              << "    --no-adaptive           Force fixed segment count (disable adaptive refinement)\n"
               << "    --split-dir1 <u|v>      Split direction surface 1 (default: v)\n"
               << "    --split-dir2 <u|v>      Split direction surface 2 (default: v)\n"
               << "    --dirx-dir1 <d,d,d>     Directrix dirs surface 1 (ruled only, default: v,v,v)\n"
@@ -119,7 +118,6 @@ int main(int argc, char* argv[]) {
     std::string modeStr = "ruled";
     int nUSamples = 50, nVSamples = 10, numSegments = 3;
     double tolerance = 0.1;
-    bool noAdaptive = false;
     std::string splitDirStr1 = "v", splitDirStr2 = "v";
     std::string directrixDirsStr1 = "v,v,v", directrixDirsStr2 = "v,v,v";
     int faceIdx1 = -1, faceIdx2 = -1;
@@ -175,7 +173,6 @@ int main(int argc, char* argv[]) {
         else if (arg == "--nvsamples" && i + 1 < argc) { nVSamples = std::stoi(argv[++i]); }
         else if (arg == "--numsegments" && i + 1 < argc) { numSegments = std::stoi(argv[++i]); }
         else if (arg == "--tolerance" && i + 1 < argc) { tolerance = std::stod(argv[++i]); }
-        else if (arg == "--no-adaptive") { noAdaptive = true; }
         else if (arg == "--split-dir1" && i + 1 < argc) { splitDirStr1 = argv[++i]; }
         else if (arg == "--split-dir2" && i + 1 < argc) { splitDirStr2 = argv[++i]; }
         else if (arg == "--dirx-dir1" && i + 1 < argc) { directrixDirsStr1 = argv[++i]; }
@@ -527,31 +524,15 @@ int main(int argc, char* argv[]) {
     if (isAdaptivePlanar) {
         if (isPlanar) {} // suppress unused warning
 
-        int refSegs = 10;
-        auto rr1 = simple::fitRuledSegments(sw1, refSegs, sd1, dd1,
-                                             nUSamples, nVSamples, 0, "Blade-1");
-        auto rr2 = simple::fitRuledSegments(sw2, refSegs, sd2, dd2,
-                                             nUSamples, nVSamples, 0, "Blade-2");
+        std::vector<double> targets1(numSegments, tolerance);
+        std::vector<double> targets2(numSegments, tolerance);
+        std::cout << "[Step 3] Adaptive planar fitting init=" << numSegments
+                  << " tolerance=" << tolerance << std::endl;
 
-        std::vector<double> targets1(refSegs), targets2(refSegs);
-        for (int i = 0; i < refSegs && i < (int)rr1.segments.size(); ++i)
-            targets1[i] = rr1.segments[i].rmsError * 1.5;
-        for (int i = 0; i < refSegs && i < (int)rr2.segments.size(); ++i)
-            targets2[i] = rr2.segments[i].rmsError * 1.5;
-
-        int initSegs = 10;
-        std::cout << "[Step 3] Adaptive planar fitting init=" << initSegs
-                  << " (ref=" << refSegs << " ruled segments)" << std::endl;
-        std::cout << "  Target (rms*1.5):";
-        for (auto t : targets1) std::cout << " " << t;
-        std::cout << " /";
-        for (auto t : targets2) std::cout << " " << t;
-        std::cout << std::endl;
-
-        auto pr1 = simple::fitPlanarSegmentsAdaptive(sw1, targets1, initSegs, sd1,
-                                                       nUSamples, nVSamples, 6, "Blade-1");
-        auto pr2 = simple::fitPlanarSegmentsAdaptive(sw2, targets2, initSegs, sd2,
-                                                       nUSamples, nVSamples, 6, "Blade-2");
+        auto pr1 = simple::fitPlanarSegmentsAdaptive(sw1, targets1, numSegments, sd1,
+                                                       nUSamples, nVSamples, 10, "Blade-1");
+        auto pr2 = simple::fitPlanarSegmentsAdaptive(sw2, targets2, numSegments, sd2,
+                                                       nUSamples, nVSamples, 10, "Blade-2");
 
         for (const auto& res : {pr1, pr2}) {
             std::cout << "  " << res.name << " " << res.segments.size() << " segments:" << std::endl;
@@ -632,23 +613,12 @@ int main(int argc, char* argv[]) {
     if (isPlanar) {
         std::vector<simple::PlanarResult> allResults;
 
-        // 先等分拟合；满足容差直接输出，否则自适应细分（每个细分面拟合为平面）
-        auto fitPlanarSide = [&](const simple::SurfaceWrapper& sw, ParamDir sd,
-                                 const std::string& name) {
-            simple::PlanarResult pr = simple::fitPlanarSegments(sw, numSegments, sd,
-                nUSamples, nVSamples, 0, name);
-            if (noAdaptive) return pr;
-            double maxErr = 0.0;
-            for (const auto& seg : pr.segments) maxErr = std::max(maxErr, seg.maxError);
-            if (maxErr < tolerance) return pr;
-            std::vector<double> targets(numSegments, tolerance);
-            return simple::fitPlanarSegmentsAdaptive(sw, targets, numSegments, sd,
-                nUSamples, nVSamples, 10, name);
-        };
-
-        auto pr1 = fitPlanarSide(sw1, sd1, "Blade-1");
+        // 固定分段模式：等距 numSegments 段，每段拟合为平面（不做自适应细分）
+        auto pr1 = simple::fitPlanarSegments(sw1, numSegments, sd1,
+                                              nUSamples, nVSamples, 0, "Blade-1");
         allResults.push_back(pr1);
-        auto pr2 = fitPlanarSide(sw2, sd2, "Blade-2");
+        auto pr2 = simple::fitPlanarSegments(sw2, numSegments, sd2,
+                                              nUSamples, nVSamples, 0, "Blade-2");
         allResults.push_back(pr2);
 
         for (const auto& res : allResults) {

@@ -81,34 +81,12 @@ struct SideOutcome {
     std::vector<double> pieceRmsErr;
 };
 
-// 拟合单个侧面（直纹面）：先 3 等分；若最大误差 < tolerance 直接输出，否则井字形网格细分。
+// 拟合单个侧面（直纹面）：按容差井字形网格自适应细分（独立的细分过程）。
 SideOutcome fitAndExportSideRuled(const SurfaceWrapper& sw, const std::string& prefix,
                                   const std::string& outDir, double tolerance) {
     SideOutcome out;
     const int nU = Defaults::nUSamples, nV = Defaults::nVSamples, nRibs = Defaults::nRibs;
     const double lam = Defaults::lambda;
-
-    std::vector<ParamDir> dd = { ParamDir::V, ParamDir::V, ParamDir::V };
-    RuledResult rr = fitRuledSegments(sw, 3, ParamDir::V, dd, nU, nV, 0, prefix);
-
-    double maxErr = 0.0;
-    for (const auto& seg : rr.segments) maxErr = std::max(maxErr, seg.maxError);
-
-    if (maxErr < tolerance) {
-        for (size_t i = 0; i < rr.segments.size(); ++i) {
-            const auto& seg = rr.segments[i];
-            exportOBJ(outDir + "/" + prefix + "_seg" + std::to_string(i) + ".obj",
-                      seg.ruledMeshVerts, seg.ruledMeshFaces);
-            exportDirectrixTXT(outDir + "/" + prefix + "_seg" + std::to_string(i) + "_params.txt",
-                               seg.curveC0Samples, seg.curveC1Samples);
-            out.pieceMaxErr.push_back(seg.maxError);
-            out.pieceRmsErr.push_back(seg.rmsError);
-        }
-        out.numPieces = (int)rr.segments.size();
-        out.maxError = maxErr;
-        out.ok = true;
-        return out;
-    }
 
     GridConfig gcfg;
     gcfg.nSplitU = 2;
@@ -135,16 +113,15 @@ SideOutcome fitAndExportSideRuled(const SurfaceWrapper& sw, const std::string& p
     return out;
 }
 
-// 拟合单个侧面（平面）：先 3 等分；若最大误差 < tolerance 直接输出，否则井字形网格细分。
+// 拟合单个侧面（平面）：按容差自适应细分，每个细分面拟合为平面（独立的细分过程）。
 SideOutcome fitAndExportSidePlane(const SurfaceWrapper& sw, const std::string& prefix,
                                   const std::string& outDir, double tolerance) {
     SideOutcome out;
     const int nU = Defaults::nUSamples, nV = Defaults::nVSamples;
 
-    PlanarResult pr = fitPlanarSegments(sw, 3, ParamDir::V, nU, nV, 0, prefix);
-
-    double maxErr = 0.0;
-    for (const auto& seg : pr.segments) maxErr = std::max(maxErr, seg.maxError);
+    std::vector<double> targets(3, tolerance);
+    PlanarResult pr = fitPlanarSegmentsAdaptive(sw, targets, 3, ParamDir::V,
+                                                 nU, nV, 10, prefix);
 
     auto exportOne = [&](const std::string& pfx, int idx,
                          const Vec3& centroid, const Vec3& normal,
@@ -158,34 +135,15 @@ SideOutcome fitAndExportSidePlane(const SurfaceWrapper& sw, const std::string& p
         out.pieceRmsErr.push_back(rmsE);
     };
 
-    if (maxErr < tolerance) {
-        for (size_t i = 0; i < pr.segments.size(); ++i) {
-            const auto& seg = pr.segments[i];
-            exportOne(prefix, (int)i, seg.centroid, seg.normal, seg.meshVerts, seg.meshFaces,
-                      seg.maxError, seg.rmsError);
-        }
-        out.numPieces = (int)pr.segments.size();
-        out.maxError = maxErr;
-        out.ok = true;
-        return out;
+    double maxErr = 0.0;
+    for (size_t i = 0; i < pr.segments.size(); ++i) {
+        const auto& seg = pr.segments[i];
+        exportOne(prefix, (int)i, seg.centroid, seg.normal, seg.meshVerts, seg.meshFaces,
+                  seg.maxError, seg.rmsError);
+        maxErr = std::max(maxErr, seg.maxError);
     }
-
-    GridConfig gcfg;
-    gcfg.nSplitU = 2;
-    gcfg.nSplitV = 2;
-    gcfg.tolerance = tolerance;
-    gcfg.nUSamples = nU;
-    gcfg.nVSamples = nV;
-
-    GridResult gr = fitGridPlanar(sw, gcfg, prefix);
-    for (const auto& cell : gr.cells) {
-        int idx = cell.row * gr.nCols + cell.col;
-        exportOne(prefix, idx, cell.plane.centroid, cell.plane.normal,
-                  cell.plane.meshVerts, cell.plane.meshFaces,
-                  cell.maxError, cell.rmsError);
-    }
-    out.numPieces = (int)gr.cells.size();
-    out.maxError = gr.maxError;
+    out.numPieces = (int)pr.segments.size();
+    out.maxError = maxErr;
     out.ok = true;
     return out;
 }

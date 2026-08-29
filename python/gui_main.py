@@ -296,10 +296,6 @@ class MainWindow(QMainWindow):
         self._spn_tol.setValue(self._tolerance)
         form.addRow("Tolerance (mm):", self._spn_tol)
 
-        self._chk_noadaptive = QCheckBox("固定分段数（不自适应细分）")
-        self._chk_noadaptive.setChecked(False)
-        form.addRow("", self._chk_noadaptive)
-
         self._cmb_split1 = QComboBox()
         self._cmb_split1.addItems(["V", "U"])
         form.addRow("Split Dir (Surface 1):", self._cmb_split1)
@@ -340,7 +336,7 @@ class MainWindow(QMainWindow):
         bar.addWidget(self._btn_run, 2)
 
         self._cmb_mode = QComboBox()
-        self._cmb_mode.addItems(["Ruled Surface", "Planar Surface"])
+        self._cmb_mode.addItems(["Ruled Surface", "Planar (Fixed)", "Planar (Adaptive)"])
         self._cmb_mode.currentIndexChanged.connect(self._on_mode_changed)
         bar.addWidget(self._cmb_mode, 1)
 
@@ -426,7 +422,12 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_mode_changed(self, idx):
-        self._mode = "ruled" if idx == 0 else "planar-adaptive"
+        if idx == 0:
+            self._mode = "ruled"
+        elif idx == 1:
+            self._mode = "planar"
+        else:
+            self._mode = "planar-adaptive"
 
     def _hide_single_controls(self):
         for w in [self._btn_preview, self._btn_auto_id, self._btn_split,
@@ -987,8 +988,6 @@ class MainWindow(QMainWindow):
             f'--dirx-dir1 {self._get_dirx_str(1)} '
             f'--dirx-dir2 {self._get_dirx_str(2)}'
         )
-        if self._chk_noadaptive.isChecked():
-            cmd += ' --no-adaptive'
         if self._single_file_mode:
             f1 = self._cmb_face1.currentData()
             f2 = self._cmb_face2.currentData()
@@ -1094,7 +1093,12 @@ class MainWindow(QMainWindow):
             self._log(f"[Meta] surfaces={len(meta.get('surfaces', []))}")
             if "mode" in meta:
                 self._mode = meta["mode"]
-                self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
+                if self._mode.startswith("ruled"):
+                    self._cmb_mode.setCurrentIndex(0)
+                elif self._mode == "planar":
+                    self._cmb_mode.setCurrentIndex(1)
+                else:
+                    self._cmb_mode.setCurrentIndex(2)
                 self._log(f"  Mode: {self._mode}")
             for i, s in enumerate(meta.get("surfaces", [])):
                 ns = len(s.get('segments', []))
