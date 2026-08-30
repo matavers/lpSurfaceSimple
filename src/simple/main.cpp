@@ -732,6 +732,8 @@ int main(int argc, char* argv[]) {
                 simple::exportOBJ(sp, cell.ruled.ruledMeshVerts, cell.ruled.ruledMeshFaces);
                 std::string cp = outDir + "/" + pfx + "_seg" + std::to_string(idx) + "_params.txt";
                 simple::exportDirectrixTXT(cp, cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
+                std::string bp = outDir + "/" + pfx + "_seg" + std::to_string(idx) + "_bspline.txt";
+                simple::exportDirectrixBSplineTXT(bp, cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
             }
         };
         exportGrid(gr1, "blade1");
@@ -787,6 +789,10 @@ int main(int argc, char* argv[]) {
                     + "_seg" + std::to_string(seg.segmentIndex) + "_params.txt";
                 simple::exportDirectrixTXT(paramPath, seg.curveC0Samples, seg.curveC1Samples);
                 std::cout << "  wrote " << paramPath << std::endl;
+                std::string bsplinePath = outDir + "/" + bladeName
+                    + "_seg" + std::to_string(seg.segmentIndex) + "_bspline.txt";
+                simple::exportDirectrixBSplineTXT(bsplinePath, seg.curveC0Samples, seg.curveC1Samples);
+                std::cout << "  wrote " << bsplinePath << std::endl;
             }
         }
 

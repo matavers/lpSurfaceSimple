@@ -159,6 +159,7 @@ RULED_API void free_result(RuledFittingResult* result);
 |---------|------|------|------|
 | 直纹面 | `{prefix}_segN.obj` | Wavefront OBJ | 第 N 个面片的直纹面四边形网格 |
 | 直纹面 | `{prefix}_segN_params.txt` | TXT | 第 N 个面片的优化准线采样点 |
+| 直纹面 | `{prefix}_segN_bspline.txt` | TXT | 第 N 个面片优化准线的 B 样条参数（次数、节点向量、控制点） |
 | 平面 | `{prefix}_planeN.obj` | Wavefront OBJ | 第 N 个面片的平面网格 |
 | 平面 | `{prefix}_planeN_desc.txt` | TXT | 第 N 个面片的平面质心 + 法向 |
 
@@ -183,7 +184,37 @@ description = identity, C0 and C1 share the same parameterization (i-th sample p
 - `[C0]` / `[C1]`：上下两条**优化后**准线的采样点坐标（每行 x y z）
 - 直纹面由 `S(i,t) = (1−t)·C0[i] + t·C1[i]` 定义，第 i 对采样点构成一条母线
 
-### 4.2 平面描述 TXT（`*_desc.txt`）
+### 4.2 直纹面准线 B 样条 TXT（`*_bspline.txt`）
+
+将优化后的准线采样点按**共同弦长参数化**拟合为 3 次 B 样条曲线后导出，下游（NX/UG/CAM）可直接读取重建，无需预处理：
+
+```
+nSamples = 50
+
+[C0]
+degree = 3
+rational = no
+nbPoles = 50
+poles (x y z w):
+  322.001752 -9.372975 206.297000 1.000000
+  ...
+nbKnots = 48
+knots: 0.00000000 0.02136009 ... 1.00000000
+multiplicities: 4 1 1 ... 1 4
+
+[C1]
+...
+[mapping]
+description = identity, C0(u) and C1(u) share the same parameterization (i-th point/control pair forms a ruling)
+```
+
+- `degree`：曲线次数（3）
+- `rational`：是否有理（当前均为 `no`，权重全 1）
+- `poles (x y z w)`：控制点坐标及权重
+- `knots`：节点向量（去重后）；`multiplicities`：对应节点重数（首尾重数为 `degree+1`，为 clamped 曲线）
+- `[C0]` / `[C1]` 共享同一节点向量，`S(u,v) = (1−v)·C0(u) + v·C1(u)` 为直纹面参数方程
+
+### 4.3 平面描述 TXT（`*_desc.txt`）
 
 ```
 centroid = 302.034950 8.112750 236.289690
@@ -263,6 +294,7 @@ cmake --build build --config Release
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v4.1 | 2026-08-30 | 直纹面新增 `_bspline.txt` 导出：将优化后准线采样点按共同弦长参数化拟合为 3 次 B 样条并导出次数/节点向量/控制点（修复原 `_bspline.txt` 导出的是未优化等参线且未声明导致编译失败的问题）。GUI 同步适配：树中直纹面段下新增 Directrix C0/C1 节点，可视化优化准线曲线，点击节点展示 B 样条参数。 |
 | v4.0 | 2026-08-29 | 固定分段与自适应细分拆分为独立接口：新增 `plane_fitting`（平面自适应）、`plane_fitting_simple`（平面固定 3 段）、`ruled_fitting`（直纹面井字形自适应，纯网格）、`ruled_fitting_simple`（直纹面固定 3 段）。3 段分割默认方向改为叶片高度（U 向）。头文件暂只暴露两个简化接口。 |
 | v3.0 | 2026-08-28 | 单文件 API：`ruled_fitting`（3 字段 RuledFitConfig）+ `ruled_fitting_simple`。仅导出 obj/txt。txt 改为导出优化后准线采样点（修复不同段 txt 相同问题）。删除旧 6 个接口。 |
 | v2.0 | 2026-08-09 | 新增 4 个全自动函数（pressure/suction × ruled/plane）。 |

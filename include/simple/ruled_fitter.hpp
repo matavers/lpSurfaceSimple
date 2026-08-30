@@ -91,11 +91,11 @@ bool exportOBJ(const std::string& path,
 bool exportDirectrixTXT(const std::string& path,
                         const Vec3Arr& c0Samples, const Vec3Arr& c1Samples);
 
-// 导出原始等参线的 B 样条参数（次数、控制点、节点向量、重数），供 NX/UG 重建。
-bool exportCurveBSplineTXT(const std::string& path,
-                           const Handle(Geom_BSplineCurve)& curveC0,
-                           const Handle(Geom_BSplineCurve)& curveC1,
-                           int nSamples);
+// 将优化后的准线采样点插值成 3 次 B 样条曲线并导出（参数方程形式），供 NX/UG 重建直纹面。
+// C0、C1 使用共同弦长参数化，S(u,v) = (1-v)·C0(u) + v·C1(u) 为直纹面参数方程。
+bool exportDirectrixBSplineTXT(const std::string& path,
+                               const Vec3Arr& c0Samples,
+                               const Vec3Arr& c1Samples);
 
 bool exportErrorsCSV(const std::string& path,
                      const std::vector<RuledResult>& results);

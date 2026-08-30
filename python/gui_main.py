@@ -97,6 +97,74 @@ class ProcRunner(QThread):
             self.finished_signal.emit(1)
 
 
+def parse_params_txt(path):
+    """解析直纹面 *_params.txt，返回 (c0, c1) 两个 (N,3) numpy 数组（优化后准线采样点）。"""
+    c0, c1 = [], []
+    section = None
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                section = line[1:-1]
+                continue
+            if section in ('C0', 'C1') and not line.startswith('n ='):
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        pt = [float(x) for x in parts[:3]]
+                    except ValueError:
+                        continue
+                    (c0 if section == 'C0' else c1).append(pt)
+    return np.array(c0), np.array(c1)
+
+
+def parse_bspline_txt(path):
+    """解析直纹面 *_bspline.txt，返回 {'C0': {...}, 'C1': {...}}。
+
+    每条准线包含 degree / nbPoles / poles[(x,y,z,w)] / knots / multiplicities。
+    """
+    result = {}
+    section = None
+    cur = None
+    in_poles = False
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                section = line[1:-1]
+                if section in ('C0', 'C1'):
+                    cur = {'degree': 0, 'nbPoles': 0, 'poles': [],
+                           'knots': [], 'multiplicities': []}
+                    result[section] = cur
+                in_poles = False
+                continue
+            if cur is None:
+                continue
+            if line.startswith('degree ='):
+                cur['degree'] = int(line.split('=', 1)[1].strip())
+                in_poles = False
+            elif line.startswith('nbPoles ='):
+                cur['nbPoles'] = int(line.split('=', 1)[1].strip())
+                in_poles = False
+            elif line.startswith('poles'):
+                in_poles = True
+            elif line.startswith('knots:'):
+                in_poles = False
+                cur['knots'] = [float(x) for x in line.split(':', 1)[1].split()]
+            elif line.startswith('multiplicities:'):
+                in_poles = False
+                cur['multiplicities'] = [int(x) for x in line.split(':', 1)[1].split()]
+            elif in_poles:
+                parts = line.split()
+                if len(parts) >= 4:
+                    cur['poles'].append([float(x) for x in parts[:4]])
+    return result
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -119,6 +187,7 @@ class MainWindow(QMainWindow):
         self._mesh_shared = False
         self._preview_colors = {}
         self._preview_face_ids = set()
+        self._bspline_params = {}
 
         self._proc = None
         self._loaded_files = set()
@@ -355,6 +424,7 @@ class MainWindow(QMainWindow):
         self._tree = QTreeWidget()
         self._tree.setHeaderHidden(True)
         self._tree.itemChanged.connect(self._on_check)
+        self._tree.itemClicked.connect(self._on_tree_item_clicked)
         layout.addWidget(self._tree)
 
     def _on_browse_file(self, idx):
@@ -1086,6 +1156,22 @@ class MainWindow(QMainWindow):
                 seg_item.setData(2, Qt.UserRole, "ruled")
                 ver_node.addChild(seg_item)
 
+                if not self._mode.startswith("planar"):
+                    prefix = f"blade{bi + 1}_{seg_prefix}{seg}"
+                    c0_item = QTreeWidgetItem(["Directrix C0"])
+                    c0_item.setFlags(c0_item.flags() | Qt.ItemIsUserCheckable)
+                    c0_item.setCheckState(0, Qt.Unchecked)
+                    c0_item.setData(1, Qt.UserRole, f"{prefix}_c0")
+                    c0_item.setData(2, Qt.UserRole, "directrix")
+                    seg_item.addChild(c0_item)
+
+                    c1_item = QTreeWidgetItem(["Directrix C1"])
+                    c1_item.setFlags(c1_item.flags() | Qt.ItemIsUserCheckable)
+                    c1_item.setCheckState(0, Qt.Unchecked)
+                    c1_item.setData(1, Qt.UserRole, f"{prefix}_c1")
+                    c1_item.setData(2, Qt.UserRole, "directrix")
+                    seg_item.addChild(c1_item)
+
     def _load_meta(self, meta_path):
         try:
             with open(meta_path) as f:
@@ -1168,6 +1254,8 @@ class MainWindow(QMainWindow):
                 continue
             self._load_obj(path, name, "mesh")
 
+        self._load_directrices(out_dir)
+
         if HAS_PYVISTA:
             self._plotter.disable_render = False
             self._apply_visibility()
@@ -1205,6 +1293,90 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log(f"  Load error {name}: {e}")
 
+    def _load_directrices(self, out_dir):
+        self._bspline_params = {}
+
+        params_files = [fn for fn in sorted(os.listdir(out_dir))
+                        if fn.endswith('_params.txt')]
+        bspline_files = [fn for fn in sorted(os.listdir(out_dir))
+                         if fn.endswith('_bspline.txt')]
+
+        if HAS_PYVISTA:
+            import pyvista as pv
+            for fn in params_files:
+                path = os.path.join(out_dir, fn)
+                base = fn[:-len('_params.txt')]
+                try:
+                    c0, c1 = parse_params_txt(path)
+                except Exception as e:
+                    self._log(f"  Directrix parse error {fn}: {e}")
+                    continue
+                for side, pts, color in (('c0', c0, [0.15, 0.20, 0.70]),
+                                         ('c1', c1, [0.70, 0.15, 0.15])):
+                    if pts.shape[0] < 2:
+                        continue
+                    name = f"{base}_{side}"
+                    try:
+                        line = pv.lines_from_points(pts)
+                        self._plotter.add_mesh(
+                            line, name=name, color=color, line_width=3)
+                    except Exception as e:
+                        self._log(f"  Directrix render error {name}: {e}")
+                self._log(f"  Loaded directrices: {base}")
+
+        for fn in bspline_files:
+            path = os.path.join(out_dir, fn)
+            base = fn[:-len('_bspline.txt')]
+            try:
+                params = parse_bspline_txt(path)
+            except Exception as e:
+                self._log(f"  BSpline parse error {fn}: {e}")
+                continue
+            self._bspline_params[base] = params
+            c0 = params.get('C0', {})
+            c1 = params.get('C1', {})
+            self._log(
+                f"  {base}: C0 deg={c0.get('degree')} poles={c0.get('nbPoles')} "
+                f"knots={len(c0.get('knots', []))} | "
+                f"C1 deg={c1.get('degree')} poles={c1.get('nbPoles')} "
+                f"knots={len(c1.get('knots', []))}")
+
+    def _on_tree_item_clicked(self, item, col):
+        data_name = item.data(1, Qt.UserRole)
+        tag = item.data(2, Qt.UserRole)
+        if tag != 'directrix' or not data_name:
+            return
+        if data_name.endswith('_c0'):
+            base = data_name[:-3]
+            side = 'C0'
+        elif data_name.endswith('_c1'):
+            base = data_name[:-3]
+            side = 'C1'
+        else:
+            return
+        params = self._bspline_params.get(base)
+        if not params:
+            self._log(f"  {data_name}: no BSpline params available")
+            return
+        cur = params.get(side)
+        if not cur:
+            return
+        self._log(f"  === {data_name} BSpline ===")
+        self._log(f"  degree = {cur.get('degree')}")
+        self._log(f"  nbPoles = {cur.get('nbPoles')}")
+        self._log(f"  nbKnots = {len(cur.get('knots', []))}")
+        knots = cur.get('knots', [])
+        if knots:
+            self._log(f"  knots = [{', '.join(f'{k:.6f}' for k in knots)}]")
+        mult = cur.get('multiplicities', [])
+        if mult:
+            self._log(f"  multiplicities = [{', '.join(str(m) for m in mult)}]")
+        poles = cur.get('poles', [])
+        if poles:
+            self._log(f"  poles (x y z w) = {len(poles)}:")
+            for p in poles:
+                self._log(f"    {p[0]:.6f} {p[1]:.6f} {p[2]:.6f} {p[3]:.6f}")
+
     def _on_check(self, item, col):
         self._apply_visibility()
 
@@ -1226,6 +1398,8 @@ class MainWindow(QMainWindow):
                     if self._mesh_shared and blade == 2:
                         visible_set.add("blade1_mesh")
                 elif tag == "ruled":
+                    visible_set.add(data_name)
+                elif tag == "directrix":
                     visible_set.add(data_name)
             for i in range(node.childCount()):
                 walk(node.child(i), vis)
@@ -1258,6 +1432,7 @@ class MainWindow(QMainWindow):
         self._split_items = []
         self._split_list.clear()
         self._btn_identify.setEnabled(False)
+        self._bspline_params = {}
         if HAS_PYVISTA:
             self._plotter.clear()
             self._plotter.set_background('lightblue')

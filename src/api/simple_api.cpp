@@ -104,9 +104,8 @@ SideOutcome fitAndExportSideRuled(const SurfaceWrapper& sw, const std::string& p
                   cell.ruled.ruledMeshVerts, cell.ruled.ruledMeshFaces);
         exportDirectrixTXT(outDir + "/" + prefix + "_seg" + std::to_string(idx) + "_params.txt",
                            cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
-        exportCurveBSplineTXT(outDir + "/" + prefix + "_seg" + std::to_string(idx) + "_bspline.txt",
-                              cell.ruled.curveC0, cell.ruled.curveC1,
-                              static_cast<int>(cell.ruled.curveC0Samples.size()));
+        exportDirectrixBSplineTXT(outDir + "/" + prefix + "_seg" + std::to_string(idx) + "_bspline.txt",
+                                  cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
         out.pieceMaxErr.push_back(cell.maxError);
         out.pieceRmsErr.push_back(cell.rmsError);
     }
@@ -382,9 +381,8 @@ RULED_API RuledFittingResult* ruled_fitting_simple(const char* inputDir, const c
                                       seg.ruledMeshVerts, seg.ruledMeshFaces);
                             exportDirectrixTXT(od + "/" + pfx + "_seg" + std::to_string(k) + "_params.txt",
                                                seg.curveC0Samples, seg.curveC1Samples);
-                            exportCurveBSplineTXT(od + "/" + pfx + "_seg" + std::to_string(k) + "_bspline.txt",
-                                                  seg.curveC0, seg.curveC1,
-                                                  static_cast<int>(seg.curveC0Samples.size()));
+                            exportDirectrixBSplineTXT(od + "/" + pfx + "_seg" + std::to_string(k) + "_bspline.txt",
+                                                      seg.curveC0Samples, seg.curveC1Samples);
                         }
                     });
 }

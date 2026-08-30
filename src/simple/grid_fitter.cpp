@@ -242,6 +242,8 @@ bool exportGridOBJs(const std::string& outDir, const std::string& prefix,
             exportOBJ(op, cell.ruled.ruledMeshVerts, cell.ruled.ruledMeshFaces);
             std::string cp = outDir + "/" + prefix + "_cell" + std::to_string(idx) + "_params.txt";
             exportDirectrixTXT(cp, cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
+            std::string bp = outDir + "/" + prefix + "_cell" + std::to_string(idx) + "_bspline.txt";
+            exportDirectrixBSplineTXT(bp, cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
         }
     }
     return true;

@@ -5,12 +5,51 @@
 #include <limits>
 
 #include <Geom_BSplineCurve.hxx>
+#include <GeomAPI_PointsToBSpline.hxx>
+#include <GeomAbs_Shape.hxx>
+#include <NCollection_Array1.hxx>
+#include <GeomAPI_Interpolate.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <gp_Pnt.hxx>
 #include <TColgp_Array1OfPnt.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
 #include <TColStd_Array1OfReal.hxx>
+#include <TColStd_HArray1OfReal.hxx>
 
 namespace simple {
+
+// 计算两条准线采样点的共同弦长参数（归一化到 [0,1]），保证 C0/C1 共享同一参数化。
+static std::vector<double> chordLengthParams(const Vec3Arr& c0, const Vec3Arr& c1) {
+    int n = static_cast<int>(std::min(c0.size(), c1.size()));
+    std::vector<double> t(n, 0.0);
+    if (n == 0) return t;
+    for (int i = 1; i < n; ++i) {
+        double d = 0.5 * ((c0[i] - c0[i - 1]).norm() + (c1[i] - c1[i - 1]).norm());
+        t[i] = t[i - 1] + std::max(d, 1e-9);
+    }
+    double L = t.back();
+    if (L > 0.0)
+        for (double& x : t) x /= L;
+    return t;
+}
+
+// 用给定参数把采样点拟合成 3 次 B 样条曲线（用于导出节点向量与控制点）。
+static Handle(Geom_BSplineCurve) fitBSpline(const Vec3Arr& pts,
+                                            const std::vector<double>& params) {
+    int n = static_cast<int>(pts.size());
+    if (n < 2) return Handle(Geom_BSplineCurve)();
+
+    NCollection_Array1<gp_Pnt> points(1, n);
+    NCollection_Array1<double> pars(1, n);
+    for (int i = 0; i < n; ++i) {
+        points.SetValue(i + 1, gp_Pnt(pts[i].x(), pts[i].y(), pts[i].z()));
+        pars.SetValue(i + 1, params[i]);
+    }
+    GeomAPI_PointsToBSpline approx(points, pars, 3, 3, GeomAbs_C2, 1e-6);
+    if (!approx.IsDone()) return Handle(Geom_BSplineCurve)();
+    Handle(Geom_BSplineCurve) curve = approx.Curve();
+    return curve;
+}
 
 static double evalU(double u0, double u1, double t, bool wrap) {
     if (!wrap || u0 <= u1)
@@ -90,8 +129,22 @@ bool exportCurveBSplineTXT(const std::string& path,
     out << "\n";
     writeCurve("C1", curveC1);
     out << "\n[mapping]\n";
-    out << "description = identity, C0(u) and C1(u) share the same parameterization from surface iso-curves\n";
+    out << "description = identity, C0(u) and C1(u) share the same parameterization (i-th point/control pair forms a ruling)\n";
     return true;
+}
+
+bool exportDirectrixBSplineTXT(const std::string& path,
+                               const Vec3Arr& c0Samples,
+                               const Vec3Arr& c1Samples)
+{
+    if (c0Samples.size() < 2 || c1Samples.size() < 2) return false;
+
+    std::vector<double> params = chordLengthParams(c0Samples, c1Samples);
+    Handle(Geom_BSplineCurve) c0 = fitBSpline(c0Samples, params);
+    Handle(Geom_BSplineCurve) c1 = fitBSpline(c1Samples, params);
+    if (c0.IsNull() || c1.IsNull()) return false;
+
+    return exportCurveBSplineTXT(path, c0, c1, static_cast<int>(c0Samples.size()));
 }
 
 bool exportErrorsCSV(const std::string& path,
