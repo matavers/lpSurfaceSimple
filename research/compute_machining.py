@@ -194,6 +194,18 @@ class Patch:
     flank_passes: float = 0.0
     point_time: float = 0.0
 
+# ===================== 标定参数 =====================
+
+def load_config(path=None):
+    """读取标定参数 JSON 配置，返回 dict（不存在则空）。"""
+    if path is None:
+        path = Path(__file__).parent / "machining_config.json"
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
 # ===================== 主流程 =====================
 
 def compute(input_dir, args):
@@ -226,7 +238,7 @@ def summarize(patches, args):
     flank_overhead = len(patches) * args.overhead
     flank_total = flank_cut + flank_overhead
     point_cut = sum(p.point_time for p in patches)
-    point_overhead = 10.0
+    point_overhead = getattr(args, 'point_overhead', 10.0)
     point_total = point_cut + point_overhead
     total_area = sum(p.area for p in patches)
     return {
@@ -256,14 +268,16 @@ def print_report(patches, args, summary):
         print(f"侧铣相对点铣提速: {p['total'] / f['total']:.1f}x")
 
 def main():
+    cfg = load_config()
     ap = argparse.ArgumentParser(description="直纹面拟合加工时间仿真（自算刀轨）")
     ap.add_argument("input", help="输出目录（含 *_params.txt）")
-    ap.add_argument("--feed", type=float, default=500.0, help="切削进给 mm/min（默认 500）")
-    ap.add_argument("--rapid", type=float, default=5000.0, help="快进 mm/min（默认 5000）")
-    ap.add_argument("--ball-r", type=float, default=5.0, help="球头刀半径 mm（默认 5）")
-    ap.add_argument("--scallop", type=float, default=0.01, help="点铣残留高度 mm（默认 0.01）")
-    ap.add_argument("--overhead", type=float, default=2.0, help="每块侧铣进退刀+衔接时间 s（默认 2）")
-    ap.add_argument("--twist-limit", type=float, default=1.0, help="可展判定阈值 度（默认 1.0）")
+    ap.add_argument("--feed", type=float, default=cfg.get("feed", 500.0), help="切削进给 mm/min")
+    ap.add_argument("--rapid", type=float, default=cfg.get("rapid", 5000.0), help="快进 mm/min")
+    ap.add_argument("--ball-r", type=float, default=cfg.get("ball_r", 5.0), help="球头刀半径 mm")
+    ap.add_argument("--scallop", type=float, default=cfg.get("scallop", 0.01), help="点铣残留高度 mm")
+    ap.add_argument("--overhead", type=float, default=cfg.get("overhead", 2.0), help="每块侧铣进退刀+衔接时间 s")
+    ap.add_argument("--point-overhead", type=float, default=cfg.get("point_overhead", 10.0), help="点铣整体进退刀时间 s")
+    ap.add_argument("--twist-limit", type=float, default=cfg.get("twist_limit", 1.0), help="可展判定阈值 度")
     ap.add_argument("--json", help="可选：输出 JSON 结果文件路径")
     ap.add_argument("--vtk", help="可选：输出刀轨 VTK 到指定目录")
     args = ap.parse_args()

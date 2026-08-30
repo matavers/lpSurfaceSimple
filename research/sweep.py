@@ -55,15 +55,18 @@ class NS(ctypes.Structure):
 
 
 def main():
+    cfg = cm.load_config()
     ap = argparse.ArgumentParser(description="参数扫描：容差 vs 加工时间")
     ap.add_argument("blade", help="叶片 STEP/IGES 文件路径")
     ap.add_argument("--dll", default=r"D:\Projects\lpSurface\Simple\build\Release\ruledSurfaceFitting.dll")
-    ap.add_argument("--tolerances", default="0.05,0.1,0.2,0.5,1.0", help="容差列表（逗号分隔，mm）")
-    ap.add_argument("--feed", type=float, default=500.0)
-    ap.add_argument("--ball-r", type=float, default=5.0)
-    ap.add_argument("--scallop", type=float, default=0.01)
-    ap.add_argument("--twist-limit", type=float, default=1.0)
-    ap.add_argument("--overhead", type=float, default=2.0)
+    ap.add_argument("--tolerances", default=",".join(str(x) for x in cfg.get("tolerances", [0.05, 0.1, 0.2, 0.5, 1.0])),
+                    help="容差列表（逗号分隔，mm）")
+    ap.add_argument("--feed", type=float, default=cfg.get("feed", 500.0))
+    ap.add_argument("--ball-r", type=float, default=cfg.get("ball_r", 5.0))
+    ap.add_argument("--scallop", type=float, default=cfg.get("scallop", 0.01))
+    ap.add_argument("--twist-limit", type=float, default=cfg.get("twist_limit", 1.0))
+    ap.add_argument("--overhead", type=float, default=cfg.get("overhead", 2.0))
+    ap.add_argument("--point-overhead", type=float, default=cfg.get("point_overhead", 10.0))
     ap.add_argument("--json", default="sweep.json")
     ap.add_argument("--workdir", default=None, help="临时输出根目录")
     args = ap.parse_args()
@@ -83,7 +86,8 @@ def main():
 
         # 用与主脚本相同的参数
         a = argparse.Namespace(feed=args.feed, ball_r=args.ball_r, scallop=args.scallop,
-                               twist_limit=args.twist_limit, overhead=args.overhead)
+                               twist_limit=args.twist_limit, overhead=args.overhead,
+                               point_overhead=args.point_overhead)
         patches = cm.compute(out_dir, a)
         if not patches:
             continue

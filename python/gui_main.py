@@ -445,35 +445,41 @@ class MainWindow(QMainWindow):
             layout.addWidget(QLabel("未找到 research/compute_machining.py"))
             return
 
+        mcfg = _cm.load_config()
         form = QFormLayout()
         form.setSpacing(6)
 
         self._spn_m_feed = QDoubleSpinBox()
         self._spn_m_feed.setRange(1.0, 100000.0)
-        self._spn_m_feed.setValue(500.0)
+        self._spn_m_feed.setValue(mcfg.get("feed", 500.0))
         form.addRow("进给率 (mm/min):", self._spn_m_feed)
 
         self._spn_m_ballr = QDoubleSpinBox()
         self._spn_m_ballr.setRange(0.1, 100.0)
-        self._spn_m_ballr.setValue(5.0)
+        self._spn_m_ballr.setValue(mcfg.get("ball_r", 5.0))
         form.addRow("球头刀半径 (mm):", self._spn_m_ballr)
 
         self._spn_m_scallop = QDoubleSpinBox()
         self._spn_m_scallop.setRange(0.001, 10.0)
         self._spn_m_scallop.setDecimals(3)
-        self._spn_m_scallop.setValue(0.01)
+        self._spn_m_scallop.setValue(mcfg.get("scallop", 0.01))
         form.addRow("残留高度 (mm):", self._spn_m_scallop)
 
         self._spn_m_twist = QDoubleSpinBox()
         self._spn_m_twist.setRange(0.01, 90.0)
         self._spn_m_twist.setDecimals(2)
-        self._spn_m_twist.setValue(1.0)
+        self._spn_m_twist.setValue(mcfg.get("twist_limit", 1.0))
         form.addRow("可展阈值 (度):", self._spn_m_twist)
 
         self._spn_m_overhead = QDoubleSpinBox()
         self._spn_m_overhead.setRange(0.0, 100.0)
-        self._spn_m_overhead.setValue(2.0)
+        self._spn_m_overhead.setValue(mcfg.get("overhead", 2.0))
         form.addRow("进退刀开销 (s/块):", self._spn_m_overhead)
+
+        self._spn_m_poverhead = QDoubleSpinBox()
+        self._spn_m_poverhead.setRange(0.0, 100.0)
+        self._spn_m_poverhead.setValue(mcfg.get("point_overhead", 10.0))
+        form.addRow("点铣进退刀 (s):", self._spn_m_poverhead)
 
         layout.addLayout(form)
 
@@ -513,7 +519,8 @@ class MainWindow(QMainWindow):
         return argparse.Namespace(
             feed=self._spn_m_feed.value(), ball_r=self._spn_m_ballr.value(),
             scallop=self._spn_m_scallop.value(), twist_limit=self._spn_m_twist.value(),
-            overhead=self._spn_m_overhead.value())
+            overhead=self._spn_m_overhead.value(),
+            point_overhead=self._spn_m_poverhead.value())
 
     def _on_compute_tool(self):
         if not HAS_MACHINING or not HAS_PYVISTA:
@@ -605,7 +612,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "请先在拟合工作台选择叶片文件。")
             self._viz_mode = 0
             return
-        tolerances = [0.05, 0.1, 0.2, 0.5, 1.0]
+        tolerances = _cm.load_config().get("tolerances", [0.05, 0.1, 0.2, 0.5, 1.0])
         dll = str(PROJECT_DIR / "build" / "Release" / "ruledSurfaceFitting.dll")
         self._btn_tool_stop.setEnabled(True)
         self._log("[Machining] 开始容差扫描...")
