@@ -16,7 +16,7 @@ Tree structure:
           ├── Ruled Seg 1
           └── Ruled Seg 2
 """
-import sys, os, json, re, subprocess, tempfile
+import sys, os, json, re, subprocess, tempfile, math
 from pathlib import Path
 from datetime import datetime
 
@@ -26,10 +26,10 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QCheckBox, QFileDialog, QTextEdit,
     QTreeWidget, QTreeWidgetItem, QSplitter, QFormLayout,
-    QSpinBox, QDoubleSpinBox, QMessageBox,
+    QSpinBox, QDoubleSpinBox, QMessageBox, QStackedWidget, QDialog,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
-from PyQt5.QtGui import QFont, QTextCursor
+from PyQt5.QtGui import QFont, QTextCursor, QPixmap
 
 try:
     from pyvistaqt import QtInteractor
@@ -41,6 +41,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 BUILD_EXE = PROJECT_DIR / "build" / "Release" / "simple.exe"
 CONFIG_PATH = SCRIPT_DIR / ".simple_config.json"
+
+sys.path.insert(0, str(PROJECT_DIR))
+try:
+    from research import compute_machining as _cm
+    from research import sweep as _sweep
+    HAS_MACHINING = True
+except Exception:
+    HAS_MACHINING = False
 
 BLADE_COLORS = [
     [0.30, 0.60, 0.95],
@@ -150,6 +158,52 @@ class ObjReaderThread(QThread):
         self.loaded.emit(out)
 
 
+class SweepWorker(QThread):
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, blade, dll, tolerances, params):
+        super().__init__()
+        self._blade = blade
+        self._dll = dll
+        self._tolerances = tolerances
+        self._params = params
+        self._stop = False
+
+    def run(self):
+        try:
+            rows = []
+            for tol in self._tolerances:
+                if self._stop:
+                    break
+                out_dir = os.path.join(tempfile.gettempdir(), f"sweep_gui_{tol:.3f}")
+                if os.path.isdir(out_dir):
+                    shutil.rmtree(out_dir)
+                code = _sweep.run_fitting(self._dll, self._blade, out_dir, tol)
+                if code != 0:
+                    continue
+                patches = _cm.compute(out_dir, self._params)
+                if not patches:
+                    continue
+                s = _cm.summarize(patches, self._params)
+                rows.append({
+                    "tolerance": tol,
+                    "num_patches": s["num_patches"],
+                    "developable": s["developable"],
+                    "non_developable": s["non_developable"],
+                    "max_twist": max((p.twist for p in patches), default=0.0),
+                    "flank_total": s["flank"]["total"],
+                    "point_total": s["point"]["total"],
+                    "speedup": s["point"]["total"] / s["flank"]["total"] if s["flank"]["total"] > 0 else 0.0,
+                })
+            self.done.emit(rows)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+    def request_stop(self):
+        self._stop = True
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -201,6 +255,19 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction("Exit", self.close)
 
+        wb = self.menuBar().addMenu("工作台")
+        self._act_wb_fit = wb.addAction("拟合", lambda: self._switch_workbench(0))
+        self._act_wb_fit.setCheckable(True)
+        self._act_wb_mach = wb.addAction("加工仿真", lambda: self._switch_workbench(1))
+        self._act_wb_mach.setCheckable(True)
+        self._act_wb_fit.setChecked(True)
+
+    def _switch_workbench(self, idx):
+        self._workbench = idx
+        self._act_wb_fit.setChecked(idx == 0)
+        self._act_wb_mach.setChecked(idx == 1)
+        self._wb_stack.setCurrentIndex(idx)
+
     def _on_clear_results(self):
         self._tree.clear()
         self._loaded_files.clear()
@@ -248,8 +315,23 @@ class MainWindow(QMainWindow):
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(4, 0, 4, 0)
-        self._setup_params(rl)
-        self._setup_tree(rl)
+
+        self._wb_stack = QStackedWidget()
+
+        fit_page = QWidget()
+        fl = QVBoxLayout(fit_page)
+        fl.setContentsMargins(0, 0, 0, 0)
+        self._setup_params(fl)
+        self._setup_tree(fl)
+        self._wb_stack.addWidget(fit_page)
+
+        mach_page = QWidget()
+        mach_layout = QVBoxLayout(mach_page)
+        mach_layout.setContentsMargins(0, 0, 0, 0)
+        self._setup_machining(mach_layout)
+        self._wb_stack.addWidget(mach_page)
+
+        rl.addWidget(self._wb_stack)
         splitter.addWidget(right)
         splitter.setSizes([900, 500])
         ml.addWidget(splitter, 1)
@@ -440,6 +522,229 @@ class MainWindow(QMainWindow):
         self._tree.setHeaderHidden(True)
         self._tree.itemChanged.connect(self._on_check)
         layout.addWidget(self._tree)
+
+    # ── 加工仿真工作台 ──────────────────────────────────────────
+    def _setup_machining(self, layout):
+        if not HAS_MACHINING:
+            layout.addWidget(QLabel("未找到 research/compute_machining.py"))
+            return
+
+        mcfg = _cm.load_config()
+        form = QFormLayout()
+        form.setSpacing(6)
+
+        self._spn_m_feed = QDoubleSpinBox()
+        self._spn_m_feed.setRange(1.0, 100000.0)
+        self._spn_m_feed.setValue(mcfg.get("feed", 500.0))
+        form.addRow("进给率 (mm/min):", self._spn_m_feed)
+
+        self._spn_m_ballr = QDoubleSpinBox()
+        self._spn_m_ballr.setRange(0.1, 100.0)
+        self._spn_m_ballr.setValue(mcfg.get("ball_r", 5.0))
+        form.addRow("球头刀半径 (mm):", self._spn_m_ballr)
+
+        self._spn_m_scallop = QDoubleSpinBox()
+        self._spn_m_scallop.setRange(0.001, 10.0)
+        self._spn_m_scallop.setDecimals(3)
+        self._spn_m_scallop.setValue(mcfg.get("scallop", 0.01))
+        form.addRow("残留高度 (mm):", self._spn_m_scallop)
+
+        self._spn_m_twist = QDoubleSpinBox()
+        self._spn_m_twist.setRange(0.01, 90.0)
+        self._spn_m_twist.setDecimals(2)
+        self._spn_m_twist.setValue(mcfg.get("twist_limit", 1.0))
+        form.addRow("可展阈值 (度):", self._spn_m_twist)
+
+        self._spn_m_overhead = QDoubleSpinBox()
+        self._spn_m_overhead.setRange(0.0, 100.0)
+        self._spn_m_overhead.setValue(mcfg.get("overhead", 2.0))
+        form.addRow("进退刀开销 (s/块):", self._spn_m_overhead)
+
+        self._spn_m_poverhead = QDoubleSpinBox()
+        self._spn_m_poverhead.setRange(0.0, 100.0)
+        self._spn_m_poverhead.setValue(mcfg.get("point_overhead", 10.0))
+        form.addRow("点铣进退刀 (s):", self._spn_m_poverhead)
+
+        layout.addLayout(form)
+
+        row1 = QHBoxLayout()
+        self._btn_tool = QPushButton("刀具计算")
+        self._btn_tool.clicked.connect(self._on_compute_tool)
+        row1.addWidget(self._btn_tool)
+        self._btn_tool_stop = QPushButton("急停")
+        self._btn_tool_stop.setEnabled(False)
+        self._btn_tool_stop.clicked.connect(self._on_stop_tool)
+        row1.addWidget(self._btn_tool_stop)
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self._btn_clear_tool = QPushButton("清除刀轨结果")
+        self._btn_clear_tool.clicked.connect(self._on_clear_toolpath)
+        row2.addWidget(self._btn_clear_tool)
+        self._btn_switch_viz = QPushButton("切换可视化内容")
+        self._btn_switch_viz.clicked.connect(self._on_switch_viz)
+        row2.addWidget(self._btn_switch_viz)
+        layout.addLayout(row2)
+
+        layout.addWidget(QLabel("仿真结果"))
+        self._txt_mach = QTextEdit()
+        self._txt_mach.setReadOnly(True)
+        self._txt_mach.setMaximumHeight(240)
+        layout.addWidget(self._txt_mach)
+
+        self._viz_mode = 0
+        self._tool_actors = []
+        self._mach_patches = None
+        self._mach_summary = None
+        self._sweep_worker = None
+
+    def _mach_args(self):
+        import argparse
+        return argparse.Namespace(
+            feed=self._spn_m_feed.value(), ball_r=self._spn_m_ballr.value(),
+            scallop=self._spn_m_scallop.value(), twist_limit=self._spn_m_twist.value(),
+            overhead=self._spn_m_overhead.value(),
+            point_overhead=self._spn_m_poverhead.value())
+
+    def _on_compute_tool(self):
+        if not HAS_MACHINING or not HAS_PYVISTA:
+            QMessageBox.warning(self, "Error", "加工仿真模块或 pyvista 不可用。")
+            return
+        out_dir = self._out_dir
+        if not os.path.isdir(out_dir) or not list(Path(out_dir).glob("*_params.txt")):
+            QMessageBox.warning(self, "Error", "请先在拟合工作台运行拟合，生成 *_params.txt。")
+            return
+        args = self._mach_args()
+        patches = _cm.compute(out_dir, args)
+        if not patches:
+            QMessageBox.warning(self, "Error", "未能解析准线参数文件。")
+            return
+        self._mach_patches = patches
+        self._mach_summary = _cm.summarize(patches, args)
+        self._show_mach_report(patches, self._mach_summary)
+        self._viz_mode = 0
+        self._render_toolpath()
+
+    def _show_mach_report(self, patches, summary):
+        lines = []
+        f, p = summary['flank'], summary['point']
+        lines.append(f"面片数: {summary['num_patches']}（可展 {summary['developable']}，不可展 {summary['non_developable']}）")
+        lines.append(f"侧铣: 切削 {f['cut']:.1f}s + 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
+        lines.append(f"点铣: 切削 {p['cut']:.1f}s + 非切削 {p['overhead']:.1f}s = {p['total']:.1f}s")
+        if f['total'] > 0:
+            lines.append(f"侧铣相对点铣提速: {p['total'] / f['total']:.1f}x")
+        lines.append("")
+        for pp in patches:
+            lines.append(f"{pp.name}: 扭转 {pp.twist:.2f}° "
+                         f"{'可展' if pp.developable else '不可展'} "
+                         f"侧铣 {pp.flank_time:.1f}s / 点铣 {pp.point_time:.1f}s")
+        self._txt_mach.setPlainText("\n".join(lines))
+        self._log(f"[Machining] {summary['num_patches']} patches, "
+                  f"flank {f['total']:.1f}s vs point {p['total']:.1f}s")
+
+    def _render_toolpath(self):
+        self._on_clear_toolpath()
+        if not self._mach_patches or not HAS_PYVISTA:
+            return
+        import numpy as np
+        args = self._mach_args()
+        stepover = 2.0 * math.sqrt(max(0.0, 2.0 * args.ball_r * args.scallop - args.scallop ** 2))
+        for pp in self._mach_patches:
+            for line in _cm.flank_toolpath_lines(pp.C0, pp.C1):
+                pts = np.array(line)
+                if len(pts) >= 2:
+                    a = self._plotter.add_lines(pts, color='#d62728', width=3,
+                                                name=f"flank_{pp.name}_{len(self._tool_actors)}")
+                    self._tool_actors.append(a)
+            for line in _cm.point_toolpath_lines(pp.C0, pp.C1, stepover):
+                pts = np.array(line)
+                if len(pts) >= 2:
+                    a = self._plotter.add_lines(pts, color='#1f77b4', width=1,
+                                                name=f"point_{pp.name}_{len(self._tool_actors)}")
+                    self._tool_actors.append(a)
+        self._plotter.render()
+
+    def _on_clear_toolpath(self):
+        if not HAS_PYVISTA:
+            return
+        for a in self._tool_actors:
+            try:
+                self._plotter.remove_actor(a)
+            except Exception:
+                pass
+        self._tool_actors = []
+        self._plotter.render()
+
+    def _on_stop_tool(self):
+        if self._sweep_worker and self._sweep_worker.isRunning():
+            self._sweep_worker.request_stop()
+            self._log("[Machining] 请求停止扫描...")
+
+    def _on_switch_viz(self):
+        if not HAS_MACHINING:
+            return
+        if self._viz_mode == 0:
+            self._viz_mode = 1
+            self._run_sweep()
+        else:
+            self._viz_mode = 0
+            self._render_toolpath()
+
+    def _run_sweep(self):
+        blade = self._file1
+        if not os.path.isfile(blade):
+            QMessageBox.warning(self, "Error", "请先在拟合工作台选择叶片文件。")
+            self._viz_mode = 0
+            return
+        tolerances = _cm.load_config().get("tolerances", [0.05, 0.1, 0.2, 0.5, 1.0])
+        dll = str(PROJECT_DIR / "build" / "Release" / "ruledSurfaceFitting.dll")
+        self._btn_tool_stop.setEnabled(True)
+        self._log("[Machining] 开始容差扫描...")
+        self._sweep_worker = SweepWorker(blade, dll, tolerances, self._mach_args())
+        self._sweep_worker.done.connect(self._on_sweep_done)
+        self._sweep_worker.failed.connect(lambda e: self._log(f"[Machining] 扫描失败: {e}"))
+        self._sweep_worker.finished.connect(lambda: self._btn_tool_stop.setEnabled(False))
+        self._sweep_worker.start()
+
+    def _on_sweep_done(self, rows):
+        if not rows:
+            self._log("[Machining] 扫描无结果")
+            return
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        tols = [r['tolerance'] for r in rows]
+        flank = [r['flank_total'] for r in rows]
+        point = [r['point_total'] for r in rows]
+        n_patches = [r['num_patches'] for r in rows]
+
+        fig, ax1 = plt.subplots(figsize=(6, 4), dpi=110)
+        ax1.plot(tols, flank, 'o-', color='#d62728', label='侧铣')
+        ax1.plot(tols, point, 's-', color='#1f77b4', label='点铣')
+        ax1.set_xlabel('容差 (mm)')
+        ax1.set_ylabel('加工时间 (s)')
+        ax1.legend(loc='upper left')
+        ax2 = ax1.twinx()
+        ax2.plot(tols, n_patches, 'x--', color='#2ca02c', label='面片数')
+        ax2.set_ylabel('面片数')
+        ax2.legend(loc='upper right')
+        fig.tight_layout()
+
+        png = os.path.join(tempfile.gettempdir(), 'mach_sweep.png')
+        fig.savefig(png)
+        plt.close(fig)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("参数扫描结果")
+        dlg.resize(680, 480)
+        vl = QVBoxLayout(dlg)
+        lbl = QLabel()
+        lbl.setPixmap(QPixmap(png))
+        lbl.setScaledContents(True)
+        vl.addWidget(lbl)
+        dlg.exec_()
+
+        self._log("[Machining] 扫描完成，图表已显示。")
 
     def _on_browse_file(self, idx):
         path, _ = QFileDialog.getOpenFileName(
