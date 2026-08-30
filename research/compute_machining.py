@@ -7,11 +7,12 @@ compute_machining.py — 直纹面分片拟合 vs 传统点铣 加工时间仿�
 1. 计算每块的可展性指标（母线扭转角）
 2. 生成侧铣刀轨（刀具轴线 ∥ 母线，沿准线进给）并计算切削/非切削时间
 3. 生成点铣刀轨（球头刀沿准线方向行切）并计算切削时间
-4. 输出对比表 + 可展性分类 + JSON 结果
+4. 输出对比表 + 可展性分类 + JSON 结果 + 可选 VTK 刀轨
 
 用法:
   python compute_machining.py <output_dir> [--feed 500] [--rapid 5000] \
-      [--ball-r 5] [--scallop 0.01] [--overhead 2] [--twist-limit 1.0] [--json out.json]
+      [--ball-r 5] [--scallop 0.01] [--overhead 2] [--twist-limit 1.0] \
+      [--json out.json] [--vtk vtk_dir]
 """
 import os
 import sys
@@ -19,7 +20,7 @@ import math
 import json
 import argparse
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 
 # ===================== 几何 =====================
 
@@ -36,6 +37,9 @@ def _cross(a, b):
     return (a[1] * b[2] - a[2] * b[1],
             a[2] * b[0] - a[0] * b[2],
             a[0] * b[1] - a[1] * b[0])
+
+def _lerp(a, b, t):
+    return tuple(a[k] * (1.0 - t) + b[k] * t for k in range(3))
 
 def load_directrix(path):
     """读取 _params.txt，返回 (C0, C1)，各为 [(x,y,z),...]"""
@@ -128,11 +132,58 @@ def point_milling(C0, C1, feed, ball_r, scallop):
     total_len = A / stepover if stepover > 0 else 0.0
     return total_len / feed * 60.0, stepover, total_len, A
 
+def flank_toolpath_lines(C0, C1, n_along=50):
+    """侧铣刀轨：沿准线的刀具中心路径 + 每条母线的轴线段（可视化）。"""
+    n = len(C0)
+    if n < 2:
+        return []
+    idx = ([int(round(i * (n - 1) / (n_along - 1))) for i in range(n_along)]
+           if n > n_along else list(range(n)))
+    lines = [[C0[i] for i in idx]]  # 进给路径（下准线）
+    for i in idx:
+        lines.append([C0[i], C1[i]])  # 母线（刀具轴线方向）
+    return lines
+
+def point_toolpath_lines(C0, C1, stepover, n_along=50):
+    """点铣刀轨：沿准线方向行切，行距 stepover（沿母线方向）。"""
+    n = len(C0)
+    if n < 2:
+        return []
+    idx = ([int(round(i * (n - 1) / (n_along - 1))) for i in range(n_along)]
+           if n > n_along else list(range(n)))
+    mean_r = mean_ruling_length(C0, C1)
+    n_across = max(1, int(round(mean_r / stepover))) if stepover > 0 else 1
+    lines = []
+    for j in range(n_across + 1):
+        t = j / n_across if n_across > 0 else 0.0
+        lines.append([_lerp(C0[i], C1[i], t) for i in idx])
+    return lines
+
+def write_vtk_polylines(path, lines):
+    pts, segs = [], []
+    for line in lines:
+        base = len(pts)
+        for p in line:
+            pts.append(p)
+        for k in range(len(line) - 1):
+            segs.append((base + k, base + k + 1))
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write("# vtk DataFile Version 3.0\n")
+        f.write("toolpath\nASCII\nDATASET POLYDATA\n")
+        f.write(f"POINTS {len(pts)} float\n")
+        for p in pts:
+            f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+        f.write(f"LINES {len(segs)} {len(segs) * 3}\n")
+        for a, b in segs:
+            f.write(f"2 {a} {b}\n")
+
 # ===================== 数据模型 =====================
 
 @dataclass
 class Patch:
     name: str
+    C0: list = None
+    C1: list = None
     directrix_len: float = 0.0
     mean_ruling: float = 0.0
     area: float = 0.0
@@ -145,6 +196,65 @@ class Patch:
 
 # ===================== 主流程 =====================
 
+def compute(input_dir, args):
+    """扫描 _params.txt，计算每块指标，返回 patches 列表。"""
+    files = sorted(Path(input_dir).glob("*_params.txt"))
+    if not files:
+        print(f"[Error] 未找到 *_params.txt 文件: {input_dir}")
+        return []
+    patches = []
+    for fp in files:
+        C0, C1 = load_directrix(fp)
+        if len(C0) < 2 or len(C1) < 2:
+            print(f"  [skip] {fp.name}: 准线点数不足")
+            continue
+        p = Patch(name=fp.name.replace('_params.txt', ''), C0=C0, C1=C1)
+        p.directrix_len = curve_length(C0)
+        p.mean_ruling = mean_ruling_length(C0, C1)
+        p.area = surface_area(C0, C1)
+        p.flank_time, p.flank_len, p.flank_passes, p.developable, p.twist = \
+            flank_milling(C0, C1, args.feed, args.twist_limit)
+        p.point_time, _, _, _ = point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
+        patches.append(p)
+    return patches
+
+def summarize(patches, args):
+    """汇总并返回结果 dict。"""
+    n_dev = sum(1 for p in patches if p.developable)
+    n_nondev = len(patches) - n_dev
+    flank_cut = sum(p.flank_time for p in patches)
+    flank_overhead = len(patches) * args.overhead
+    flank_total = flank_cut + flank_overhead
+    point_cut = sum(p.point_time for p in patches)
+    point_overhead = 10.0
+    point_total = point_cut + point_overhead
+    total_area = sum(p.area for p in patches)
+    return {
+        "num_patches": len(patches), "developable": n_dev, "non_developable": n_nondev,
+        "total_area": total_area,
+        "flank": {"cut": flank_cut, "overhead": flank_overhead, "total": flank_total},
+        "point": {"cut": point_cut, "overhead": point_overhead, "total": point_total},
+    }
+
+def print_report(patches, args, summary):
+    print("=" * 92)
+    print(f"直纹面拟合 vs 传统点铣 加工时间仿真  (feed={args.feed} mm/min, 球刀R={args.ball_r}, 残留={args.scallop})")
+    print(f"面片数: {summary['num_patches']}")
+    print("=" * 92)
+    print(f"{'面片':<30}{'可展':<5}{'扭转°':>8}{'准线mm':>9}{'母线mm':>9}{'侧铣s':>9}{'点铣s':>9}")
+    for p in patches:
+        print(f"{p.name:<30}{'是' if p.developable else '否':<5}{p.twist:>8.2f}"
+              f"{p.directrix_len:>9.1f}{p.mean_ruling:>9.1f}"
+              f"{p.flank_time:>9.2f}{p.point_time:>9.2f}")
+    print("-" * 92)
+    print(f"可展面片: {summary['developable']}  不可展面片: {summary['non_developable']}  总曲面面积: {summary['total_area']:.1f} mm²")
+    print()
+    f, p = summary["flank"], summary["point"]
+    print(f"侧铣（直纹面拟合后）: 切削 {f['cut']:8.1f}s + 非切削 {f['overhead']:8.1f}s = {f['total']:8.1f}s")
+    print(f"点铣（传统整体）:     切削 {p['cut']:8.1f}s + 非切削 {p['overhead']:8.1f}s = {p['total']:8.1f}s")
+    if f['total'] > 0:
+        print(f"侧铣相对点铣提速: {p['total'] / f['total']:.1f}x")
+
 def main():
     ap = argparse.ArgumentParser(description="直纹面拟合加工时间仿真（自算刀轨）")
     ap.add_argument("input", help="输出目录（含 *_params.txt）")
@@ -155,65 +265,30 @@ def main():
     ap.add_argument("--overhead", type=float, default=2.0, help="每块侧铣进退刀+衔接时间 s（默认 2）")
     ap.add_argument("--twist-limit", type=float, default=1.0, help="可展判定阈值 度（默认 1.0）")
     ap.add_argument("--json", help="可选：输出 JSON 结果文件路径")
+    ap.add_argument("--vtk", help="可选：输出刀轨 VTK 到指定目录")
     args = ap.parse_args()
 
-    files = sorted(Path(args.input).glob("*_params.txt"))
-    if not files:
-        print(f"[Error] 未找到 *_params.txt 文件: {args.input}")
+    patches = compute(args.input, args)
+    if not patches:
         sys.exit(1)
+    summary = summarize(patches, args)
+    print_report(patches, args, summary)
 
-    patches = []
-    for fp in files:
-        C0, C1 = load_directrix(fp)
-        if len(C0) < 2 or len(C1) < 2:
-            print(f"  [skip] {fp.name}: 准线点数不足")
-            continue
-        p = Patch(name=fp.name.replace('_params.txt', ''))
-        p.directrix_len = curve_length(C0)
-        p.mean_ruling = mean_ruling_length(C0, C1)
-        p.area = surface_area(C0, C1)
-        p.flank_time, p.flank_len, p.flank_passes, p.developable, p.twist = \
-            flank_milling(C0, C1, args.feed, args.twist_limit)
-        p.point_time, _, _, _ = point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
-        patches.append(p)
-
-    n_dev = sum(1 for p in patches if p.developable)
-    n_nondev = len(patches) - n_dev
-    flank_cut = sum(p.flank_time for p in patches)
-    flank_overhead = len(patches) * args.overhead
-    flank_total = flank_cut + flank_overhead
-    point_cut = sum(p.point_time for p in patches)
-    point_overhead = 10.0  # 点铣整体一次装夹，仅一次进退刀（估）
-    point_total = point_cut + point_overhead
-    total_area = sum(p.area for p in patches)
-
-    print("=" * 92)
-    print(f"直纹面拟合 vs 传统点铣 加工时间仿真  (feed={args.feed} mm/min, 球刀R={args.ball_r}, 残留={args.scallop})")
-    print(f"输入: {args.input}  面片数: {len(patches)}")
-    print("=" * 92)
-    print(f"{'面片':<30}{'可展':<5}{'扭转°':>8}{'准线mm':>9}{'母线mm':>9}{'侧铣s':>9}{'点铣s':>9}")
-    for p in patches:
-        print(f"{p.name:<30}{'是' if p.developable else '否':<5}{p.twist:>8.2f}"
-              f"{p.directrix_len:>9.1f}{p.mean_ruling:>9.1f}"
-              f"{p.flank_time:>9.2f}{p.point_time:>9.2f}")
-
-    print("-" * 92)
-    print(f"可展面片: {n_dev}  不可展面片: {n_nondev}  总曲面面积: {total_area:.1f} mm²")
-    print()
-    print(f"侧铣（直纹面拟合后）: 切削 {flank_cut:8.1f}s + 非切削 {flank_overhead:8.1f}s = {flank_total:8.1f}s")
-    print(f"点铣（传统整体）:     切削 {point_cut:8.1f}s + 非切削 {point_overhead:8.1f}s = {point_total:8.1f}s")
-    if flank_total > 0:
-        print(f"侧铣相对点铣提速: {point_total / flank_total:.1f}x")
+    if args.vtk:
+        os.makedirs(args.vtk, exist_ok=True)
+        for p in patches:
+            base = os.path.join(args.vtk, p.name)
+            write_vtk_polylines(base + "_flank.vtk", flank_toolpath_lines(p.C0, p.C1))
+            stepover = 2.0 * math.sqrt(max(0.0, 2.0 * args.ball_r * args.scallop - args.scallop * args.scallop))
+            write_vtk_polylines(base + "_point.vtk", point_toolpath_lines(p.C0, p.C1, stepover))
+        print(f"刀轨 VTK 已写入: {args.vtk}")
 
     if args.json:
         result = {
             "feed": args.feed, "ball_r": args.ball_r, "scallop": args.scallop,
             "twist_limit": args.twist_limit, "overhead": args.overhead,
-            "num_patches": len(patches), "developable": n_dev, "non_developable": n_nondev,
-            "total_area": total_area,
-            "flank": {"cut": flank_cut, "overhead": flank_overhead, "total": flank_total},
-            "point": {"cut": point_cut, "overhead": point_overhead, "total": point_total},
-            "patches": [asdict(p) for p in patches],
+            **summary,
+            "patches": [{k: v for k, v in asdict(p).items() if k not in ('C0', 'C1')} for p in patches],
         }
         with open(args.json, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
