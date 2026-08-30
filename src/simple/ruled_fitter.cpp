@@ -56,6 +56,44 @@ bool exportDirectrixTXT(const std::string& path,
     return true;
 }
 
+bool exportCurveBSplineTXT(const std::string& path,
+                           const Handle(Geom_BSplineCurve)& curveC0,
+                           const Handle(Geom_BSplineCurve)& curveC1,
+                           int nSamples)
+{
+    std::ofstream out(path);
+    if (!out || curveC0.IsNull() || curveC1.IsNull()) return false;
+
+    auto writeCurve = [&](const char* name, const Handle(Geom_BSplineCurve)& c) {
+        out << "[" << name << "]\n";
+        out << "degree = " << c->Degree() << "\n";
+        out << "rational = " << (c->IsRational() ? "yes" : "no") << "\n";
+        out << "nbPoles = " << c->NbPoles() << "\n";
+        out << "poles (x y z w):\n";
+        for (int i = 1; i <= c->NbPoles(); ++i) {
+            gp_Pnt p = c->Pole(i);
+            out << "  " << std::fixed << std::setprecision(6)
+                << p.X() << " " << p.Y() << " " << p.Z() << " " << c->Weight(i) << "\n";
+        }
+        out << "nbKnots = " << c->NbKnots() << "\n";
+        out << "knots:";
+        for (int i = 1; i <= c->NbKnots(); ++i)
+            out << " " << std::setprecision(8) << c->Knot(i);
+        out << "\nmultiplicities:";
+        for (int i = 1; i <= c->NbKnots(); ++i)
+            out << " " << c->Multiplicity(i);
+        out << "\n";
+    };
+
+    out << "nSamples = " << nSamples << "\n\n";
+    writeCurve("C0", curveC0);
+    out << "\n";
+    writeCurve("C1", curveC1);
+    out << "\n[mapping]\n";
+    out << "description = identity, C0(u) and C1(u) share the same parameterization from surface iso-curves\n";
+    return true;
+}
+
 bool exportErrorsCSV(const std::string& path,
                      const std::vector<RuledResult>& results)
 {

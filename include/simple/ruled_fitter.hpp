@@ -91,6 +91,12 @@ bool exportOBJ(const std::string& path,
 bool exportDirectrixTXT(const std::string& path,
                         const Vec3Arr& c0Samples, const Vec3Arr& c1Samples);
 
+// 导出原始等参线的 B 样条参数（次数、控制点、节点向量、重数），供 NX/UG 重建。
+bool exportCurveBSplineTXT(const std::string& path,
+                           const Handle(Geom_BSplineCurve)& curveC0,
+                           const Handle(Geom_BSplineCurve)& curveC1,
+                           int nSamples);
+
 bool exportErrorsCSV(const std::string& path,
                      const std::vector<RuledResult>& results);
 
