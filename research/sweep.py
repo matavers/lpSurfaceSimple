@@ -17,7 +17,10 @@ import argparse
 import tempfile
 from pathlib import Path
 
-import compute_machining as cm
+try:
+    from research import compute_machining as cm
+except ImportError:
+    import compute_machining as cm
 
 
 class RuledFitConfig(ctypes.Structure):
