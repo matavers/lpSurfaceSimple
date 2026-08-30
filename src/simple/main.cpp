@@ -792,13 +792,19 @@ int main(int argc, char* argv[]) {
         face1 = result1.faces[faceIdx1];
         std::cout << "  Using face[" << faceIdx1 << "] from file 1" << std::endl;
     } else {
-        face1 = pickLargestFace(result1.faces, "Blade-raw1");
+        auto ident1 = simple::identifyBladeSurfaces(result1.faces, 9, 0.1, 20.0, 5);
+        face1 = (ident1.success && ident1.pressureFaceIndex >= 0)
+                ? result1.faces[ident1.pressureFaceIndex]
+                : pickLargestFace(result1.faces, "Blade-raw1");
     }
     if (faceIdx2 >= 0 && faceIdx2 < (int)result2.faces.size()) {
         face2 = result2.faces[faceIdx2];
         std::cout << "  Using face[" << faceIdx2 << "] from file 2" << std::endl;
     } else {
-        face2 = pickLargestFace(result2.faces, "Blade-raw2");
+        auto ident2 = simple::identifyBladeSurfaces(result2.faces, 9, 0.1, 20.0, 5);
+        face2 = (ident2.success && ident2.suctionFaceIndex >= 0)
+                ? result2.faces[ident2.suctionFaceIndex]
+                : pickLargestFace(result2.faces, "Blade-raw2");
     }
 
     if (face1.IsNull() || face2.IsNull()) {

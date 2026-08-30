@@ -162,10 +162,10 @@ class SweepWorker(QThread):
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
 
-    def __init__(self, blade, dll, tolerances, params):
+    def __init__(self, blade, exe, tolerances, params):
         super().__init__()
         self._blade = blade
-        self._dll = dll
+        self._exe = exe
         self._tolerances = tolerances
         self._params = params
         self._stop = False
@@ -179,7 +179,7 @@ class SweepWorker(QThread):
                 out_dir = os.path.join(tempfile.gettempdir(), f"sweep_gui_{tol:.3f}")
                 if os.path.isdir(out_dir):
                     shutil.rmtree(out_dir)
-                code = _sweep.run_fitting(self._dll, self._blade, out_dir, tol)
+                code = _sweep.run_fitting(self._exe, self._blade, out_dir, tol)
                 if code != 0:
                     continue
                 patches = _cm.compute(out_dir, self._params)
@@ -697,10 +697,10 @@ class MainWindow(QMainWindow):
             self._viz_mode = 0
             return
         tolerances = _cm.load_config().get("tolerances", [0.05, 0.1, 0.2, 0.5, 1.0])
-        dll = str(PROJECT_DIR / "build" / "Release" / "ruledSurfaceFitting.dll")
+        exe = str(BUILD_EXE)
         self._btn_tool_stop.setEnabled(True)
         self._log("[Machining] 开始容差扫描...")
-        self._sweep_worker = SweepWorker(blade, dll, tolerances, self._mach_args())
+        self._sweep_worker = SweepWorker(blade, exe, tolerances, self._mach_args())
         self._sweep_worker.done.connect(self._on_sweep_done)
         self._sweep_worker.failed.connect(lambda e: self._log(f"[Machining] 扫描失败: {e}"))
         self._sweep_worker.finished.connect(lambda: self._btn_tool_stop.setEnabled(False))

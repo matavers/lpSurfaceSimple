@@ -4,13 +4,13 @@
 sweep.py — 参数扫描：容差 / 点铣工艺参数 对加工时间的影响
 
 用法:
-  python sweep.py <blade_file> [--tolerances 0.05,0.1,0.2,0.5,1.0] \
-      [--ball-r 5] [--scallop 0.01] [--twist-limit 1.0] [--feed 500] \
-      [--json sweep.json]
+  python sweep.py <blade_file> [--exe path/to/simple.exe] \
+      [--tolerances 0.05,0.1,0.2,0.5,1.0] [--ball-r 5] [--scallop 0.01] \
+      [--twist-limit 1.0] [--feed 500] [--json sweep.json]
 """
 import os
 import sys
-import ctypes
+import subprocess
 import shutil
 import json
 import argparse
@@ -23,42 +23,23 @@ except ImportError:
     import compute_machining as cm
 
 
-class RuledFitConfig(ctypes.Structure):
-    _fields_ = [
-        ("inputPath", ctypes.c_char_p),
-        ("outputDir", ctypes.c_char_p),
-        ("tolerance", ctypes.c_double),
-    ]
-
-
-def run_fitting(dll_path, input_path, out_dir, tolerance):
-    """调用 ruled_fitting（井字形自适应细分）生成输出。返回错误码。"""
+def run_fitting(exe, blade, out_dir, tolerance):
+    """调用 simple.exe --mode ruled（井字形网格细分）生成输出。返回错误码。"""
     os.makedirs(out_dir, exist_ok=True)
-    os.add_dll_directory(str(Path(dll_path).parent))
-    lib = ctypes.CDLL(dll_path)
-    lib.ruled_fitting.restype = ctypes.c_void_p
-    lib.ruled_fitting.argtypes = [ctypes.POINTER(RuledFitConfig)]
-    lib.free_result.argtypes = [ctypes.c_void_p]
-
-    cfg = RuledFitConfig(str(input_path).encode(), str(out_dir).encode(), tolerance)
-    p = lib.ruled_fitting(ctypes.byref(cfg))
-    if not p:
+    cmd = [exe, blade, blade, '--mode', 'ruled',
+           '--tolerance', str(tolerance), '--outdir', out_dir]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        return r.returncode
+    except Exception:
         return -1
-    res = ctypes.cast(p, ctypes.POINTER(ctypes.c_int))
-    code = res.contents.value
-    lib.free_result(p)
-    return code
-
-
-class NS(ctypes.Structure):
-    pass
 
 
 def main():
     cfg = cm.load_config()
     ap = argparse.ArgumentParser(description="参数扫描：容差 vs 加工时间")
     ap.add_argument("blade", help="叶片 STEP/IGES 文件路径")
-    ap.add_argument("--dll", default=r"D:\Projects\lpSurface\Simple\build\Release\ruledSurfaceFitting.dll")
+    ap.add_argument("--exe", default=r"D:\Projects\lpSurface\Simple-gr\build\Release\simple.exe")
     ap.add_argument("--tolerances", default=",".join(str(x) for x in cfg.get("tolerances", [0.05, 0.1, 0.2, 0.5, 1.0])),
                     help="容差列表（逗号分隔，mm）")
     ap.add_argument("--feed", type=float, default=cfg.get("feed", 500.0))
@@ -79,7 +60,7 @@ def main():
         out_dir = os.path.join(workdir, f"tol_{tol:.3f}")
         if os.path.isdir(out_dir):
             shutil.rmtree(out_dir)
-        code = run_fitting(args.dll, args.blade, out_dir, tol)
+        code = run_fitting(args.exe, args.blade, out_dir, tol)
         if code != 0:
             print(f"  tolerance={tol}: 拟合失败 (code={code})")
             continue
