@@ -152,22 +152,16 @@ def surface_area(C0, C1):
 
 def flank_milling(C0, C1, feed, twist_limit):
     """
-    侧铣（锥度立铣刀，小锥角退化为圆柱刀）：刀具轴线沿母线、沿准线进给。
-    可展（twist ≤ 有效阈值，有效阈值 = twist_limit + taper_angle）→ 侧铣一次；
-    卷曲（twist > 阈值）→ 不侧铣，由调用方归入点铣。
-    返回 (切削时间 s, 刀轨长 mm, 刀数, 是否可展, 扭转角 deg)
+    侧铣（锥度立铣刀）：刀具轴线沿母线、沿准线进给。
+    C++ 已按曲率把卷曲区切去，能进 *_params.txt 的格子都是可展区，一律侧铣一次。
+    twist 仅作报告统计。返回 (切削时间 s, 刀轨长 mm, 刀数, 是否可展, 扭转角 deg)
     """
     L = curve_length(C0)
     twist = twist_angle_deg(C0, C1)
-    developable = twist <= twist_limit
-    if developable:
-        path_len = L
-        passes = 1.0
-        cut_time = path_len / feed * 60.0
-    else:
-        path_len = 0.0
-        passes = 0.0
-        cut_time = 0.0
+    developable = True
+    path_len = L
+    passes = 1.0
+    cut_time = path_len / feed * 60.0
     return cut_time, path_len, passes, developable, twist
 
 def point_milling(C0, C1, feed, ball_r, scallop):
