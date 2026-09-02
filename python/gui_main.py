@@ -186,14 +186,15 @@ class ToolpathWorker(QThread):
                     - self._args.scallop ** 2))
             tool_r = getattr(self._args, 'tool_r', None) or \
                 _cm.load_config().get('tool_r', 5.0)
-            # 全部片侧铣，按连通域蛇形拼接成连续进给轨迹
+            # 可展片：按连通域蛇形拼接成连续进给轨迹（锥度刀侧铣）
             feed_lines, axis_segs = _cm.flank_stitched_feed_lines(patches, tool_r)
-            # 点铣基线：全部片球刀刀心行切（用于对比）
+            # 卷曲片：球刀刀心行切（点铣兜底）
             point_lines = []
             for pp in patches:
-                point_lines.extend(
-                    _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
-                                       flip=pp.normal_flip))
+                if not pp.developable:
+                    point_lines.extend(
+                        _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
+                                           flip=pp.normal_flip))
             self.done.emit((patches, summary,
                             _build_line_arrays(feed_lines),
                             _build_line_arrays(axis_segs),
@@ -784,6 +785,7 @@ class MainWindow(QMainWindow):
             feed=self._spn_m_feed.value(), tool_r=self._spn_m_toolr.value(),
             ball_r=self._spn_m_ballr.value(), scallop=self._spn_m_scallop.value(),
             twist_limit=self._spn_m_twist.value(),
+            taper_angle=_cm.load_config().get("taper_angle", 3.0),
             overhead=self._spn_m_overhead.value(),
             point_overhead=self._spn_m_poverhead.value())
 
@@ -863,16 +865,21 @@ class MainWindow(QMainWindow):
     def _show_mach_report(self, patches, summary):
         lines = []
         f, p = summary['flank'], summary['point']
-        lines.append(f"面片数: {summary['num_patches']}（可展 {summary['developable']}，不可展 {summary['non_developable']}，"
-                     f"侧铣连通域 {summary.get('flank_regions', '?')}）")
-        lines.append(f"A 直纹面侧铣: 切削 {f['cut']:.1f}s + 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
+        lines.append(f"面片数: {summary['num_patches']}（可展 {summary['developable']}→侧铣 "
+                     f"{summary.get('flank_regions', '?')} 区域，卷曲 {summary['non_developable']}→点铣 "
+                     f"{summary.get('point_regions', '?')} 区域）")
+        if 'flank_cut' in f and 'fallback_point_cut' in f:
+            lines.append(f"A 混合策略: 侧铣 {f['flank_cut']:.1f}s + 卷曲点铣 {f['fallback_point_cut']:.1f}s "
+                         f"+ 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
+        else:
+            lines.append(f"A 侧铣: 切削 {f['cut']:.1f}s + 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
         lines.append(f"B 原曲面点铣: 切削 {p['cut']:.1f}s + 非切削 {p['overhead']:.1f}s = {p['total']:.1f}s")
         if f['total'] > 0:
             lines.append(f"A 相对 B 提速: {p['total'] / f['total']:.1f}x")
         lines.append("")
         for pp in patches:
             lines.append(f"{pp.name}: 扭转 {pp.twist:.2f}° "
-                         f"{'可展' if pp.developable else '不可展'} "
+                         f"{'可展' if pp.developable else '卷曲'} "
                          f"侧铣 {pp.flank_time:.1f}s / 点铣 {pp.point_time:.1f}s")
         self._txt_mach.setPlainText("\n".join(lines))
         self._log(f"[Machining] {summary['num_patches']} patches, "

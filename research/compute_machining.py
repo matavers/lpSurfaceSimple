@@ -153,16 +153,21 @@ def surface_area(C0, C1):
 def flank_milling(C0, C1, feed, twist_limit):
     """
     侧铣（锥度立铣刀，小锥角退化为圆柱刀）：刀具轴线沿母线、沿准线进给。
-    全部片都侧铣一次；轻微不可展由锥角+刀位偏置补偿（见论文 2.3.3 节）。
-    developable 仅为报告统计标志（twist ≤ twist_limit），不影响侧铣决策。
+    可展（twist ≤ 有效阈值，有效阈值 = twist_limit + taper_angle）→ 侧铣一次；
+    卷曲（twist > 阈值）→ 不侧铣，由调用方归入点铣。
     返回 (切削时间 s, 刀轨长 mm, 刀数, 是否可展, 扭转角 deg)
     """
     L = curve_length(C0)
     twist = twist_angle_deg(C0, C1)
     developable = twist <= twist_limit
-    path_len = L
-    passes = 1.0
-    cut_time = path_len / feed * 60.0
+    if developable:
+        path_len = L
+        passes = 1.0
+        cut_time = path_len / feed * 60.0
+    else:
+        path_len = 0.0
+        passes = 0.0
+        cut_time = 0.0
     return cut_time, path_len, passes, developable, twist
 
 def point_milling(C0, C1, feed, ball_r, scallop):
@@ -451,9 +456,9 @@ def _flank_stitched_region(region, tool_r):
     return feed_all, axes_all
 
 def flank_stitched_feed_lines(patches, tool_r):
-    """把所有片（不分可展）按连通域拼接，返回 (feed_lines, axis_segs)。
-    feed_lines: 每个连通域一条连续进给折线（含跨格衔接段）"""
-    regions = _connected_regions(patches)
+    """把可展片按连通域拼接，返回 (feed_lines, axis_segs)。
+    feed_lines: 每个可展连通域一条连续进给折线（含跨格衔接段）"""
+    regions = _connected_regions(patches, True)
     feed_lines, axis_segs = [], []
     for region in regions:
         feed, axes = _flank_stitched_region(region, tool_r)
@@ -486,8 +491,9 @@ def compute(input_dir, args):
         p.directrix_len = curve_length(C0)
         p.mean_ruling = mean_ruling_length(C0, C1)
         p.area = surface_area(C0, C1)
+        twist_lim = getattr(args, 'twist_limit', 2.0) + getattr(args, 'taper_angle', 3.0)
         p.flank_time, p.flank_len, p.flank_passes, p.developable, p.twist = \
-            flank_milling(C0, C1, args.feed, args.twist_limit)
+            flank_milling(C0, C1, args.feed, twist_lim)
         p.point_time, p.stepover, p.point_len, _ = \
             point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
         patches.append(p)
@@ -499,20 +505,24 @@ def compute(input_dir, args):
 
 def summarize(patches, args):
     """汇总并返回结果 dict。
-    A 直纹面侧铣（全部片侧铣一次，按连通域拼接）vs B 传统整体点铣。
+    A 混合策略（可展区锥度刀侧铣 + 卷曲区点铣）vs B 传统整体点铣。
     非切削时间按「连通域数 × 每区域进退刀」计算（刀轨拼接后只进退刀一次/区域）。
     二者在同一精度指标下比较：点铣残留高度 = 拟合容差。"""
     n_dev = sum(1 for p in patches if p.developable)
     n_nondev = len(patches) - n_dev
-    flank_regions = _connected_regions(patches)   # 全部片（不分可展）
+    flank_regions = _connected_regions(patches, True)   # 可展区连通域
+    point_regions = _connected_regions(patches, False)  # 卷曲区连通域
     n_flank_regions = len(flank_regions)
+    n_point_regions = len(point_regions)
 
-    flank_cut = sum(p.flank_time for p in patches)   # 全部片侧铣
+    flank_cut = sum(p.flank_time for p in patches)                       # 可展区侧铣
+    fallback_point_cut = sum(p.point_time for p in patches if not p.developable)  # 卷曲区点铣
     flank_overhead = n_flank_regions * args.overhead
-    flank_total = flank_cut + flank_overhead
+    fallback_overhead = n_point_regions * getattr(args, 'point_overhead', 10.0)
+    flank_total = flank_cut + fallback_point_cut + flank_overhead + fallback_overhead
 
-    point_cut = sum(p.point_time for p in patches)
-    point_overhead = getattr(args, 'point_overhead', 10.0)  # 整体点铣单次进退刀
+    point_cut = sum(p.point_time for p in patches)   # 基线：整体点铣
+    point_overhead = getattr(args, 'point_overhead', 10.0)
     point_total = point_cut + point_overhead
     total_area = sum(p.area for p in patches)
     return {
@@ -520,11 +530,15 @@ def summarize(patches, args):
         "developable": n_dev,
         "non_developable": n_nondev,
         "flank_regions": n_flank_regions,
+        "point_regions": n_point_regions,
         "total_area": total_area,
         "flank": {
-            "cut": flank_cut,
+            "cut": flank_cut + fallback_point_cut,
             "flank_cut": flank_cut,
-            "overhead": flank_overhead,
+            "fallback_point_cut": fallback_point_cut,
+            "overhead": flank_overhead + fallback_overhead,
+            "flank_overhead": flank_overhead,
+            "fallback_overhead": fallback_overhead,
             "total": flank_total,
         },
         "point": {"cut": point_cut, "overhead": point_overhead, "total": point_total},
@@ -554,7 +568,8 @@ def print_report(patches, args, summary):
               f"中位={twists[len(twists) // 2]:.2f}")
     print()
     f, p = summary["flank"], summary["point"]
-    print(f"A 直纹面侧铣(拟合后): 切削 {f['cut']:8.1f}s "
+    print(f"A 混合策略(拟合后): 侧铣 {f['flank_cut']:8.1f}s "
+          f"+ 卷曲点铣 {f['fallback_point_cut']:8.1f}s "
           f"+ 非切削 {f['overhead']:8.1f}s = {f['total']:8.1f}s")
     print(f"B 传统点铣(原曲面):   切削 {p['cut']:8.1f}s "
           f"+ 非切削 {p['overhead']:8.1f}s = {p['total']:8.1f}s")

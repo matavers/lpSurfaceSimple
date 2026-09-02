@@ -184,6 +184,7 @@ def main():
         feed=mcfg.get("feed", 500.0), tool_r=mcfg.get("tool_r", 5.0),
         ball_r=mcfg.get("ball_r", 5.0), scallop=mcfg.get("scallop", 0.1),
         twist_limit=mcfg.get("twist_limit", 2.0),
+        taper_angle=mcfg.get("taper_angle", 3.0),
         overhead=mcfg.get("overhead", 4.0),
         point_overhead=mcfg.get("point_overhead", 10.0))
 
