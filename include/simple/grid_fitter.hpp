@@ -18,6 +18,7 @@ struct GridCell {
     RuledCellFit ruled;
     double maxError = 0.0;
     double rmsError = 0.0;
+    double twist = 0.0;      // 母线法向扭转角最大值(度)
 };
 
 struct GridConfig {
@@ -30,6 +31,10 @@ struct GridConfig {
     int nVSamples = 10;
     int nRibs = 20;           // 直纹面准线优化的 rib 采样数
     double lambda = 1.0;      // 直纹面准线正则强度
+    double devTol = 2.0;      // 可展性阈值(度)：twist ≤ devTol 视为可侧铣
+    double devWeight = 1.0;   // 方向选择的可展性权重(mm/度)：1 度扭转 ≈ devWeight mm 误差
+    double minCellDiag = 10.0; // 可展性细分的最小物理对角尺寸(mm)，防止对不可展区无限细分
+    double maxRefineRatio = 16.0; // 最大细分比：任一行/列宽度不得小于最宽行的 1/maxRefineRatio，避免几何级数极细条带
 };
 
 struct GridResult {
@@ -42,6 +47,8 @@ struct GridResult {
     ParamDir fitDir = ParamDir::V;   // 全局一致直纹面方向（每次二分后重试算）
     double maxError = 0.0;        // 细分后实际达到的最大误差（mm）
     bool toleranceMet = true;     // 是否满足 tolerance
+    double maxTwist = 0.0;        // 细分后最大母线扭转角（度）
+    int developableCount = 0;     // 可展格子数（twist ≤ devTol）
 };
 
 // 二维网格分区拟合主入口：先均匀 M×N，再按容差整行/整列自适应细分。

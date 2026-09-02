@@ -467,6 +467,10 @@ void printUsage() {
               << "    --nsplit-u <N>          U-direction (vertical) splits -> columns (default: 2)\n"
               << "    --nsplit-v <N>          V-direction (horizontal) splits -> rows (default: 2)\n"
                << "    --tolerance <T>         Tolerance for adaptive refinement (default: 0.1)\n"
+               << "    --dev-tol <D>          Developability threshold in deg (default: 2.0)\n"
+               << "    --dev-weight <W>       Developability weight mm/deg for direction (default: 1.0)\n"
+               << "    --min-cell-diag <S>    Min cell diagonal (mm) for developability splits (default: 10.0)\n"
+               << "    --max-refine-ratio <R> Max width ratio row/col vs widest (default: 16.0)\n"
                << "    --max-depth <N>         Max refinement steps (default: 1000, safety cap)\n"
                << "    --max-cells <N>         Max grid cells (default: 10000, safety cap)\n"
                << "    --blend                 Enable trim+blend post-pass (ruled mode only)\n"
@@ -484,6 +488,7 @@ int main(int argc, char* argv[]) {
     int nUSamples = 50, nVSamples = 10;
     int nSplitU = 2, nSplitV = 2, maxDepth = 1000, maxCells = 10000;
     double tolerance = 0.1;
+    double devTol = 2.0, devWeight = 1.0, minCellDiag = 10.0, maxRefineRatio = 16.0;
     bool doBlend = false;
     double fMax = 0.3;
     bool exportStep = false;
@@ -541,6 +546,10 @@ int main(int argc, char* argv[]) {
         else if (arg == "--nsplit-u" && i + 1 < argc) { nSplitU = std::stoi(argv[++i]); }
         else if (arg == "--nsplit-v" && i + 1 < argc) { nSplitV = std::stoi(argv[++i]); }
         else if (arg == "--tolerance" && i + 1 < argc) { tolerance = std::stod(argv[++i]); }
+        else if (arg == "--dev-tol" && i + 1 < argc) { devTol = std::stod(argv[++i]); }
+        else if (arg == "--dev-weight" && i + 1 < argc) { devWeight = std::stod(argv[++i]); }
+        else if (arg == "--min-cell-diag" && i + 1 < argc) { minCellDiag = std::stod(argv[++i]); }
+        else if (arg == "--max-refine-ratio" && i + 1 < argc) { maxRefineRatio = std::stod(argv[++i]); }
         else if (arg == "--max-depth" && i + 1 < argc) { maxDepth = std::stoi(argv[++i]); }
         else if (arg == "--max-cells" && i + 1 < argc) { maxCells = std::stoi(argv[++i]); }
         else if (arg == "--blend") { doBlend = true; }
@@ -881,6 +890,10 @@ int main(int argc, char* argv[]) {
     gcfg.maxCells = maxCells;
     gcfg.nUSamples = nUSamples;
     gcfg.nVSamples = nVSamples;
+    gcfg.devTol = devTol;
+    gcfg.devWeight = devWeight;
+    gcfg.minCellDiag = minCellDiag;
+    gcfg.maxRefineRatio = maxRefineRatio;
 
     GridResult gr1, gr2;
     if (isPlanar) {
@@ -895,12 +908,15 @@ int main(int argc, char* argv[]) {
         std::cout << "  " << gr.name << ": " << gr.nRows << "x" << gr.nCols
                   << " = " << gr.cells.size() << " cells"
                   << "  achievedMaxError=" << std::fixed << std::setprecision(6) << gr.maxError
+                  << "  maxTwist=" << gr.maxTwist << " deg"
+                  << "  developable=" << gr.developableCount << "/" << gr.cells.size()
                   << "  toleranceMet=" << (gr.toleranceMet ? "YES" : "NO") << std::endl;
         for (const auto& c : gr.cells) {
             std::cout << "    cell[" << c.row << "," << c.col << "]"
                       << " dir=" << (c.fitDir == ParamDir::U ? "U" : "V")
                       << "  maxError=" << std::fixed << std::setprecision(5) << c.maxError
-                      << "  rmsError=" << c.rmsError << std::endl;
+                      << "  rmsError=" << c.rmsError
+                      << "  twist=" << c.twist << " deg" << std::endl;
         }
     }
 

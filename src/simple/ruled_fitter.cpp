@@ -192,6 +192,39 @@ void optimizeDirectrices(
     }
 }
 
+// 母线法向扭转角最大值(度)：直纹面可展 ⟺ 切平面(法向)沿母线恒定 ⟺ β≈0。
+// 与 compute_machining.py 的 ruling_twists 口径一致。
+static double computeRuledTwist(const Vec3Arr& c0, const Vec3Arr& c1) {
+    int n = static_cast<int>(std::min(c0.size(), c1.size()));
+    if (n < 2) return 0.0;
+
+    auto tangent = [](const Vec3Arr& C, int i) -> Vec3 {
+        int m = static_cast<int>(C.size());
+        if (m < 2) return Vec3(0, 0, 0);
+        Vec3 d;
+        if (i == 0) d = C[1] - C[0];
+        else if (i == m - 1) d = C[m - 1] - C[m - 2];
+        else d = C[i + 1] - C[i - 1];
+        double len = d.norm();
+        return len < 1e-12 ? Vec3(0, 0, 0) : d / len;
+    };
+
+    double maxTwist = 0.0;
+    for (int i = 0; i < n; ++i) {
+        Vec3 r = c1[i] - c0[i];
+        if (r.norm() < 1e-12) continue;
+        Vec3 t0 = tangent(c0, i);
+        Vec3 t1 = tangent(c1, i);
+        Vec3 n0 = t0.cross(r);
+        Vec3 n1 = t1.cross(r);
+        double m0 = n0.norm(), m1 = n1.norm();
+        if (m0 < 1e-12 || m1 < 1e-12) continue;
+        double d = clamp(n0.dot(n1) / (m0 * m1), -1.0, 1.0);
+        maxTwist = std::max(maxTwist, radToDeg(std::acos(d)));
+    }
+    return maxTwist;
+}
+
 RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
                           double u0, double u1, double v0, double v1,
                           ParamDir dir,
@@ -202,6 +235,7 @@ RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
     r.fitDir = dir;
     r.maxError = 0.0;
     r.rmsError = 0.0;
+    r.twist = 0.0;
 
     bool wrap = surf.isWrapU();
 
@@ -229,6 +263,8 @@ RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
 
     optimizeDirectrices(surf, u0, u1, v0, v1, dir,
         r.curveC0Samples, r.curveC1Samples, nRibs, lambda);
+
+    r.twist = computeRuledTwist(r.curveC0Samples, r.curveC1Samples);
 
     r.ruledMeshVerts = generateRuledMesh(
         r.curveC0Samples, r.curveC1Samples,
