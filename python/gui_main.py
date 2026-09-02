@@ -358,6 +358,7 @@ class MainWindow(QMainWindow):
         self._exportStep = False
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
+        self._curlCounts = [0, 0]
         self._surfaceDims = [(0, 0), (0, 0)]
         self._surfaceDirs = ["", ""]
         self._blendTrim = [0, 0]
@@ -1723,6 +1724,7 @@ class MainWindow(QMainWindow):
         self._loaded_files.clear()
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
+        self._curlCounts = [0, 0]
         self._surfaceDims = [(0, 0), (0, 0)]
         self._surfaceDirs = ["", ""]
         self._blendTrim = [0, 0]
@@ -1852,12 +1854,20 @@ class MainWindow(QMainWindow):
             bnode.addChild(grid_item)
 
             if self._surfaceCellCounts[bi] > 0:
-                ruled_item = QTreeWidgetItem([f"Ruled Cells ({self._surfaceCellCounts[bi]}, dir={d})"])
+                dev_count = self._surfaceCellCounts[bi] - self._curlCounts[bi]
+                ruled_item = QTreeWidgetItem([f"Ruled Cells ({dev_count}, dir={d})"])
                 ruled_item.setFlags(ruled_item.flags() | Qt.ItemIsUserCheckable)
                 ruled_item.setCheckState(0, Qt.Checked)
                 ruled_item.setData(1, Qt.UserRole, f"blade{bi + 1}_ruled")
                 ruled_item.setData(2, Qt.UserRole, "ruled")
                 bnode.addChild(ruled_item)
+                if self._curlCounts[bi] > 0:
+                    curl_item = QTreeWidgetItem([f"Curled Cells ({self._curlCounts[bi]}, point-mill)"])
+                    curl_item.setFlags(curl_item.flags() | Qt.ItemIsUserCheckable)
+                    curl_item.setCheckState(0, Qt.Checked)
+                    curl_item.setData(1, Qt.UserRole, f"blade{bi + 1}_curl")
+                    curl_item.setData(2, Qt.UserRole, "curl")
+                    bnode.addChild(curl_item)
 
             if self._blendTrim[bi] or self._blendStrips[bi] or self._blendCorners[bi]:
                 blend_node = QTreeWidgetItem(["Blend"])
@@ -1911,6 +1921,7 @@ class MainWindow(QMainWindow):
             self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
             self._log(f"  Mode: {self._mode}")
         self._cellMeta = [[], []]
+        self._curlCounts = [0, 0]
         self._surfaceDims = [(0, 0), (0, 0)]
         self._surfaceDirs = ["", ""]
         for i, s in enumerate(meta.get("surfaces", [])):
@@ -1918,6 +1929,7 @@ class MainWindow(QMainWindow):
             if i < 2:
                 self._surfaceCellCounts[i] = len(cells)
                 self._cellMeta[i] = cells
+                self._curlCounts[i] = sum(1 for c in cells if not c.get('developable', True))
                 self._surfaceDims[i] = (s.get('nRows', 0), s.get('nCols', 0))
                 self._surfaceDirs[i] = s.get('fitDir', '')
             self._log(f"  {s['name']}: {len(cells)} cells, fitDir={self._surfaceDirs[i] if i < 2 else '?'}")
@@ -1937,6 +1949,12 @@ class MainWindow(QMainWindow):
         self._blendStrips = [0, 0]
         self._blendCorners = [0, 0]
 
+        curled = set()
+        for bi in range(2):
+            for c in self._cellMeta[bi]:
+                if not c.get('developable', True):
+                    curled.add((bi, c.get('index', -1)))
+
         for fn in sorted(os.listdir(out_dir)):
             if fn.endswith('.obj'):
                 bi = 0 if "blade1" in fn else 1
@@ -1955,8 +1973,15 @@ class MainWindow(QMainWindow):
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
                                   fn.replace('.obj', ''), "corner", bi))
                 else:
+                    name = fn.replace('.obj', '')
+                    idx = -1
+                    try:
+                        idx = int(name.split('_cell')[-1])
+                    except ValueError:
+                        idx = -1
+                    tag = "curl" if (bi, idx) in curled else "ruled"
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
-                                  fn.replace('.obj', ''), "ruled", bi))
+                                  name, tag, bi))
             elif fn.endswith('.vtk'):
                 bi = 0 if "blade1" in fn else 1
                 grid_files.append(fn)
@@ -2020,6 +2045,9 @@ class MainWindow(QMainWindow):
             elif tag == "ruled":
                 self._plotter.add_mesh(
                     mesh, name=name, color=[0.5, 0.7, 0.9], opacity=0.45)
+            elif tag == "curl":
+                self._plotter.add_mesh(
+                    mesh, name=name, color=[0.9, 0.3, 0.3], opacity=0.85)
             elif tag == "trim":
                 self._plotter.add_mesh(
                     mesh, name=name, color=[0.45, 0.75, 0.55], opacity=0.9)
