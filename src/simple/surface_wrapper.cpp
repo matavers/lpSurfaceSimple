@@ -37,6 +37,21 @@ Vec3 SurfaceWrapper::normal(double u, double v) const {
     return Vec3(n.X() / mag, n.Y() / mag, n.Z() / mag);
 }
 
+double SurfaceWrapper::gaussianCurvature(double u, double v) const {
+    gp_Pnt S;
+    gp_Vec Su, Sv, Suu, Suv, Svv;
+    m_surf->D2(u, v, S, Su, Sv, Suu, Suv, Svv);
+    gp_Vec n = Su.Crossed(Sv);
+    double nMag = n.Magnitude();
+    if (nMag < 1e-12) return 0.0;
+    n /= nMag;
+    double E = Su.Dot(Su), F = Su.Dot(Sv), G = Sv.Dot(Sv);
+    double L = Suu.Dot(n), M = Suv.Dot(n), N = Svv.Dot(n);
+    double denom = E * G - F * F;
+    if (std::fabs(denom) < 1e-18) return 0.0;
+    return (L * N - M * M) / denom;
+}
+
 void SurfaceWrapper::generateMesh(int resU, int resV,
                                    Vec3Arr& vertices,
                                    FaceArr& faces,

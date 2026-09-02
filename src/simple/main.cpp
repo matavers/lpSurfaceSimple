@@ -468,6 +468,7 @@ void printUsage() {
               << "    --nsplit-v <N>          V-direction (horizontal) splits -> rows (default: 2)\n"
                << "    --tolerance <T>         Tolerance for adaptive refinement (default: 0.1)\n"
                << "    --dev-tol <D>          Developability threshold in deg for stats (default: 2.0)\n"
+               << "    --curv-tol <K>         Curvature threshold (fraction of global max |K|, default: 0.1)\n"
                << "    --max-depth <N>         Max refinement steps (default: 1000, safety cap)\n"
                << "    --max-cells <N>         Max grid cells (default: 10000, safety cap)\n"
                << "    --no-refine            Fixed grid (skip adaptive refinement; use nsplit-u/v)\n"
@@ -487,6 +488,7 @@ int main(int argc, char* argv[]) {
     int nSplitU = 2, nSplitV = 2, maxDepth = 1000, maxCells = 10000;
     double tolerance = 0.1;
     double devTol = 2.0;
+    double curvTol = 0.1;
     bool doBlend = false;
     bool noRefine = false;
     double fMax = 0.3;
@@ -546,6 +548,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--nsplit-v" && i + 1 < argc) { nSplitV = std::stoi(argv[++i]); }
         else if (arg == "--tolerance" && i + 1 < argc) { tolerance = std::stod(argv[++i]); }
         else if (arg == "--dev-tol" && i + 1 < argc) { devTol = std::stod(argv[++i]); }
+        else if (arg == "--curv-tol" && i + 1 < argc) { curvTol = std::stod(argv[++i]); }
         else if (arg == "--max-depth" && i + 1 < argc) { maxDepth = std::stoi(argv[++i]); }
         else if (arg == "--max-cells" && i + 1 < argc) { maxCells = std::stoi(argv[++i]); }
         else if (arg == "--no-refine") { noRefine = true; }
@@ -889,6 +892,7 @@ int main(int argc, char* argv[]) {
     gcfg.nUSamples = nUSamples;
     gcfg.nVSamples = nVSamples;
     gcfg.devTol = devTol;
+    gcfg.curvTol = curvTol;
 
     GridResult gr1, gr2;
     if (isPlanar) {
@@ -969,8 +973,8 @@ int main(int argc, char* argv[]) {
     exportOBJ(outDir + "/blade2_mesh.obj", mv2, mf2);
     std::cout << "  wrote " << outDir << "/blade2_mesh.obj" << std::endl;
 
-    exportGridOBJs(outDir, "blade1", gr1, isPlanar);
-    exportGridOBJs(outDir, "blade2", gr2, isPlanar);
+    exportGridOBJs(outDir, "blade1", gr1, isPlanar, &sw1);
+    exportGridOBJs(outDir, "blade2", gr2, isPlanar, &sw2);
     exportGridLinesVTK(outDir + "/blade1_grid.vtk", sw1, gr1);
     exportGridLinesVTK(outDir + "/blade2_grid.vtk", sw2, gr2);
 

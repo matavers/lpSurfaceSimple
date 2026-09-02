@@ -27,6 +27,7 @@ public:
     Vec3 evaluate(double u, double v) const;
     Vec3 evaluateWrapped(double t, double v) const;
     Vec3 normal(double u, double v) const;
+    double gaussianCurvature(double u, double v) const;
 
     void generateMesh(int resU, int resV,
                       Vec3Arr& vertices, FaceArr& faces,

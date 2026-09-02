@@ -19,7 +19,8 @@ struct GridCell {
     double maxError = 0.0;
     double rmsError = 0.0;
     double twist = 0.0;      // 母线法向扭转角最大值(度)
-    bool developable = true; // twist ≤ devTol，可侧铣；否则卷曲区，点铣
+    bool curled = false;     // 高曲率（卷曲）区：跳过直纹拟合，交原曲面点铣
+    bool developable = true; // !curled，可侧铣
 };
 
 struct GridConfig {
@@ -33,6 +34,7 @@ struct GridConfig {
     int nRibs = 20;           // 直纹面准线优化的 rib 采样数
     double lambda = 1.0;      // 直纹面准线正则强度
     double devTol = 2.0;      // 可展性阈值(度)：仅用于统计 developableCount（twist ≤ devTol），不参与细分
+    double curvTol = 0.1;     // 曲率阈值（相对全局最大 |K| 的比例）：格内 max|K| > curvTol×全局max 视为卷曲区
     bool noRefine = false;    // true=固定分片（不自适应细分），只按 nSplitU×nSplitV 均匀网格
 };
 
@@ -59,9 +61,11 @@ GridResult fitGridPlanar(const SurfaceWrapper& surf,
                          const GridConfig& cfg,
                          const std::string& name);
 
-// 导出：每个格子一个 OBJ（平面或直纹面），平面附 _desc.txt、直纹面附 _params.txt
+// 导出：每个格子一个 OBJ（平面或直纹面），平面附 _desc.txt、直纹面附 _params.txt；
+// 卷曲区导出原曲面网格（供点铣）。surf 仅卷曲区需要（可空）。
 bool exportGridOBJs(const std::string& outDir, const std::string& prefix,
-                    const GridResult& gr, bool planar);
+                    const GridResult& gr, bool planar,
+                    const SurfaceWrapper* surf = nullptr);
 
 // 导出网格分割线（水平 + 竖直）为 VTK PolyData（LINES），供可视化树 Grid 节点显示
 bool exportGridLinesVTK(const std::string& path,
