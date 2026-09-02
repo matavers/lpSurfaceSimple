@@ -31,10 +31,7 @@ struct GridConfig {
     int nVSamples = 10;
     int nRibs = 20;           // 直纹面准线优化的 rib 采样数
     double lambda = 1.0;      // 直纹面准线正则强度
-    double devTol = 2.0;      // 可展性阈值(度)：twist ≤ devTol 视为可侧铣
-    double devWeight = 1.0;   // 方向选择的可展性权重(mm/度)：1 度扭转 ≈ devWeight mm 误差
-    double minCellDiag = 10.0; // 可展性细分的最小物理对角尺寸(mm)，防止对不可展区无限细分
-    double maxRefineRatio = 16.0; // 最大细分比：任一行/列宽度不得小于最宽行的 1/maxRefineRatio，避免几何级数极细条带
+    double devTol = 2.0;      // 可展性阈值(度)：仅用于统计 developableCount（twist ≤ devTol），不参与细分
 };
 
 struct GridResult {

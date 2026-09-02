@@ -36,16 +36,7 @@ GridCell fitOneCell(const SurfaceWrapper& surf, int r, int c,
     return cell;
 }
 
-// 单个格子的"约束违反"评分（归一化）：误差与可展性取更差者。
-// >1 表示需继续细分（误差超容差 或 扭转角超可展阈值）。
-double cellScore(const GridCell& cell, const GridConfig& cfg) {
-    double s = cell.maxError / cfg.tolerance;
-    if (cfg.devTol > 1e-9)
-        s = std::max(s, cell.twist / cfg.devTol);
-    return s;
-}
-
-// 全局方向试算：对当前网格所有格子分别按 U、V 方向拟合，取误差+可展性加权成本更小者。
+// 全局方向试算：对当前网格所有格子分别按 U、V 方向拟合，取误差总和更小者。
 ParamDir determineDir(const SurfaceWrapper& surf,
                       const std::vector<double>& uEdges,
                       const std::vector<double>& vEdges,
@@ -63,8 +54,8 @@ ParamDir determineDir(const SurfaceWrapper& surf,
             RuledCellFit fv = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::V,
                                            cfg.nUSamples, cfg.nVSamples,
                                            cfg.nRibs, cfg.lambda);
-            sumU += fu.maxError + cfg.devWeight * fu.twist;
-            sumV += fv.maxError + cfg.devWeight * fv.twist;
+            sumU += fu.maxError;
+            sumV += fv.maxError;
         }
     }
     return (sumV <= sumU) ? ParamDir::V : ParamDir::U;
@@ -94,7 +85,7 @@ double buildColumnSplit(const SurfaceWrapper& surf, const GridResult& g, int c,
         double v0 = g.vEdges[r], v1 = g.vEdges[r + 1];
         GridCell a = fitOneCell(surf, r, c,     g.uEdges[c], um, v0, v1, cfg, planar, dir);
         GridCell b = fitOneCell(surf, r, c + 1, um, g.uEdges[c + 1], v0, v1, cfg, planar, dir);
-        metric = std::max(metric, std::max(cellScore(a, cfg), cellScore(b, cfg)));
+        metric = std::max(metric, std::max(a.maxError, b.maxError));
         out.push_back(a);
         out.push_back(b);
     }
@@ -114,7 +105,7 @@ double buildRowSplit(const SurfaceWrapper& surf, const GridResult& g, int r,
         double u0 = g.uEdges[c], u1 = g.uEdges[c + 1];
         GridCell a = fitOneCell(surf, r,     c, u0, u1, g.vEdges[r], vm, cfg, planar, dir);
         GridCell b = fitOneCell(surf, r + 1, c, u0, u1, vm, g.vEdges[r + 1], cfg, planar, dir);
-        metric = std::max(metric, std::max(cellScore(a, cfg), cellScore(b, cfg)));
+        metric = std::max(metric, std::max(a.maxError, b.maxError));
         out.push_back(a);
         out.push_back(b);
     }
@@ -197,30 +188,14 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
     double minULen = (u1 - u0) * 1e-3;
     double minVLen = (v1 - v0) * 1e-3;
 
-    // 物理对角尺寸：用于限制"可展性细分"的最小尺寸（不可展区不必无限细分）
-    auto diagOf = [&](const GridCell& cell) {
-        Vec3 p00 = surf.evaluate(cell.u0, cell.v0);
-        Vec3 p10 = surf.evaluate(cell.u1, cell.v0);
-        Vec3 p01 = surf.evaluate(cell.u0, cell.v1);
-        Vec3 p11 = surf.evaluate(cell.u1, cell.v1);
-        return std::max((p00 - p11).norm(), (p10 - p01).norm());
-    };
-    auto isActive = [&](const GridCell& cell) {
-        if (cell.maxError > cfg.tolerance) return true;   // 误差硬约束
-        if (cell.twist <= cfg.devTol) return false;        // 已可展
-        if (cfg.minCellDiag <= 0.0) return true;           // 不限制大小
-        return diagOf(cell) > cfg.minCellDiag;             // 够大才继续为可展性细分
-    };
-
-    struct Entry { double score; int r, c; bool operator<(const Entry& o) const { return score < o.score; } };
+    struct Entry { double err; int r, c; bool operator<(const Entry& o) const { return err < o.err; } };
 
     auto rebuild = [&](std::priority_queue<Entry>& pq) {
         pq = std::priority_queue<Entry>();
         for (int r = 0; r < g.nRows; ++r)
             for (int c = 0; c < g.nCols; ++c) {
-                const GridCell& cell = g.cells[r * g.nCols + c];
-                if (!isActive(cell)) continue;
-                pq.push({cellScore(cell, cfg), r, c});
+                double e = g.cells[r * g.nCols + c].maxError;
+                if (e > cfg.tolerance) pq.push({e, r, c});
             }
     };
 
@@ -235,20 +210,12 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
         int r = top.r, c = top.c;
 
         GridCell& cur = g.cells[r * g.nCols + c];
-        if (!isActive(cur)) continue;
+        if (cur.maxError <= cfg.tolerance) continue;
 
         double du = g.uEdges[c + 1] - g.uEdges[c];
         double dv = g.vEdges[r + 1] - g.vEdges[r];
-
-        // 最大列宽/行宽：限制细分比，防止局部反复二分产生几何级数极细条带
-        double maxDu = 0.0, maxDv = 0.0;
-        for (int cc = 0; cc < g.nCols; ++cc)
-            maxDu = std::max(maxDu, g.uEdges[cc + 1] - g.uEdges[cc]);
-        for (int rr = 0; rr < g.nRows; ++rr)
-            maxDv = std::max(maxDv, g.vEdges[rr + 1] - g.vEdges[rr]);
-
-        bool canU = du > minULen && du * cfg.maxRefineRatio >= maxDu;
-        bool canV = dv > minVLen && dv * cfg.maxRefineRatio >= maxDv;
+        bool canU = du > minULen;
+        bool canV = dv > minVLen;
         if (!canU && !canV) continue;
 
         std::vector<GridCell> candU, candV;
