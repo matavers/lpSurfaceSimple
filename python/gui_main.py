@@ -16,7 +16,7 @@ Tree structure:
           ├── Ruled Seg 1
           └── Ruled Seg 2
 """
-import sys, os, json, re, subprocess, tempfile, math
+import sys, os, json, re, subprocess, tempfile, math, shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -128,6 +128,130 @@ def _merge_polydata(meshes):
     return pv.PolyData(points, faces)
 
 
+def _build_line_arrays(lines):
+    """把多条折线（每条为 (n,3) 点列）合并成单个 PolyData 的点/线连通数组。
+    返回 (points (N,3), conn (M,) int) 或 None。conn 为 [n, i0, i1, ...] 拼接。"""
+    import numpy as np
+    pts, conn = [], []
+    total = 0
+    for line in lines:
+        line = np.asarray(line, dtype=np.float64)
+        if line.ndim != 2 or line.shape[0] < 2:
+            continue
+        n = line.shape[0]
+        pts.append(line)
+        conn.append(n)
+        conn.extend(range(total, total + n))
+        total += n
+    if not pts:
+        return None
+    return np.vstack(pts), np.asarray(conn, dtype=np.int64)
+
+
+def _configure_matplotlib_cjk():
+    """让 matplotlib 支持中文（优先微软雅黑/黑体），并正确处理负号。"""
+    import matplotlib
+    from matplotlib import font_manager
+    from matplotlib import rcParams
+    candidates = ["Microsoft YaHei", "SimHei", "SimSun",
+                  "Microsoft JhengHei", "KaiTi", "FangSong"]
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    for name in candidates:
+        if name in installed:
+            rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
+            break
+    rcParams["axes.unicode_minus"] = False
+
+
+class ToolpathWorker(QThread):
+    """后台计算刀轨：读取 *_params.txt、算可展性/时间、并预合并刀轨折线。
+    仅在子线程做纯数据计算与 numpy 合并，渲染仍在 UI 线程完成。"""
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, out_dir, args):
+        super().__init__()
+        self._out_dir = out_dir
+        self._args = args
+
+    def run(self):
+        try:
+            patches = _cm.compute(self._out_dir, self._args)
+            if not patches:
+                self.failed.emit("未能解析准线参数文件。")
+                return
+            summary = _cm.summarize(patches, self._args)
+            stepover = 2.0 * math.sqrt(
+                max(0.0, 2.0 * self._args.ball_r * self._args.scallop
+                    - self._args.scallop ** 2))
+            tool_r = getattr(self._args, 'tool_r', None) or \
+                _cm.load_config().get('tool_r', 5.0)
+            # 可展片：按连通域蛇形拼接成连续进给轨迹，减少进退刀
+            feed_lines, axis_segs = _cm.flank_stitched_feed_lines(patches, tool_r)
+            point_lines = []
+            for pp in patches:
+                if not pp.developable:
+                    point_lines.extend(
+                        _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r))
+            self.done.emit((patches, summary,
+                            _build_line_arrays(feed_lines),
+                            _build_line_arrays(axis_segs),
+                            _build_line_arrays(point_lines)))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class ToleranceColorWorker(QThread):
+    """后台读取每个直纹格的 OBJ，按 meta.json 里的 maxErr 给顶点赋值标量，
+    合并为每叶一个带 'maxErr' 标量的网格，用于容差着色。"""
+    done = pyqtSignal(list)   # list of (blade, mesh) or (None, None)
+
+    def __init__(self, out_dir, cell_meta):
+        super().__init__()
+        self._out_dir = out_dir
+        self._cell_meta = cell_meta
+
+    def run(self):
+        import numpy as np
+        import pyvista as pv
+        out = []
+        for bi in (0, 1):
+            cells = self._cell_meta[bi] if bi < len(self._cell_meta) else []
+            if not cells:
+                out.append((bi, None))
+                continue
+            pts, tris, scal, off = [], [], [], 0
+            for c in cells:
+                idx = c.get('index')
+                err = c.get('maxErr', c.get('maxError', 0.0))
+                path = os.path.join(self._out_dir, f"blade{bi + 1}_cell{idx}.obj")
+                if not os.path.exists(path):
+                    continue
+                try:
+                    m = pv.read(path)
+                except Exception:
+                    continue
+                if m.n_points == 0:
+                    continue
+                pts.append(np.asarray(m.points, dtype=np.float64))
+                f = np.asarray(m.faces).reshape(-1, 4)
+                tris.append(f[:, 1:4].astype(np.int64) + off)
+                scal.append(np.full(m.n_points, float(err), dtype=np.float64))
+                off += m.n_points
+            if not pts:
+                out.append((bi, None))
+                continue
+            points = np.vstack(pts)
+            faces = np.hstack([
+                np.full((np.vstack(tris).shape[0], 1), 3, dtype=np.int64),
+                np.vstack(tris),
+            ]).ravel()
+            pd = pv.PolyData(points, faces)
+            pd.point_data['maxErr'] = np.concatenate(scal)
+            out.append((bi, pd))
+        self.done.emit(out)
+
+
 class ObjReaderThread(QThread):
     """Background reader: load OBJ/VTK files off the UI thread, then merge
     by (blade, category) into few actors to keep add_mesh fast."""
@@ -218,6 +342,8 @@ class MainWindow(QMainWindow):
         self._nSplitU = 2
         self._nSplitV = 2
         self._tolerance = 0.1
+        self._devTol = 2.0
+        self._minCellDiag = 10.0
         self._maxDepth = 200
         self._maxCells = 10000
         self._doBlend = False
@@ -450,6 +576,25 @@ class MainWindow(QMainWindow):
         self._spn_tol.setValue(self._tolerance)
         form.addRow("Tolerance:", self._spn_tol)
 
+        self._spn_devtol = QDoubleSpinBox()
+        self._spn_devtol.setRange(0.05, 20.0)
+        self._spn_devtol.setDecimals(2)
+        self._spn_devtol.setSingleStep(0.5)
+        self._spn_devtol.setValue(self._devTol)
+        self._spn_devtol.setToolTip(
+            "可展性阈值（母线法向扭转角，度）。由侧铣过切 e≈R(1−cosβ) 反推："
+            "R=5mm 时 β=2°→0.003mm、β=5°→0.019mm。值越小越可展但片数越多。")
+        form.addRow("可展阈值 (度):", self._spn_devtol)
+
+        self._spn_mincell = QDoubleSpinBox()
+        self._spn_mincell.setRange(0.5, 200.0)
+        self._spn_mincell.setDecimals(1)
+        self._spn_mincell.setSingleStep(1.0)
+        self._spn_mincell.setValue(self._minCellDiag)
+        self._spn_mincell.setToolTip(
+            "可展性细分的最小物理格对角(mm)，防止对不可展区无限细分产生极细条带。")
+        form.addRow("最小格对角 (mm):", self._spn_mincell)
+
         self._spn_depth = QSpinBox()
         self._spn_depth.setRange(1, 100000)
         self._spn_depth.setValue(self._maxDepth)
@@ -475,8 +620,8 @@ class MainWindow(QMainWindow):
         self._chk_export_step.setToolTip(
             "Export original NURBS (same u/v range) + fitted surfaces "
             "(blend composite or ruled cells) + directrices JSON as STEP/JSON. "
-            "Import the STEP into Siemens NX for machining simulation, or run "
-            "nx_export.py inside NX to rebuild native ruled-surface features.")
+            "Import the STEP into Siemens NX to manually inspect / verify the "
+            "fitted ruled surfaces.")
         self._chk_export_step.setChecked(self._exportStep)
         form.addRow(self._chk_export_step)
 
@@ -538,6 +683,11 @@ class MainWindow(QMainWindow):
         self._spn_m_feed.setValue(mcfg.get("feed", 500.0))
         form.addRow("进给率 (mm/min):", self._spn_m_feed)
 
+        self._spn_m_toolr = QDoubleSpinBox()
+        self._spn_m_toolr.setRange(0.1, 100.0)
+        self._spn_m_toolr.setValue(mcfg.get("tool_r", 5.0))
+        form.addRow("侧铣刀半径 (mm):", self._spn_m_toolr)
+
         self._spn_m_ballr = QDoubleSpinBox()
         self._spn_m_ballr.setRange(0.1, 100.0)
         self._spn_m_ballr.setValue(mcfg.get("ball_r", 5.0))
@@ -557,8 +707,8 @@ class MainWindow(QMainWindow):
 
         self._spn_m_overhead = QDoubleSpinBox()
         self._spn_m_overhead.setRange(0.0, 100.0)
-        self._spn_m_overhead.setValue(mcfg.get("overhead", 2.0))
-        form.addRow("进退刀开销 (s/块):", self._spn_m_overhead)
+        self._spn_m_overhead.setValue(mcfg.get("overhead", 4.0))
+        form.addRow("侧铣进退刀 (s/区域):", self._spn_m_overhead)
 
         self._spn_m_poverhead = QDoubleSpinBox()
         self._spn_m_poverhead.setRange(0.0, 100.0)
@@ -586,6 +736,37 @@ class MainWindow(QMainWindow):
         row2.addWidget(self._btn_switch_viz)
         layout.addLayout(row2)
 
+        layout.addWidget(QLabel("可视化"))
+        self._mach_tree = QTreeWidget()
+        self._mach_tree.setHeaderHidden(True)
+        self._mach_tree.setMaximumHeight(130)
+        self._mach_tree.itemChanged.connect(self._on_mach_check)
+        layout.addWidget(self._mach_tree)
+
+        self._mach_flank_item = QTreeWidgetItem(["侧铣进给轨迹 (移动方向)"])
+        self._mach_flank_item.setFlags(self._mach_flank_item.flags() | Qt.ItemIsUserCheckable)
+        self._mach_flank_item.setCheckState(0, Qt.Checked)
+        self._mach_flank_item.setData(0, Qt.UserRole, 'flank_feed')
+        self._mach_tree.addTopLevelItem(self._mach_flank_item)
+
+        self._mach_axis_item = QTreeWidgetItem(["侧铣刀轴 (∥母线)"])
+        self._mach_axis_item.setFlags(self._mach_axis_item.flags() | Qt.ItemIsUserCheckable)
+        self._mach_axis_item.setCheckState(0, Qt.Checked)
+        self._mach_axis_item.setData(0, Qt.UserRole, 'flank_axis')
+        self._mach_tree.addTopLevelItem(self._mach_axis_item)
+
+        self._mach_point_item = QTreeWidgetItem(["点铣刀轨 (球刀刀心)"])
+        self._mach_point_item.setFlags(self._mach_point_item.flags() | Qt.ItemIsUserCheckable)
+        self._mach_point_item.setCheckState(0, Qt.Checked)
+        self._mach_point_item.setData(0, Qt.UserRole, 'point')
+        self._mach_tree.addTopLevelItem(self._mach_point_item)
+
+        self._mach_tol_item = QTreeWidgetItem(["容差着色 (maxErr)"])
+        self._mach_tol_item.setFlags(self._mach_tol_item.flags() | Qt.ItemIsUserCheckable)
+        self._mach_tol_item.setCheckState(0, Qt.Unchecked)
+        self._mach_tol_item.setData(0, Qt.UserRole, 'tol')
+        self._mach_tree.addTopLevelItem(self._mach_tol_item)
+
         layout.addWidget(QLabel("仿真结果"))
         self._txt_mach = QTextEdit()
         self._txt_mach.setReadOnly(True)
@@ -597,42 +778,109 @@ class MainWindow(QMainWindow):
         self._mach_patches = None
         self._mach_summary = None
         self._sweep_worker = None
+        self._tool_worker = None
+        self._flank_feed = None
+        self._flank_axis = None
+        self._point_data = None
+        self._tol_worker = None
+        self._tol_actors = []
 
     def _mach_args(self):
         import argparse
         return argparse.Namespace(
-            feed=self._spn_m_feed.value(), ball_r=self._spn_m_ballr.value(),
-            scallop=self._spn_m_scallop.value(), twist_limit=self._spn_m_twist.value(),
+            feed=self._spn_m_feed.value(), tool_r=self._spn_m_toolr.value(),
+            ball_r=self._spn_m_ballr.value(), scallop=self._spn_m_scallop.value(),
+            twist_limit=self._spn_m_twist.value(),
             overhead=self._spn_m_overhead.value(),
             point_overhead=self._spn_m_poverhead.value())
+
+    def _set_actor_visibility(self, name, visible):
+        if not HAS_PYVISTA:
+            return
+        a = None
+        try:
+            a = self._plotter.actors.get(name)
+        except Exception:
+            a = None
+        if a is None:
+            for x in self._plotter.renderer._actors:
+                if hasattr(x, '_name') and x._name == name:
+                    a = x
+                    break
+        if a is not None:
+            a.SetVisibility(visible)
+
+    def _set_tol_item_checked(self, checked):
+        if not hasattr(self, '_mach_tol_item'):
+            return
+        self._mach_tree.blockSignals(True)
+        self._mach_tol_item.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
+        self._mach_tree.blockSignals(False)
+
+    def _on_mach_check(self, item, col):
+        tag = item.data(0, Qt.UserRole)
+        visible = item.checkState(0) == Qt.Checked
+        if tag == 'flank_feed':
+            self._set_actor_visibility('flank_feed', visible)
+        elif tag == 'flank_axis':
+            self._set_actor_visibility('flank_axis', visible)
+        elif tag == 'point':
+            self._set_actor_visibility('point_toolpath', visible)
+        elif tag == 'tol':
+            self._on_toggle_tolerance_color(visible)
+        if HAS_PYVISTA:
+            self._plotter.render()
 
     def _on_compute_tool(self):
         if not HAS_MACHINING or not HAS_PYVISTA:
             QMessageBox.warning(self, "Error", "加工仿真模块或 pyvista 不可用。")
+            return
+        if self._tool_worker and self._tool_worker.isRunning():
+            self._log("[Machining] 刀具计算进行中，请稍候。")
             return
         out_dir = self._out_dir
         if not os.path.isdir(out_dir) or not list(Path(out_dir).glob("*_params.txt")):
             QMessageBox.warning(self, "Error", "请先在拟合工作台运行拟合，生成 *_params.txt。")
             return
         args = self._mach_args()
-        patches = _cm.compute(out_dir, args)
-        if not patches:
-            QMessageBox.warning(self, "Error", "未能解析准线参数文件。")
-            return
+        self._btn_tool.setEnabled(False)
+        self._log("[Machining] 刀具计算中（后台线程）...")
+        self._tool_worker = ToolpathWorker(out_dir, args)
+        self._tool_worker.done.connect(self._on_tool_computed)
+        self._tool_worker.failed.connect(self._on_tool_failed)
+        self._tool_worker.start()
+
+    def _on_tool_failed(self, msg):
+        self._btn_tool.setEnabled(True)
+        self._log(f"[Machining] 刀具计算失败: {msg}")
+        QMessageBox.warning(self, "Error", f"刀具计算失败:\n{msg}")
+
+    def _on_tool_computed(self, payload):
+        self._btn_tool.setEnabled(True)
+        patches, summary, flank_feed, flank_axis, point_data = payload
         self._mach_patches = patches
-        self._mach_summary = _cm.summarize(patches, args)
-        self._show_mach_report(patches, self._mach_summary)
+        self._mach_summary = summary
+        self._flank_feed = flank_feed
+        self._flank_axis = flank_axis
+        self._point_data = point_data
+        self._show_mach_report(patches, summary)
         self._viz_mode = 0
         self._render_toolpath()
 
     def _show_mach_report(self, patches, summary):
         lines = []
         f, p = summary['flank'], summary['point']
-        lines.append(f"面片数: {summary['num_patches']}（可展 {summary['developable']}，不可展 {summary['non_developable']}）")
-        lines.append(f"侧铣: 切削 {f['cut']:.1f}s + 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
-        lines.append(f"点铣: 切削 {p['cut']:.1f}s + 非切削 {p['overhead']:.1f}s = {p['total']:.1f}s")
+        lines.append(f"面片数: {summary['num_patches']}（可展 {summary['developable']}→侧铣 "
+                     f"{summary.get('flank_regions', '?')} 区域，不可展 {summary['non_developable']}→点铣 "
+                     f"{summary.get('point_regions', '?')} 区域）")
+        if 'flank_cut' in f and 'fallback_point_cut' in f:
+            lines.append(f"A 混合策略: 侧铣 {f['flank_cut']:.1f}s + 不可展点铣 {f['fallback_point_cut']:.1f}s "
+                         f"+ 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
+        else:
+            lines.append(f"侧铣: 切削 {f['cut']:.1f}s + 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
+        lines.append(f"B 点铣基线: 切削 {p['cut']:.1f}s + 非切削 {p['overhead']:.1f}s = {p['total']:.1f}s")
         if f['total'] > 0:
-            lines.append(f"侧铣相对点铣提速: {p['total'] / f['total']:.1f}x")
+            lines.append(f"A 相对 B 提速: {p['total'] / f['total']:.1f}x")
         lines.append("")
         for pp in patches:
             lines.append(f"{pp.name}: 扭转 {pp.twist:.2f}° "
@@ -643,37 +891,56 @@ class MainWindow(QMainWindow):
                   f"flank {f['total']:.1f}s vs point {p['total']:.1f}s")
 
     def _render_toolpath(self):
-        self._on_clear_toolpath()
-        if not self._mach_patches or not HAS_PYVISTA:
-            return
-        import numpy as np
-        args = self._mach_args()
-        stepover = 2.0 * math.sqrt(max(0.0, 2.0 * args.ball_r * args.scallop - args.scallop ** 2))
-        for pp in self._mach_patches:
-            for line in _cm.flank_toolpath_lines(pp.C0, pp.C1):
-                pts = np.array(line)
-                if len(pts) >= 2:
-                    a = self._plotter.add_lines(pts, color='#d62728', width=3,
-                                                name=f"flank_{pp.name}_{len(self._tool_actors)}")
-                    self._tool_actors.append(a)
-            for line in _cm.point_toolpath_lines(pp.C0, pp.C1, stepover):
-                pts = np.array(line)
-                if len(pts) >= 2:
-                    a = self._plotter.add_lines(pts, color='#1f77b4', width=1,
-                                                name=f"point_{pp.name}_{len(self._tool_actors)}")
-                    self._tool_actors.append(a)
-        self._plotter.render()
-
-    def _on_clear_toolpath(self):
+        feed = getattr(self, '_flank_feed', None)
+        axis = getattr(self, '_flank_axis', None)
+        point = getattr(self, '_point_data', None)
+        self._remove_tool_actors()
         if not HAS_PYVISTA:
             return
-        for a in self._tool_actors:
+        show_feed = (not hasattr(self, '_mach_flank_item')
+                     or self._mach_flank_item.checkState(0) == Qt.Checked)
+        show_axis = (not hasattr(self, '_mach_axis_item')
+                     or self._mach_axis_item.checkState(0) == Qt.Checked)
+        show_point = (not hasattr(self, '_mach_point_item')
+                      or self._mach_point_item.checkState(0) == Qt.Checked)
+        import pyvista as pv
+        if feed is not None:
+            pd = pv.PolyData(feed[0], lines=feed[1])
+            a = self._plotter.add_mesh(pd, color='#e66101', line_width=4,
+                                       name='flank_feed')
+            a.SetVisibility(show_feed)
+            self._tool_actors.append(a)
+        if axis is not None:
+            pd = pv.PolyData(axis[0], lines=axis[1])
+            a = self._plotter.add_mesh(pd, color='#d62728', line_width=2,
+                                       name='flank_axis')
+            a.SetVisibility(show_axis)
+            self._tool_actors.append(a)
+        if point is not None:
+            pd = pv.PolyData(point[0], lines=point[1])
+            a = self._plotter.add_mesh(pd, color='#1f77b4', line_width=1,
+                                       name='point_toolpath')
+            a.SetVisibility(show_point)
+            self._tool_actors.append(a)
+        self._plotter.render()
+
+    def _remove_tool_actors(self):
+        if not HAS_PYVISTA:
+            return
+        for name in ('flank_feed', 'flank_axis', 'point_toolpath'):
             try:
-                self._plotter.remove_actor(a)
+                self._plotter.remove_actor(name)
             except Exception:
                 pass
         self._tool_actors = []
-        self._plotter.render()
+
+    def _on_clear_toolpath(self):
+        self._remove_tool_actors()
+        self._flank_feed = None
+        self._flank_axis = None
+        self._point_data = None
+        if HAS_PYVISTA:
+            self._plotter.render()
 
     def _on_stop_tool(self):
         if self._sweep_worker and self._sweep_worker.isRunning():
@@ -684,7 +951,11 @@ class MainWindow(QMainWindow):
         if not HAS_MACHINING:
             return
         if self._viz_mode == 0:
+            if self._sweep_worker and self._sweep_worker.isRunning():
+                self._log("[Machining] 容差扫描进行中，请稍候。")
+                return
             self._viz_mode = 1
+            self._btn_switch_viz.setEnabled(False)
             self._run_sweep()
         else:
             self._viz_mode = 0
@@ -695,6 +966,7 @@ class MainWindow(QMainWindow):
         if not os.path.isfile(blade):
             QMessageBox.warning(self, "Error", "请先在拟合工作台选择叶片文件。")
             self._viz_mode = 0
+            self._btn_switch_viz.setEnabled(True)
             return
         tolerances = _cm.load_config().get("tolerances", [0.05, 0.1, 0.2, 0.5, 1.0])
         exe = str(BUILD_EXE)
@@ -702,16 +974,25 @@ class MainWindow(QMainWindow):
         self._log("[Machining] 开始容差扫描...")
         self._sweep_worker = SweepWorker(blade, exe, tolerances, self._mach_args())
         self._sweep_worker.done.connect(self._on_sweep_done)
-        self._sweep_worker.failed.connect(lambda e: self._log(f"[Machining] 扫描失败: {e}"))
-        self._sweep_worker.finished.connect(lambda: self._btn_tool_stop.setEnabled(False))
+        self._sweep_worker.failed.connect(self._on_sweep_failed)
+        self._sweep_worker.finished.connect(self._on_sweep_finished)
         self._sweep_worker.start()
 
+    def _on_sweep_failed(self, msg):
+        self._log(f"[Machining] 扫描失败: {msg}")
+
+    def _on_sweep_finished(self):
+        self._btn_tool_stop.setEnabled(False)
+        self._btn_switch_viz.setEnabled(True)
+
     def _on_sweep_done(self, rows):
+        self._btn_switch_viz.setEnabled(True)
         if not rows:
             self._log("[Machining] 扫描无结果")
             return
         import matplotlib
         matplotlib.use('Agg')
+        _configure_matplotlib_cjk()
         import matplotlib.pyplot as plt
         tols = [r['tolerance'] for r in rows]
         flank = [r['flank_total'] for r in rows]
@@ -745,6 +1026,58 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
         self._log("[Machining] 扫描完成，图表已显示。")
+
+    def _on_toggle_tolerance_color(self, checked):
+        if not checked:
+            self._remove_tolerance_color()
+            return
+        if not HAS_PYVISTA:
+            self._set_tol_item_checked(False)
+            return
+        if self._tol_worker and self._tol_worker.isRunning():
+            return
+        out_dir = self._out_dir
+        if not os.path.isdir(out_dir):
+            self._log("[Machining] 输出目录不存在，无法容差着色。")
+            self._set_tol_item_checked(False)
+            return
+        self._log("[Machining] 容差着色计算中...")
+        self._tol_worker = ToleranceColorWorker(out_dir, self._cellMeta)
+        self._tol_worker.done.connect(self._on_tolerance_colored)
+        self._tol_worker.start()
+
+    def _on_tolerance_colored(self, meshes):
+        self._remove_tolerance_color()
+        if not HAS_PYVISTA:
+            return
+        added = 0
+        for bi, mesh in meshes:
+            if mesh is None:
+                continue
+            name = f"tol_color_{bi}"
+            self._plotter.add_mesh(
+                mesh, name=name, scalars='maxErr', cmap='jet',
+                opacity=0.92, show_edges=False, smooth_shading=False,
+                scalar_bar_args={'title': 'maxErr (mm)', 'color': 'black'})
+            self._tol_actors.append(name)
+            added += 1
+        self._plotter.render()
+        self._log(f"[Machining] 容差着色完成 ({added} 个曲面)。")
+
+    def _remove_tolerance_color(self):
+        if not HAS_PYVISTA:
+            return
+        try:
+            self._plotter.remove_scalar_bar()
+        except Exception:
+            pass
+        for name in list(self._tol_actors):
+            try:
+                self._plotter.remove_actor(name)
+            except Exception:
+                pass
+        self._tol_actors = []
+        self._plotter.render()
 
     def _on_browse_file(self, idx):
         path, _ = QFileDialog.getOpenFileName(
@@ -784,6 +1117,8 @@ class MainWindow(QMainWindow):
             self._nSplitU = cfg.get("nSplitU", 2)
             self._nSplitV = cfg.get("nSplitV", 2)
             self._tolerance = cfg.get("tolerance", 0.1)
+            self._devTol = cfg.get("devTol", 2.0)
+            self._minCellDiag = cfg.get("minCellDiag", 10.0)
             self._maxDepth = cfg.get("maxDepth", 200)
             self._maxCells = cfg.get("maxCells", 10000)
             self._doBlend = cfg.get("doBlend", False)
@@ -797,6 +1132,8 @@ class MainWindow(QMainWindow):
             self._spn_split_u.setValue(self._nSplitU)
             self._spn_split_v.setValue(self._nSplitV)
             self._spn_tol.setValue(self._tolerance)
+            self._spn_devtol.setValue(self._devTol)
+            self._spn_mincell.setValue(self._minCellDiag)
             self._spn_depth.setValue(self._maxDepth)
             self._spn_maxcells.setValue(self._maxCells)
             self._chk_blend.setChecked(self._doBlend)
@@ -817,6 +1154,8 @@ class MainWindow(QMainWindow):
             "nSplitU": self._spn_split_u.value(),
             "nSplitV": self._spn_split_v.value(),
             "tolerance": self._spn_tol.value(),
+            "devTol": self._spn_devtol.value(),
+            "minCellDiag": self._spn_mincell.value(),
             "maxDepth": self._spn_depth.value(),
             "maxCells": self._spn_maxcells.value(),
             "doBlend": self._chk_blend.isChecked(),
@@ -1344,6 +1683,8 @@ class MainWindow(QMainWindow):
         self._nSplitU = self._spn_split_u.value()
         self._nSplitV = self._spn_split_v.value()
         self._tolerance = self._spn_tol.value()
+        self._devTol = self._spn_devtol.value()
+        self._minCellDiag = self._spn_mincell.value()
         self._maxDepth = self._spn_depth.value()
         self._maxCells = self._spn_maxcells.value()
         self._doBlend = self._chk_blend.isChecked()
@@ -1376,6 +1717,9 @@ class MainWindow(QMainWindow):
         self._blendTrim = [0, 0]
         self._blendStrips = [0, 0]
         self._blendCorners = [0, 0]
+        if hasattr(self, '_mach_tol_item'):
+            self._set_tol_item_checked(False)
+        self._tol_actors = []
         self._clear_3d()
         self._console.clear()
 
@@ -1399,6 +1743,8 @@ class MainWindow(QMainWindow):
             f'--nsplit-u {self._nSplitU} '
             f'--nsplit-v {self._nSplitV} '
             f'--tolerance {self._tolerance} '
+            f'--dev-tol {self._devTol} '
+            f'--min-cell-diag {self._minCellDiag} '
             f'--max-depth {self._maxDepth} '
             f'--max-cells {self._maxCells}'
         )

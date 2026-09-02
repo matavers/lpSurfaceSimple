@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-compute_machining.py — 直纹面分片拟合 vs 传统点铣 加工时间仿真（自算刀轨）
+compute_machining.py — 直纹面分片拟合 vs 传统点铣 加工时间仿真（简化但可辩护的刀轨模型）
 
-读取 API 输出的直纹面准线参数文件 (*_params.txt)，
-1. 计算每块的可展性指标（母线扭转角）
-2. 生成侧铣刀轨（刀具轴线 ∥ 母线，沿准线进给）并计算切削/非切削时间
-3. 生成点铣刀轨（球头刀沿准线方向行切）并计算切削时间
-4. 输出对比表 + 可展性分类 + JSON 结果 + 可选 VTK 刀轨
+读取 API 输出的直纹面准线参数文件 (*_params.txt)，对每个直纹格：
+
+1. 可展性判定 —— 用「沿母线的曲面法向扭转角」作为判据（不再是母线方向偏离角）：
+     对第 i 条母线，取上下准线切向 t0_i / t1_i（中心差分），
+     法向 n0_i = t0_i × r_i、n1_i = t1_i × r_i（r_i 为母线方向），
+     扭转角 β_i = angle(n0_i, n1_i)，格扭转角 β = max β_i。
+     直纹面可展 ⟺ 切平面(法向)沿母线恒定 ⟺ β=0，这正是圆柱刀侧刃铣的精确接触条件。
+2. 侧铣（圆柱刀，刀轴 ∥ 母线，沿准线进给）：
+     可展片（β ≤ 阈值）单刀成形，刀轨长 ≈ 准线长；
+     不可展片**不再**按 twist/threshold 伪造多刀，而是如实归入点铣。
+3. 点铣（球头刀，刀心 = 曲面点 + R·n）：
+     行距由残留高度反算 stepover = 2·√(2·R·h − h²)（标准凸/平面近似）。
+4. 时间 = 刀轨长 / 进给率 + 每块固定进退刀开销（理想化，见 assumptions）。
+
+对比口径：
+   A 混合策略（直纹面拟合后）= 可展片侧铣 + 不可展片点铣 + 每片 overhead
+   B 传统基线（整体点铣）= 全部片点铣 + 单次 point_overhead
 
 用法:
   python compute_machining.py <output_dir> [--feed 500] [--rapid 5000] \
-      [--ball-r 5] [--scallop 0.01] [--overhead 2] [--twist-limit 1.0] \
-      [--json out.json] [--vtk vtk_dir]
+      [--tool-r 5] [--ball-r 5] [--scallop 0.01] [--twist-limit 1.0] \
+      [--overhead 2] [--point-overhead 10] [--json out.json] [--vtk vtk_dir]
 """
 import os
 import sys
@@ -22,10 +34,16 @@ import argparse
 from pathlib import Path
 from dataclasses import dataclass, asdict
 
-# ===================== 几何 =====================
+# ===================== 几何（纯 python 元组向量） =====================
 
 def _sub(a, b):
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+def _add(a, b):
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+def _scale(a, s):
+    return (a[0] * s, a[1] * s, a[2] * s)
 
 def _norm(a):
     return math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
@@ -38,8 +56,36 @@ def _cross(a, b):
             a[2] * b[0] - a[0] * b[2],
             a[0] * b[1] - a[1] * b[0])
 
+def _normalize(a):
+    m = _norm(a)
+    if m < 1e-12:
+        return (0.0, 0.0, 0.0)
+    return (a[0] / m, a[1] / m, a[2] / m)
+
 def _lerp(a, b, t):
     return tuple(a[k] * (1.0 - t) + b[k] * t for k in range(3))
+
+def _angle_deg(a, b):
+    m = _norm(a) * _norm(b)
+    if m < 1e-12:
+        return 0.0
+    d = max(-1.0, min(1.0, _dot(a, b) / m))
+    return math.degrees(math.acos(d))
+
+def _tangents(C):
+    """折线各点的单位切向（中心差分，端点单侧）。"""
+    n = len(C)
+    out = []
+    for i in range(n):
+        if n < 2:
+            out.append((0.0, 0.0, 0.0))
+        elif i == 0:
+            out.append(_normalize(_sub(C[1], C[0])))
+        elif i == n - 1:
+            out.append(_normalize(_sub(C[n - 1], C[n - 2])))
+        else:
+            out.append(_normalize(_sub(C[i + 1], C[i - 1])))
+    return out
 
 def load_directrix(path):
     """读取 _params.txt，返回 (C0, C1)，各为 [(x,y,z),...]"""
@@ -68,33 +114,29 @@ def mean_ruling_length(C0, C1):
         return 0.0
     return sum(_norm(_sub(C1[i], C0[i])) for i in range(n)) / n
 
-def twist_angle_deg(C0, C1):
-    """最大母线扭转角（度）：母线方向相对平均方向的偏差，衡量可展性。"""
+def ruling_normals(C0, C1):
+    """每条母线两端（v=0 / v=1）的曲面法向 + 母线方向。
+    S(u,v) = (1-v)·C0(u) + v·C1(u)，n = (∂S/∂u) × (∂S/∂v) = C' × (C1-C0)。"""
     n = min(len(C0), len(C1))
-    avg = [0.0, 0.0, 0.0]
-    cnt = 0
+    T0 = _tangents(C0)
+    T1 = _tangents(C1)
+    n0s, n1s, rs = [], [], []
     for i in range(n):
         r = _sub(C1[i], C0[i])
-        m = _norm(r)
-        if m < 1e-12:
-            continue
-        avg = [avg[k] + r[k] / m for k in range(3)]
-        cnt += 1
-    if cnt == 0:
-        return 0.0
-    mavg = _norm(avg)
-    if mavg < 1e-12:
-        return 0.0
-    avg = [avg[k] / mavg for k in range(3)]
-    mx = 0.0
-    for i in range(n):
-        r = _sub(C1[i], C0[i])
-        m = _norm(r)
-        if m < 1e-12:
-            continue
-        d = max(-1.0, min(1.0, _dot(avg, [r[k] / m for k in range(3)])))
-        mx = max(mx, math.degrees(math.acos(d)))
-    return mx
+        rs.append(r)
+        n0s.append(_normalize(_cross(T0[i], r)))
+        n1s.append(_normalize(_cross(T1[i], r)))
+    return n0s, n1s, rs
+
+def ruling_twists(C0, C1):
+    """每条母线的法向扭转角（度）列表。"""
+    n0s, n1s, _ = ruling_normals(C0, C1)
+    return [_angle_deg(n0s[i], n1s[i]) for i in range(len(n0s))]
+
+def twist_angle_deg(C0, C1):
+    """格扭转角（度）= 各母线法向扭转角的最大值。可展 ⟺ 接近 0。"""
+    ts = ruling_twists(C0, C1)
+    return max(ts) if ts else 0.0
 
 def surface_area(C0, C1):
     """直纹面面积 = Σ |r × dC|（数值积分）。"""
@@ -110,21 +152,28 @@ def surface_area(C0, C1):
 
 def flank_milling(C0, C1, feed, twist_limit):
     """
-    侧铣：刀具轴线 ∥ 母线，沿准线进给。
-    可展（扭转角 <= 阈值）：单刀成形，刀轨长 = 准线长。
-    不可展：按扭转角/阈值近似放大刀数（锯齿多刀）。
+    侧铣（圆柱刀）：刀具轴线 ∥ 母线，沿准线进给，刀心沿母线法向偏置 R_t。
+    可展（法向扭转角 ≤ 阈值）：单刀成形，刀轨长 ≈ 准线长。
+    不可展：无法侧铣到容差 → 返回 developable=False，由调用方归入点铣。
     返回 (切削时间 s, 刀轨长 mm, 刀数, 是否可展, 扭转角 deg)
     """
     L = curve_length(C0)
     twist = twist_angle_deg(C0, C1)
     developable = twist <= twist_limit
-    passes = 1.0 if developable else max(1.0, twist / twist_limit)
-    path_len = L * passes
-    return path_len / feed * 60.0, path_len, passes, developable, twist
+    if developable:
+        path_len = L
+        passes = 1.0
+        cut_time = path_len / feed * 60.0
+    else:
+        path_len = 0.0
+        passes = 0.0
+        cut_time = 0.0
+    return cut_time, path_len, passes, developable, twist
 
 def point_milling(C0, C1, feed, ball_r, scallop):
     """
-    点铣：球头刀沿准线方向行切，行距由残留高度反算。
+    点铣（球头刀）：刀心 = 曲面点 + R·n，沿准线方向行切，
+    行距由残留高度反算 stepover = 2·√(2·R·h − h²)（标准凸/平面近似）。
     返回 (切削时间 s, 行距 mm, 总刀轨长 mm, 面积 mm²)
     """
     stepover = 2.0 * math.sqrt(max(0.0, 2.0 * ball_r * scallop - scallop * scallop))
@@ -132,20 +181,32 @@ def point_milling(C0, C1, feed, ball_r, scallop):
     total_len = A / stepover if stepover > 0 else 0.0
     return total_len / feed * 60.0, stepover, total_len, A
 
-def flank_toolpath_lines(C0, C1, n_along=50):
-    """侧铣刀轨：沿准线的刀具中心路径 + 每条母线的轴线段（可视化）。"""
+def flank_toolpath_lines(C0, C1, n_along=50, tool_r=None):
+    """侧铣刀轨可视化：沿准线的进给路径 + 每条母线的刀具轴线（可偏置 R_t）。
+    返回多条折线（每条为点列）。"""
     n = len(C0)
     if n < 2:
         return []
     idx = ([int(round(i * (n - 1) / (n_along - 1))) for i in range(n_along)]
            if n > n_along else list(range(n)))
     lines = [[C0[i] for i in idx]]  # 进给路径（下准线）
+    n0s, n1s, rs = ruling_normals(C0, C1)
     for i in idx:
-        lines.append([C0[i], C1[i]])  # 母线（刀具轴线方向）
+        if tool_r and tool_r > 0:
+            mid = _lerp(C0[i], C1[i], 0.5)
+            nm = _normalize(_add(n0s[i], n1s[i]))
+            axis_p = _add(mid, _scale(nm, tool_r))
+            half = _norm(rs[i]) / 2.0
+            d = _normalize(rs[i])
+            lines.append([_add(axis_p, _scale(d, -half)),
+                          _add(axis_p, _scale(d, half))])
+        else:
+            lines.append([C0[i], C1[i]])  # 母线（刀具轴线方向）
     return lines
 
-def point_toolpath_lines(C0, C1, stepover, n_along=50):
-    """点铣刀轨：沿准线方向行切，行距 stepover（沿母线方向）。"""
+def point_toolpath_lines(C0, C1, stepover, n_along=50, ball_r=None):
+    """点铣刀轨可视化：沿准线方向行切，行距 stepover（沿母线方向）。
+    ball_r 提供时刀心沿曲面法向偏置（CL 点）。"""
     n = len(C0)
     if n < 2:
         return []
@@ -153,10 +214,71 @@ def point_toolpath_lines(C0, C1, stepover, n_along=50):
            if n > n_along else list(range(n)))
     mean_r = mean_ruling_length(C0, C1)
     n_across = max(1, int(round(mean_r / stepover))) if stepover > 0 else 1
+    n0s, n1s, _ = ruling_normals(C0, C1)
     lines = []
     for j in range(n_across + 1):
         t = j / n_across if n_across > 0 else 0.0
-        lines.append([_lerp(C0[i], C1[i], t) for i in idx])
+        if ball_r and ball_r > 0:
+            row = []
+            for i in idx:
+                nm = _normalize(_add(n0s[i], n1s[i]))
+                surf = _lerp(C0[i], C1[i], t)
+                row.append(_add(surf, _scale(nm, ball_r)))
+            lines.append(row)
+        else:
+            lines.append([_lerp(C0[i], C1[i], t) for i in idx])
+    return lines
+
+def flank_cl_lines(C0, C1, tool_r, n_along=50, axis_extend=None):
+    """侧铣 CL 刀位（圆柱刀，半径 tool_r）：
+    刀轴沿母线方向，刀心沿曲面法向偏置 tool_r。
+    返回 (feed_pts, axis_segs)
+      feed_pts: 刀轴中心进给轨迹 [(x,y,z),...]，沿准线方向 = 刀具移动方向
+      axis_segs: 每条采样母线的刀轴线段 [[p0,p1],...]，偏置后、两端各延伸 axis_extend
+    """
+    n = len(C0)
+    if n < 2:
+        return [], []
+    idx = ([int(round(i * (n - 1) / (n_along - 1))) for i in range(n_along)]
+           if n > n_along else list(range(n)))
+    n0s, n1s, rs = ruling_normals(C0, C1)
+    ext = tool_r if axis_extend is None else axis_extend
+    feed, axes = [], []
+    for i in idx:
+        mid = _lerp(C0[i], C1[i], 0.5)
+        nm = _normalize(_add(n0s[i], n1s[i]))
+        r = rs[i]
+        rlen = _norm(r)
+        if rlen < 1e-12:
+            continue
+        rhat = _scale(r, 1.0 / rlen)
+        axis_p = _add(mid, _scale(nm, tool_r))
+        feed.append(axis_p)
+        half = rlen * 0.5 + ext
+        axes.append([_add(axis_p, _scale(rhat, -half)),
+                     _add(axis_p, _scale(rhat, half))])
+    return feed, axes
+
+def point_cl_lines(C0, C1, stepover, ball_r, n_along=50):
+    """点铣 CL（球头刀，半径 ball_r）：刀心 = 曲面点 + ball_r·n，沿准线方向行切。
+    返回多条刀心行切折线（每条为点列）。"""
+    n = len(C0)
+    if n < 2:
+        return []
+    idx = ([int(round(i * (n - 1) / (n_along - 1))) for i in range(n_along)]
+           if n > n_along else list(range(n)))
+    mean_r = mean_ruling_length(C0, C1)
+    n_across = max(1, int(round(mean_r / stepover))) if stepover > 0 else 1
+    n0s, n1s, _ = ruling_normals(C0, C1)
+    lines = []
+    for j in range(n_across + 1):
+        t = j / n_across if n_across > 0 else 0.0
+        row = []
+        for i in idx:
+            nm = _normalize(_lerp(n0s[i], n1s[i], t))
+            surf = _lerp(C0[i], C1[i], t)
+            row.append(_add(surf, _scale(nm, ball_r)))
+        lines.append(row)
     return lines
 
 def write_vtk_polylines(path, lines):
@@ -187,12 +309,18 @@ class Patch:
     directrix_len: float = 0.0
     mean_ruling: float = 0.0
     area: float = 0.0
-    twist: float = 0.0
+    twist: float = 0.0            # 法向扭转角（度）
     developable: bool = True
     flank_time: float = 0.0
     flank_len: float = 0.0
     flank_passes: float = 0.0
     point_time: float = 0.0
+    point_len: float = 0.0
+    stepover: float = 0.0
+    blade: int = 0               # 0=blade1, 1=blade2
+    cell_idx: int = -1           # 网格 cell 索引
+    row: int = -1                # 网格行（-1 表示无 meta）
+    col: int = -1                # 网格列
 
 # ===================== 标定参数 =====================
 
@@ -206,6 +334,104 @@ def load_config(path=None):
     except Exception:
         return {}
 
+# ===================== 网格邻接与连通域 =====================
+
+def _parse_cell_name(name):
+    """从 'blade1_cell12' 解析出 (blade 索引, cell 索引)。"""
+    blade = 0 if 'blade1' in name else 1
+    idx = -1
+    tail = name.split('_cell')[-1]
+    try:
+        idx = int(tail)
+    except ValueError:
+        idx = -1
+    return blade, idx
+
+def _load_grid_meta(input_dir):
+    """从 meta.json 读取每个面的 (nRows, nCols)，返回 {blade: (nRows, nCols)}。"""
+    meta_path = os.path.join(input_dir, 'meta.json')
+    if not os.path.exists(meta_path):
+        return {}
+    try:
+        with open(meta_path, encoding='utf-8') as f:
+            meta = json.load(f)
+    except Exception:
+        return {}
+    grid = {}
+    for i, s in enumerate(meta.get('surfaces', [])):
+        grid[i] = (s.get('nRows', 0), s.get('nCols', 0))
+    return grid
+
+def _connected_regions(patches, developable):
+    """把 developable=True/False 的格子按网格 4 邻接聚类成连通域。
+    无网格元数据时退化为每格一个区域。返回 list[list[Patch]]。"""
+    cells = [p for p in patches if p.developable == developable]
+    if not cells:
+        return []
+    if any(p.row < 0 or p.col < 0 for p in cells):
+        return [[p] for p in cells]
+
+    by_key = {(p.blade, p.row, p.col): p for p in cells}
+    parent = {k: k for k in by_key}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for blade, row, col in list(by_key):
+        for dr, dc in ((0, 1), (1, 0)):
+            nk = (blade, row + dr, col + dc)
+            if nk in by_key:
+                union((blade, row, col), nk)
+
+    groups = {}
+    for k in by_key:
+        groups.setdefault(find(k), []).append(by_key[k])
+    return list(groups.values())
+
+def _snake_order(cells):
+    """按 (row, col) 蛇形排序（相邻行反向），使相邻格进给方向能首尾相接。"""
+    rows = sorted({p.row for p in cells})
+    ordered = []
+    for ri, r in enumerate(rows):
+        row_cells = sorted([p for p in cells if p.row == r], key=lambda p: p.col)
+        if ri % 2 == 1:
+            row_cells.reverse()
+        ordered.extend(row_cells)
+    return ordered
+
+def _flank_stitched_region(region, tool_r):
+    """把一个连通域内的可展片按蛇形拼成一条连续进给折线。
+    返回 (feed_pts, axis_segs)。"""
+    ordered = _snake_order(region)
+    feed_all, axes_all = [], []
+    for pi, p in enumerate(ordered):
+        feed, axes = flank_cl_lines(p.C0, p.C1, tool_r)
+        if pi % 2 == 1:
+            feed = list(reversed(feed))
+        feed_all.extend(feed)
+        axes_all.extend(axes)
+    return feed_all, axes_all
+
+def flank_stitched_feed_lines(patches, tool_r):
+    """把所有可展片按连通域拼接，返回 (feed_lines, axis_segs)。
+    feed_lines: 每个连通域一条连续进给折线（含跨格衔接段）"""
+    regions = _connected_regions(patches, True)
+    feed_lines, axis_segs = [], []
+    for region in regions:
+        feed, axes = _flank_stitched_region(region, tool_r)
+        if len(feed) >= 2:
+            feed_lines.append(feed)
+        axis_segs.extend(axes)
+    return feed_lines, axis_segs
+
 # ===================== 主流程 =====================
 
 def compute(input_dir, args):
@@ -214,6 +440,7 @@ def compute(input_dir, args):
     if not files:
         print(f"[Error] 未找到 *_params.txt 文件: {input_dir}")
         return []
+    grid_meta = _load_grid_meta(input_dir)
     patches = []
     for fp in files:
         C0, C1 = load_directrix(fp)
@@ -221,63 +448,113 @@ def compute(input_dir, args):
             print(f"  [skip] {fp.name}: 准线点数不足")
             continue
         p = Patch(name=fp.name.replace('_params.txt', ''), C0=C0, C1=C1)
+        p.blade, p.cell_idx = _parse_cell_name(p.name)
+        if p.blade in grid_meta and grid_meta[p.blade][1] > 0 and p.cell_idx >= 0:
+            nRows, nCols = grid_meta[p.blade]
+            p.row = p.cell_idx // nCols
+            p.col = p.cell_idx % nCols
         p.directrix_len = curve_length(C0)
         p.mean_ruling = mean_ruling_length(C0, C1)
         p.area = surface_area(C0, C1)
         p.flank_time, p.flank_len, p.flank_passes, p.developable, p.twist = \
             flank_milling(C0, C1, args.feed, args.twist_limit)
-        p.point_time, _, _, _ = point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
+        p.point_time, p.stepover, p.point_len, _ = \
+            point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
         patches.append(p)
     return patches
 
 def summarize(patches, args):
-    """汇总并返回结果 dict。"""
+    """汇总并返回结果 dict。
+    A 混合策略（可展侧铣 + 不可展点铣）vs B 传统整体点铣。
+    非切削时间按「连通域数 × 每区域进退刀」计算（刀轨拼接后只进退刀一次/区域）。"""
     n_dev = sum(1 for p in patches if p.developable)
     n_nondev = len(patches) - n_dev
+    flank_regions = _connected_regions(patches, True)
+    point_regions = _connected_regions(patches, False)
+    n_flank_regions = len(flank_regions)
+    n_point_regions = len(point_regions)
+
     flank_cut = sum(p.flank_time for p in patches)
-    flank_overhead = len(patches) * args.overhead
-    flank_total = flank_cut + flank_overhead
+    fallback_point_cut = sum(p.point_time for p in patches if not p.developable)
+    flank_strategy_cut = flank_cut + fallback_point_cut
+    flank_overhead = n_flank_regions * args.overhead
+    fallback_overhead = n_point_regions * getattr(args, 'point_overhead', 10.0)
+    flank_total = flank_strategy_cut + flank_overhead + fallback_overhead
+
     point_cut = sum(p.point_time for p in patches)
-    point_overhead = getattr(args, 'point_overhead', 10.0)
+    point_overhead = getattr(args, 'point_overhead', 10.0)  # 整体点铣单次进退刀
     point_total = point_cut + point_overhead
     total_area = sum(p.area for p in patches)
     return {
-        "num_patches": len(patches), "developable": n_dev, "non_developable": n_nondev,
+        "num_patches": len(patches),
+        "developable": n_dev,
+        "non_developable": n_nondev,
+        "flank_regions": n_flank_regions,
+        "point_regions": n_point_regions,
         "total_area": total_area,
-        "flank": {"cut": flank_cut, "overhead": flank_overhead, "total": flank_total},
+        "flank": {
+            "cut": flank_strategy_cut,
+            "flank_cut": flank_cut,
+            "fallback_point_cut": fallback_point_cut,
+            "overhead": flank_overhead + fallback_overhead,
+            "flank_overhead": flank_overhead,
+            "fallback_overhead": fallback_overhead,
+            "total": flank_total,
+        },
         "point": {"cut": point_cut, "overhead": point_overhead, "total": point_total},
     }
 
 def print_report(patches, args, summary):
-    print("=" * 92)
-    print(f"直纹面拟合 vs 传统点铣 加工时间仿真  (feed={args.feed} mm/min, 球刀R={args.ball_r}, 残留={args.scallop})")
-    print(f"面片数: {summary['num_patches']}")
-    print("=" * 92)
-    print(f"{'面片':<30}{'可展':<5}{'扭转°':>8}{'准线mm':>9}{'母线mm':>9}{'侧铣s':>9}{'点铣s':>9}")
+    print("=" * 96)
+    print(f"直纹面拟合 vs 传统点铣 加工时间仿真  (feed={args.feed} mm/min, "
+          f"侧铣刀R={getattr(args, 'tool_r', args.ball_r):.1f}, "
+          f"球刀R={args.ball_r}, 残留={args.scallop}, 可展阈值={args.twist_limit}°)")
+    print(f"面片数: {summary['num_patches']}（可展 {summary['developable']}，"
+          f"不可展 {summary['non_developable']}）")
+    print("=" * 96)
+    print(f"{'面片':<28}{'可展':<5}{'扭转°':>8}{'准线mm':>9}{'母线mm':>9}"
+          f"{'侧铣s':>9}{'点铣s':>9}")
     for p in patches:
-        print(f"{p.name:<30}{'是' if p.developable else '否':<5}{p.twist:>8.2f}"
+        print(f"{p.name:<28}{'是' if p.developable else '否':<5}{p.twist:>8.2f}"
               f"{p.directrix_len:>9.1f}{p.mean_ruling:>9.1f}"
               f"{p.flank_time:>9.2f}{p.point_time:>9.2f}")
-    print("-" * 92)
-    print(f"可展面片: {summary['developable']}  不可展面片: {summary['non_developable']}  总曲面面积: {summary['total_area']:.1f} mm²")
+    print("-" * 96)
+    print(f"可展面片: {summary['developable']}（侧铣连通域 {summary.get('flank_regions', 0)}）  "
+          f"不可展面片: {summary['non_developable']}（点铣连通域 {summary.get('point_regions', 0)}）  "
+          f"总曲面面积: {summary['total_area']:.1f} mm^2")
+    twists = sorted((p.twist for p in patches), reverse=True)
+    if twists:
+        print(f"扭转角分布(deg): max={twists[0]:.2f}  "
+              f"p90={twists[max(0, int(0.10 * len(twists)))]:.2f}  "
+              f"中位={twists[len(twists) // 2]:.2f}")
     print()
     f, p = summary["flank"], summary["point"]
-    print(f"侧铣（直纹面拟合后）: 切削 {f['cut']:8.1f}s + 非切削 {f['overhead']:8.1f}s = {f['total']:8.1f}s")
-    print(f"点铣（传统整体）:     切削 {p['cut']:8.1f}s + 非切削 {p['overhead']:8.1f}s = {p['total']:8.1f}s")
+    print(f"A 混合策略(直纹面拟合后): 侧铣 {f['flank_cut']:8.1f}s "
+          f"+ 不可展点铣 {f['fallback_point_cut']:8.1f}s "
+          f"+ 非切削 {f['overhead']:8.1f}s = {f['total']:8.1f}s")
+    print(f"B 传统点铣(整体):          点铣 {p['cut']:8.1f}s "
+          f"+ 非切削 {p['overhead']:8.1f}s = {p['total']:8.1f}s")
     if f['total'] > 0:
-        print(f"侧铣相对点铣提速: {p['total'] / f['total']:.1f}x")
+        print(f"A 相对 B 提速: {p['total'] / f['total']:.1f}x")
 
 def main():
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
     cfg = load_config()
-    ap = argparse.ArgumentParser(description="直纹面拟合加工时间仿真（自算刀轨）")
+    ap = argparse.ArgumentParser(description="直纹面拟合加工时间仿真（简化可辩护刀轨）")
     ap.add_argument("input", help="输出目录（含 *_params.txt）")
     ap.add_argument("--feed", type=float, default=cfg.get("feed", 500.0), help="切削进给 mm/min")
-    ap.add_argument("--rapid", type=float, default=cfg.get("rapid", 5000.0), help="快进 mm/min")
+    ap.add_argument("--rapid", type=float, default=cfg.get("rapid", 5000.0), help="快进 mm/min（保留，模型未用）")
+    ap.add_argument("--tool-r", type=float, default=cfg.get("tool_r", 5.0), help="侧铣圆柱刀半径 mm")
     ap.add_argument("--ball-r", type=float, default=cfg.get("ball_r", 5.0), help="球头刀半径 mm")
     ap.add_argument("--scallop", type=float, default=cfg.get("scallop", 0.01), help="点铣残留高度 mm")
     ap.add_argument("--overhead", type=float, default=cfg.get("overhead", 2.0), help="每块侧铣进退刀+衔接时间 s")
     ap.add_argument("--point-overhead", type=float, default=cfg.get("point_overhead", 10.0), help="点铣整体进退刀时间 s")
-    ap.add_argument("--twist-limit", type=float, default=cfg.get("twist_limit", 1.0), help="可展判定阈值 度")
+    ap.add_argument("--twist-limit", type=float, default=cfg.get("twist_limit", 1.0), help="可展判定阈值（法向扭转角，度）")
     ap.add_argument("--json", help="可选：输出 JSON 结果文件路径")
     ap.add_argument("--vtk", help="可选：输出刀轨 VTK 到指定目录")
     args = ap.parse_args()
@@ -292,17 +569,20 @@ def main():
         os.makedirs(args.vtk, exist_ok=True)
         for p in patches:
             base = os.path.join(args.vtk, p.name)
-            write_vtk_polylines(base + "_flank.vtk", flank_toolpath_lines(p.C0, p.C1))
-            stepover = 2.0 * math.sqrt(max(0.0, 2.0 * args.ball_r * args.scallop - args.scallop * args.scallop))
-            write_vtk_polylines(base + "_point.vtk", point_toolpath_lines(p.C0, p.C1, stepover))
+            write_vtk_polylines(base + "_flank.vtk",
+                                flank_toolpath_lines(p.C0, p.C1, tool_r=args.tool_r))
+            write_vtk_polylines(base + "_point.vtk",
+                                point_toolpath_lines(p.C0, p.C1, p.stepover, ball_r=args.ball_r))
         print(f"刀轨 VTK 已写入: {args.vtk}")
 
     if args.json:
         result = {
-            "feed": args.feed, "ball_r": args.ball_r, "scallop": args.scallop,
-            "twist_limit": args.twist_limit, "overhead": args.overhead,
+            "feed": args.feed, "tool_r": args.tool_r, "ball_r": args.ball_r,
+            "scallop": args.scallop, "twist_limit": args.twist_limit,
+            "overhead": args.overhead, "point_overhead": args.point_overhead,
             **summary,
-            "patches": [{k: v for k, v in asdict(p).items() if k not in ('C0', 'C1')} for p in patches],
+            "patches": [{k: v for k, v in asdict(p).items()
+                         if k not in ('C0', 'C1', 'tool_r')} for p in patches],
         }
         with open(args.json, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
