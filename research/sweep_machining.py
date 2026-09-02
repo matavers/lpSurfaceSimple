@@ -35,7 +35,8 @@ BUILD_EXE = PROJECT_DIR / "build" / "Release" / "simple.exe"
 HEADERS = [
     "tolerance", "nsplit_u", "nsplit_v", "num_patches",
     "developable", "non_developable", "flank_regions",
-    "max_error_mm", "max_twist_deg",
+    "max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm",
+    "max_twist_deg",
     "flank_cut_s", "flank_overhead_s", "flank_total_s",
     "point_cut_s", "point_total_s", "speedup",
 ]
@@ -61,17 +62,29 @@ def run_fitting(file1, file2, outdir, tol, nu, nv, no_refine):
     return r.returncode
 
 
-def read_max_error(outdir):
+def read_error_stats(outdir):
+    """从 meta.json 读取误差分布统计（max/mean/Q95/rms，按每格 maxErr 计算）。"""
     meta = os.path.join(outdir, "meta.json")
     if not os.path.exists(meta):
-        return None
+        return {}
     try:
         with open(meta, encoding="utf-8") as f:
             d = json.load(f)
-        errs = [s.get("maxError", 0.0) for s in d.get("surfaces", [])]
-        return round(max(errs), 6) if errs else None
     except Exception:
-        return None
+        return {}
+    errs = []
+    for s in d.get("surfaces", []):
+        errs.extend(c.get("maxErr", 0.0) for c in s.get("cells", []))
+    if not errs:
+        return {}
+    errs.sort()
+    n = len(errs)
+    return {
+        "max_error_mm": round(errs[-1], 6),
+        "mean_error_mm": round(sum(errs) / n, 6),
+        "q95_error_mm": round(errs[min(n - 1, int(n * 0.95))], 6),
+        "rms_error_mm": round((sum(e * e for e in errs) / n) ** 0.5, 6),
+    }
 
 
 def collect(outdir, args):
@@ -88,7 +101,6 @@ def collect(outdir, args):
         "developable": s["developable"],
         "non_developable": s["non_developable"],
         "flank_regions": s["flank_regions"],
-        "max_error_mm": read_max_error(outdir),
         "max_twist_deg": round(max_twist, 3),
         "flank_cut_s": round(s["flank"]["cut"], 2),
         "flank_overhead_s": round(s["flank"]["overhead"], 2),
@@ -96,7 +108,7 @@ def collect(outdir, args):
         "point_cut_s": round(s["point"]["cut"], 2),
         "point_total_s": round(s["point"]["total"], 2),
         "speedup": speedup,
-    }
+    } | read_error_stats(outdir)
 
 
 def write_xlsx(rows, out_path):
