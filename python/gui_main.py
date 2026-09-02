@@ -343,7 +343,6 @@ class MainWindow(QMainWindow):
         self._nSplitV = 2
         self._tolerance = 0.1
         self._devTol = 2.0
-        self._minCellDiag = 10.0
         self._maxDepth = 200
         self._maxCells = 10000
         self._doBlend = False
@@ -582,18 +581,8 @@ class MainWindow(QMainWindow):
         self._spn_devtol.setSingleStep(0.5)
         self._spn_devtol.setValue(self._devTol)
         self._spn_devtol.setToolTip(
-            "可展性阈值（母线法向扭转角，度）。由侧铣过切 e≈R(1−cosβ) 反推："
-            "R=5mm 时 β=2°→0.003mm、β=5°→0.019mm。值越小越可展但片数越多。")
+            "可展性阈值（母线法向扭转角，度），仅用于报告统计（可展片数），不参与细分。")
         form.addRow("可展阈值 (度):", self._spn_devtol)
-
-        self._spn_mincell = QDoubleSpinBox()
-        self._spn_mincell.setRange(0.5, 200.0)
-        self._spn_mincell.setDecimals(1)
-        self._spn_mincell.setSingleStep(1.0)
-        self._spn_mincell.setValue(self._minCellDiag)
-        self._spn_mincell.setToolTip(
-            "可展性细分的最小物理格对角(mm)，防止对不可展区无限细分产生极细条带。")
-        form.addRow("最小格对角 (mm):", self._spn_mincell)
 
         self._spn_depth = QSpinBox()
         self._spn_depth.setRange(1, 100000)
@@ -1116,7 +1105,6 @@ class MainWindow(QMainWindow):
             self._nSplitV = cfg.get("nSplitV", 2)
             self._tolerance = cfg.get("tolerance", 0.1)
             self._devTol = cfg.get("devTol", 2.0)
-            self._minCellDiag = cfg.get("minCellDiag", 10.0)
             self._maxDepth = cfg.get("maxDepth", 200)
             self._maxCells = cfg.get("maxCells", 10000)
             self._doBlend = cfg.get("doBlend", False)
@@ -1131,7 +1119,6 @@ class MainWindow(QMainWindow):
             self._spn_split_v.setValue(self._nSplitV)
             self._spn_tol.setValue(self._tolerance)
             self._spn_devtol.setValue(self._devTol)
-            self._spn_mincell.setValue(self._minCellDiag)
             self._spn_depth.setValue(self._maxDepth)
             self._spn_maxcells.setValue(self._maxCells)
             self._chk_blend.setChecked(self._doBlend)
@@ -1153,7 +1140,6 @@ class MainWindow(QMainWindow):
             "nSplitV": self._spn_split_v.value(),
             "tolerance": self._spn_tol.value(),
             "devTol": self._spn_devtol.value(),
-            "minCellDiag": self._spn_mincell.value(),
             "maxDepth": self._spn_depth.value(),
             "maxCells": self._spn_maxcells.value(),
             "doBlend": self._chk_blend.isChecked(),
@@ -1682,7 +1668,6 @@ class MainWindow(QMainWindow):
         self._nSplitV = self._spn_split_v.value()
         self._tolerance = self._spn_tol.value()
         self._devTol = self._spn_devtol.value()
-        self._minCellDiag = self._spn_mincell.value()
         self._maxDepth = self._spn_depth.value()
         self._maxCells = self._spn_maxcells.value()
         self._doBlend = self._chk_blend.isChecked()
@@ -1742,7 +1727,6 @@ class MainWindow(QMainWindow):
             f'--nsplit-v {self._nSplitV} '
             f'--tolerance {self._tolerance} '
             f'--dev-tol {self._devTol} '
-            f'--min-cell-diag {self._minCellDiag} '
             f'--max-depth {self._maxDepth} '
             f'--max-cells {self._maxCells}'
         )
