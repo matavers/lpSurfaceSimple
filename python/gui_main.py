@@ -188,13 +188,18 @@ class ToolpathWorker(QThread):
                 _cm.load_config().get('tool_r', 5.0)
             # 可展片：按连通域蛇形拼接成连续进给轨迹（锥度刀侧铣）
             feed_lines, axis_segs = _cm.flank_stitched_feed_lines(patches, tool_r)
-            # 卷曲片：球刀刀心行切（点铣兜底）
+            # 卷曲片：球刀刀心在原曲面网格上行切（点铣兜底）
             point_lines = []
             for pp in patches:
                 if not pp.developable:
-                    point_lines.extend(
-                        _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
-                                           flip=pp.normal_flip))
+                    if pp.is_curl:
+                        point_lines.extend(
+                            _cm.curl_point_cl_lines(pp.mesh_verts, pp.mesh_faces, stepover,
+                                                    self._args.ball_r, flip=pp.normal_flip))
+                    else:
+                        point_lines.extend(
+                            _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
+                                               flip=pp.normal_flip))
             self.done.emit((patches, summary,
                             _build_line_arrays(feed_lines),
                             _build_line_arrays(axis_segs),
@@ -345,6 +350,7 @@ class MainWindow(QMainWindow):
         self._nSplitV = 2
         self._tolerance = 0.1
         self._devTol = 2.0
+        self._curvTol = 0.1
         self._maxDepth = 200
         self._maxCells = 10000
         self._doBlend = False
@@ -585,6 +591,16 @@ class MainWindow(QMainWindow):
         self._spn_devtol.setToolTip(
             "可展性阈值（母线法向扭转角，度），仅用于报告统计（可展片数），不参与细分。")
         form.addRow("可展阈值 (度):", self._spn_devtol)
+
+        self._spn_curvtol = QDoubleSpinBox()
+        self._spn_curvtol.setRange(0.001, 1.0)
+        self._spn_curvtol.setDecimals(3)
+        self._spn_curvtol.setSingleStep(0.02)
+        self._spn_curvtol.setValue(self._curvTol)
+        self._spn_curvtol.setToolTip(
+            "曲率阈值（相对全局最大 |高斯曲率| 的比例）。格内 max|K| 超过该比例视为卷曲区，"
+            "在分片拟合前切去、交原曲面点铣。越大切得越少。")
+        form.addRow("曲率阈值 (相对):", self._spn_curvtol)
 
         self._spn_depth = QSpinBox()
         self._spn_depth.setRange(1, 100000)
@@ -1113,6 +1129,7 @@ class MainWindow(QMainWindow):
             self._nSplitV = cfg.get("nSplitV", 2)
             self._tolerance = cfg.get("tolerance", 0.1)
             self._devTol = cfg.get("devTol", 2.0)
+            self._curvTol = cfg.get("curvTol", 0.1)
             self._maxDepth = cfg.get("maxDepth", 200)
             self._maxCells = cfg.get("maxCells", 10000)
             self._doBlend = cfg.get("doBlend", False)
@@ -1127,6 +1144,7 @@ class MainWindow(QMainWindow):
             self._spn_split_v.setValue(self._nSplitV)
             self._spn_tol.setValue(self._tolerance)
             self._spn_devtol.setValue(self._devTol)
+            self._spn_curvtol.setValue(self._curvTol)
             self._spn_depth.setValue(self._maxDepth)
             self._spn_maxcells.setValue(self._maxCells)
             self._chk_blend.setChecked(self._doBlend)
@@ -1148,6 +1166,7 @@ class MainWindow(QMainWindow):
             "nSplitV": self._spn_split_v.value(),
             "tolerance": self._spn_tol.value(),
             "devTol": self._spn_devtol.value(),
+            "curvTol": self._spn_curvtol.value(),
             "maxDepth": self._spn_depth.value(),
             "maxCells": self._spn_maxcells.value(),
             "doBlend": self._chk_blend.isChecked(),
@@ -1676,6 +1695,7 @@ class MainWindow(QMainWindow):
         self._nSplitV = self._spn_split_v.value()
         self._tolerance = self._spn_tol.value()
         self._devTol = self._spn_devtol.value()
+        self._curvTol = self._spn_curvtol.value()
         self._maxDepth = self._spn_depth.value()
         self._maxCells = self._spn_maxcells.value()
         self._doBlend = self._chk_blend.isChecked()
@@ -1735,6 +1755,7 @@ class MainWindow(QMainWindow):
             f'--nsplit-v {self._nSplitV} '
             f'--tolerance {self._tolerance} '
             f'--dev-tol {self._devTol} '
+            f'--curv-tol {self._curvTol} '
             f'--max-depth {self._maxDepth} '
             f'--max-cells {self._maxCells}'
         )

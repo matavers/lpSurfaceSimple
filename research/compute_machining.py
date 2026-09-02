@@ -105,6 +105,35 @@ def load_directrix(path):
                         pass
     return C0, C1
 
+def load_obj(path):
+    """读取 OBJ 网格，返回 (verts [(x,y,z),...], faces [[i,j,k],...])。"""
+    verts, faces = [], []
+    try:
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('v '):
+                    parts = line.split()
+                    verts.append(tuple(float(x) for x in parts[1:4]))
+                elif line.startswith('f '):
+                    parts = line.split()[1:]
+                    idxs = []
+                    for p in parts:
+                        idxs.append(int(p.split('/')[0]) - 1)
+                    if len(idxs) == 3:
+                        faces.append(idxs)
+    except Exception:
+        pass
+    return verts, faces
+
+def mesh_area(verts, faces):
+    """三角网格面积（mm²）。"""
+    area = 0.0
+    for f in faces:
+        a, b, c = verts[f[0]], verts[f[1]], verts[f[2]]
+        area += 0.5 * _norm(_cross(_sub(b, a), _sub(c, a)))
+    return area
+
 def curve_length(C):
     return sum(_norm(_sub(C[i + 1], C[i])) for i in range(len(C) - 1))
 
@@ -275,6 +304,46 @@ def point_cl_lines(C0, C1, stepover, ball_r, n_along=50, flip=1.0):
         lines.append(row)
     return lines
 
+def curl_point_cl_lines(verts, faces, stepover, ball_r, flip=1.0):
+    """卷曲区点铣 CL：在原曲面网格上行切（球刀刀心 = 顶点 + ball_r·n）。
+    网格为 C++ 导出的方形网格（nV×nV），沿 v 方向按 stepover 取列。"""
+    import math
+    n = len(verts)
+    nV = int(round(math.sqrt(n))) if n > 0 else 0
+    if nV < 2 or nV * nV != n:
+        return []
+    # 顶点法向（面法向面积加权平均）
+    acc = [[0.0, 0.0, 0.0] for _ in range(n)]
+    for f in faces:
+        a, b, c = verts[f[0]], verts[f[1]], verts[f[2]]
+        fn = _cross(_sub(b, a), _sub(c, a))
+        for k in f:
+            acc[k][0] += fn[0]
+            acc[k][1] += fn[1]
+            acc[k][2] += fn[2]
+    normals = [_normalize(tuple(x)) for x in acc]
+    # 相邻列间距（v 方向）近似
+    edge = _norm(_sub(verts[0], verts[1])) if nV >= 2 else 0.0
+    step = max(1, int(round(edge / stepover))) if stepover > 0 and edge > 0 else 1
+    lines = []
+    for j in range(0, nV, step):
+        row = []
+        for i in range(nV):
+            v = verts[i * nV + j]
+            nm = _scale(normals[i * nV + j], flip)
+            row.append(_add(v, _scale(nm, ball_r)))
+        lines.append(row)
+    # 补最后一列，保证覆盖到边
+    if (nV - 1) % step != 0:
+        j = nV - 1
+        row = []
+        for i in range(nV):
+            v = verts[i * nV + j]
+            nm = _scale(normals[i * nV + j], flip)
+            row.append(_add(v, _scale(nm, ball_r)))
+        lines.append(row)
+    return lines
+
 def write_vtk_polylines(path, lines):
     pts, segs = [], []
     for line in lines:
@@ -316,6 +385,9 @@ class Patch:
     row: int = -1                # 网格行（-1 表示无 meta）
     col: int = -1                # 网格列
     normal_flip: float = 1.0     # 法向翻转系数：+1 保持，-1 翻转到另一侧（刀具偏移到曲面外侧）
+    is_curl: bool = False        # 卷曲区（C++ 曲率分割切出），点铣原曲面
+    mesh_verts: list = None      # 卷曲区原曲面网格顶点
+    mesh_faces: list = None      # 卷曲区原曲面网格面（三角形索引）
 
 # ===================== 标定参数 =====================
 
@@ -357,6 +429,23 @@ def _load_grid_meta(input_dir):
         grid[i] = (s.get('nRows', 0), s.get('nCols', 0))
     return grid
 
+def _load_curled_cells(input_dir):
+    """从 meta.json 读取卷曲区格子（developable=false），返回 {(blade, idx): (row, col)}。"""
+    meta_path = os.path.join(input_dir, 'meta.json')
+    if not os.path.exists(meta_path):
+        return {}
+    try:
+        with open(meta_path, encoding='utf-8') as f:
+            meta = json.load(f)
+    except Exception:
+        return {}
+    curled = {}
+    for bi, s in enumerate(meta.get('surfaces', [])):
+        for c in s.get('cells', []):
+            if not c.get('developable', True):
+                curled[(bi, c['index'])] = (c.get('row', -1), c.get('col', -1))
+    return curled
+
 def _blade_normal_flips(patches):
     """判定每个面的法向翻转系数：刀具应偏置到曲面外侧（远离另一面）。
     返回 {blade: ±1.0}。只有单面时退化为 +1（无法判定外侧）。"""
@@ -364,7 +453,7 @@ def _blade_normal_flips(patches):
     for blade in (0, 1):
         pts = []
         for p in patches:
-            if p.blade == blade:
+            if p.blade == blade and not p.is_curl:
                 pts.extend(p.C0)
                 pts.extend(p.C1)
         if pts:
@@ -381,7 +470,7 @@ def _blade_normal_flips(patches):
         ref = cents[other]
         s, n = 0.0, 0
         for p in patches:
-            if p.blade != blade:
+            if p.blade != blade or p.is_curl:
                 continue
             n0s, n1s, _ = ruling_normals(p.C0, p.C1)
             for i in range(len(n0s)):
@@ -464,13 +553,14 @@ def flank_stitched_feed_lines(patches, tool_r):
 # ===================== 主流程 =====================
 
 def compute(input_dir, args):
-    """扫描 _params.txt，计算每块指标，返回 patches 列表。"""
+    """扫描 _params.txt + meta.json，返回 patches（可展区 + 卷曲区）。"""
     files = sorted(Path(input_dir).glob("*_params.txt"))
-    if not files:
-        print(f"[Error] 未找到 *_params.txt 文件: {input_dir}")
-        return []
     grid_meta = _load_grid_meta(input_dir)
+    curled = _load_curled_cells(input_dir)
+    stepover = 2.0 * math.sqrt(max(0.0, 2.0 * args.ball_r * args.scallop - args.scallop ** 2))
     patches = []
+
+    # 可展区（有 _params.txt）
     for fp in files:
         C0, C1 = load_directrix(fp)
         if len(C0) < 2 or len(C1) < 2:
@@ -485,12 +575,36 @@ def compute(input_dir, args):
         p.directrix_len = curve_length(C0)
         p.mean_ruling = mean_ruling_length(C0, C1)
         p.area = surface_area(C0, C1)
-        twist_lim = getattr(args, 'twist_limit', 2.0) + getattr(args, 'taper_angle', 3.0)
         p.flank_time, p.flank_len, p.flank_passes, p.developable, p.twist = \
-            flank_milling(C0, C1, args.feed, twist_lim)
+            flank_milling(C0, C1, args.feed, args.twist_limit)
         p.point_time, p.stepover, p.point_len, _ = \
             point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
         patches.append(p)
+
+    # 卷曲区（原曲面网格 OBJ，无 _params.txt）
+    for (bi, idx), (row, col) in curled.items():
+        obj_path = os.path.join(input_dir, f"blade{bi + 1}_cell{idx}.obj")
+        verts, faces = load_obj(obj_path)
+        if not verts or not faces:
+            continue
+        p = Patch(name=f"blade{bi + 1}_cell{idx}", C0=None, C1=None)
+        p.blade = bi
+        p.cell_idx = idx
+        p.row = row
+        p.col = col
+        p.is_curl = True
+        p.developable = False
+        p.mesh_verts = verts
+        p.mesh_faces = faces
+        p.area = mesh_area(verts, faces)
+        p.stepover = stepover
+        p.point_len = p.area / stepover if stepover > 0 else 0.0
+        p.point_time = p.point_len / args.feed * 60.0
+        patches.append(p)
+
+    if not files and not curled:
+        print(f"[Error] 未找到 *_params.txt 或卷曲区 OBJ: {input_dir}")
+        return []
 
     flips = _blade_normal_flips(patches)
     for p in patches:
