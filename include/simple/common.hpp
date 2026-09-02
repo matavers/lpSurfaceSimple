@@ -19,6 +19,7 @@ using MatX = Eigen::MatrixXd;
 
 using Vec3Arr = std::vector<Vec3>;
 using Vec2Arr = std::vector<Vec2>;
+using VecDArr = std::vector<double>;
 
 constexpr double PI = 3.14159265358979323846;
 constexpr double EPS = 1e-12;

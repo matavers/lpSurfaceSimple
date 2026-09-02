@@ -22,7 +22,8 @@ struct RuledCellFit {
     FaceArr ruledMeshFaces;
     double maxError;
     double rmsError;
-    double twist;        // 母线法向扭转角最大值(度)，0≈可展
+    double twist;              // 母线法向扭转角最大值(度)，0≈可展
+    VecDArr twistPerRuling;    // 逐母线扭转角(度)，用于卷曲隔离切分
 };
 
 // 单格直纹面拟合（指定方向），内部含准线优化（最小二乘 + lambda 正则）。

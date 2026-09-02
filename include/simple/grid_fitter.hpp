@@ -19,6 +19,7 @@ struct GridCell {
     double maxError = 0.0;
     double rmsError = 0.0;
     double twist = 0.0;      // 母线法向扭转角最大值(度)
+    bool developable = true; // twist ≤ devTol，可侧铣；否则卷曲区，点铣
 };
 
 struct GridConfig {

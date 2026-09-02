@@ -192,11 +192,12 @@ void optimizeDirectrices(
     }
 }
 
-// 母线法向扭转角最大值(度)：直纹面可展 ⟺ 切平面(法向)沿母线恒定 ⟺ β≈0。
+// 逐母线法向扭转角(度)：直纹面可展 ⟺ 切平面(法向)沿母线恒定 ⟺ β≈0。
 // 与 compute_machining.py 的 ruling_twists 口径一致。
-static double computeRuledTwist(const Vec3Arr& c0, const Vec3Arr& c1) {
+static VecDArr computeRuledTwists(const Vec3Arr& c0, const Vec3Arr& c1) {
     int n = static_cast<int>(std::min(c0.size(), c1.size()));
-    if (n < 2) return 0.0;
+    VecDArr twists(n, 0.0);
+    if (n < 2) return twists;
 
     auto tangent = [](const Vec3Arr& C, int i) -> Vec3 {
         int m = static_cast<int>(C.size());
@@ -209,7 +210,6 @@ static double computeRuledTwist(const Vec3Arr& c0, const Vec3Arr& c1) {
         return len < 1e-12 ? Vec3(0, 0, 0) : d / len;
     };
 
-    double maxTwist = 0.0;
     for (int i = 0; i < n; ++i) {
         Vec3 r = c1[i] - c0[i];
         if (r.norm() < 1e-12) continue;
@@ -220,9 +220,16 @@ static double computeRuledTwist(const Vec3Arr& c0, const Vec3Arr& c1) {
         double m0 = n0.norm(), m1 = n1.norm();
         if (m0 < 1e-12 || m1 < 1e-12) continue;
         double d = clamp(n0.dot(n1) / (m0 * m1), -1.0, 1.0);
-        maxTwist = std::max(maxTwist, radToDeg(std::acos(d)));
+        twists[i] = radToDeg(std::acos(d));
     }
-    return maxTwist;
+    return twists;
+}
+
+static double computeRuledTwist(const Vec3Arr& c0, const Vec3Arr& c1) {
+    VecDArr tw = computeRuledTwists(c0, c1);
+    double mx = 0.0;
+    for (double t : tw) mx = std::max(mx, t);
+    return mx;
 }
 
 RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
@@ -264,7 +271,9 @@ RuledCellFit fitCellRuled(const SurfaceWrapper& surf,
     optimizeDirectrices(surf, u0, u1, v0, v1, dir,
         r.curveC0Samples, r.curveC1Samples, nRibs, lambda);
 
-    r.twist = computeRuledTwist(r.curveC0Samples, r.curveC1Samples);
+    r.twistPerRuling = computeRuledTwists(r.curveC0Samples, r.curveC1Samples);
+    r.twist = 0.0;
+    for (double t : r.twistPerRuling) r.twist = std::max(r.twist, t);
 
     r.ruledMeshVerts = generateRuledMesh(
         r.curveC0Samples, r.curveC1Samples,

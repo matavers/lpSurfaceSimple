@@ -160,6 +160,135 @@ void applyRowSplit(GridResult& g, int r, const std::vector<GridCell>& newCells)
     g.cells = std::move(nc);
 }
 
+// ---- 卷曲隔离专用：在任意位置切分（不改变原有中点切分） ----
+
+// 整列切分（在 c 列内插入位于 us 的分割线）。
+double buildColumnSplitAt(const SurfaceWrapper& surf, const GridResult& g, int c, double us,
+                          const GridConfig& cfg, bool planar, ParamDir dir,
+                          std::vector<GridCell>& out)
+{
+    out.clear();
+    out.reserve(2 * g.nRows);
+    double metric = 0.0;
+    for (int r = 0; r < g.nRows; ++r) {
+        double v0 = g.vEdges[r], v1 = g.vEdges[r + 1];
+        GridCell a = fitOneCell(surf, r, c,     g.uEdges[c], us, v0, v1, cfg, planar, dir);
+        GridCell b = fitOneCell(surf, r, c + 1, us, g.uEdges[c + 1], v0, v1, cfg, planar, dir);
+        metric = std::max(metric, std::max(a.maxError, b.maxError));
+        out.push_back(a);
+        out.push_back(b);
+    }
+    return metric;
+}
+
+// 整行切分（在 r 行内插入位于 vs 的分割线）。
+double buildRowSplitAt(const SurfaceWrapper& surf, const GridResult& g, int r, double vs,
+                       const GridConfig& cfg, bool planar, ParamDir dir,
+                       std::vector<GridCell>& out)
+{
+    out.clear();
+    out.reserve(2 * g.nCols);
+    double metric = 0.0;
+    for (int c = 0; c < g.nCols; ++c) {
+        double u0 = g.uEdges[c], u1 = g.uEdges[c + 1];
+        GridCell a = fitOneCell(surf, r,     c, u0, u1, g.vEdges[r], vs, cfg, planar, dir);
+        GridCell b = fitOneCell(surf, r + 1, c, u0, u1, vs, g.vEdges[r + 1], cfg, planar, dir);
+        metric = std::max(metric, std::max(a.maxError, b.maxError));
+        out.push_back(a);
+        out.push_back(b);
+    }
+    return metric;
+}
+
+void applyColumnSplitAt(GridResult& g, int c, double us, const std::vector<GridCell>& newCells)
+{
+    std::vector<double> nu = g.uEdges;
+    nu.insert(nu.begin() + c + 1, us);
+    int newCols = g.nCols + 1;
+    std::vector<GridCell> nc(g.nRows * newCols);
+    for (int r = 0; r < g.nRows; ++r) {
+        for (int cc = 0; cc < g.nCols; ++cc) {
+            if (cc < c) {
+                nc[r * newCols + cc] = g.cells[r * g.nCols + cc];
+            } else if (cc == c) {
+                nc[r * newCols + c]     = newCells[r * 2 + 0];
+                nc[r * newCols + c + 1] = newCells[r * 2 + 1];
+            } else {
+                nc[r * newCols + cc + 1] = g.cells[r * g.nCols + cc];
+                nc[r * newCols + cc + 1].col = cc + 1;
+            }
+        }
+    }
+    g.uEdges = std::move(nu);
+    g.nCols = newCols;
+    g.cells = std::move(nc);
+}
+
+void applyRowSplitAt(GridResult& g, int r, double vs, const std::vector<GridCell>& newCells)
+{
+    std::vector<double> nv = g.vEdges;
+    nv.insert(nv.begin() + r + 1, vs);
+    int newRows = g.nRows + 1;
+    std::vector<GridCell> nc(newRows * g.nCols);
+    for (int rr = 0; rr < g.nRows; ++rr) {
+        for (int c = 0; c < g.nCols; ++c) {
+            if (rr < r) {
+                nc[rr * g.nCols + c] = g.cells[rr * g.nCols + c];
+            } else if (rr == r) {
+                nc[r * g.nCols + c]         = newCells[c * 2 + 0];
+                nc[(r + 1) * g.nCols + c]   = newCells[c * 2 + 1];
+            } else {
+                nc[(rr + 1) * g.nCols + c] = g.cells[rr * g.nCols + c];
+                nc[(rr + 1) * g.nCols + c].row = rr + 1;
+            }
+        }
+    }
+    g.vEdges = std::move(nv);
+    g.nRows = newRows;
+    g.cells = std::move(nc);
+}
+
+// 卷曲隔离：对 twist 局部高（部分母线 > devTol，其余 ≤ devTol）的格，
+// 沿准线方向在 twist 突变边界处二分，把卷曲子区隔离出来。
+// 在误差驱动细分之后调用，不改动原有细分语义。
+void isolateCurls(GridResult& g, const SurfaceWrapper& surf, const GridConfig& cfg, ParamDir dir)
+{
+    const int maxIter = 1000;
+    for (int iter = 0; iter < maxIter; ++iter) {
+        bool any = false;
+        for (int r = 0; r < g.nRows && !any; ++r) {
+            for (int c = 0; c < g.nCols && !any; ++c) {
+                const GridCell& cell = g.cells[r * g.nCols + c];
+                const VecDArr& tw = cell.ruled.twistPerRuling;
+                int n = static_cast<int>(tw.size());
+                if (n < 3) continue;
+                int firstCurl = -1, lastCurl = -1;
+                for (int i = 0; i < n; ++i) {
+                    if (tw[i] > cfg.devTol) { if (firstCurl < 0) firstCurl = i; lastCurl = i; }
+                }
+                if (firstCurl < 0) continue;                       // 全可展
+                if (firstCurl == 0 && lastCurl == n - 1) continue; // 全卷曲
+                int k = (firstCurl == 0) ? lastCurl : (firstCurl - 1);
+
+                std::vector<GridCell> children;
+                if (dir == ParamDir::V) {
+                    double us = cell.u0 + (cell.u1 - cell.u0) * (k + 0.5) / (n - 1.0);
+                    if (us <= cell.u0 + 1e-9 || us >= cell.u1 - 1e-9) continue;
+                    buildColumnSplitAt(surf, g, c, us, cfg, false, dir, children);
+                    applyColumnSplitAt(g, c, us, children);
+                } else {
+                    double vs = cell.v0 + (cell.v1 - cell.v0) * (k + 0.5) / (n - 1.0);
+                    if (vs <= cell.v0 + 1e-9 || vs >= cell.v1 - 1e-9) continue;
+                    buildRowSplitAt(surf, g, r, vs, cfg, false, dir, children);
+                    applyRowSplitAt(g, r, vs, children);
+                }
+                any = true;
+            }
+        }
+        if (!any) break;
+    }
+}
+
 GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
                        const std::string& name, bool planar)
 {
@@ -232,13 +361,19 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
         }
     }
 
+    // 卷曲隔离：在误差细分之后，把 twist 局部高的子区切出来（不改变误差细分语义）
+    if (!planar) {
+        isolateCurls(g, surf, cfg, gDir);
+    }
+
     g.maxError = 0.0;
     g.maxTwist = 0.0;
     g.developableCount = 0;
-    for (const auto& cell : g.cells) {
+    for (auto& cell : g.cells) {
         g.maxError = std::max(g.maxError, cell.maxError);
         g.maxTwist = std::max(g.maxTwist, cell.twist);
-        if (cell.twist <= cfg.devTol) ++g.developableCount;
+        cell.developable = (cell.twist <= cfg.devTol);
+        if (cell.developable) ++g.developableCount;
     }
     g.toleranceMet = (g.maxError <= cfg.tolerance);
 
@@ -379,7 +514,8 @@ std::string buildGridMetaJson(const std::vector<GridResult>& results,
               << ",\"fitDir\":\"" << (c.fitDir == ParamDir::U ? "U" : "V") << "\""
               << ",\"maxErr\":" << c.maxError
               << ",\"rmsErr\":" << c.rmsError
-              << ",\"twist\":" << c.twist << "}";
+              << ",\"twist\":" << c.twist
+              << ",\"developable\":" << (c.developable ? "true" : "false") << "}";
         }
         o << "]}";
     }
