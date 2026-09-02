@@ -468,7 +468,7 @@ void printUsage() {
               << "    --nsplit-v <N>          V-direction (horizontal) splits -> rows (default: 2)\n"
                << "    --tolerance <T>         Tolerance for adaptive refinement (default: 0.1)\n"
                << "    --dev-tol <D>          Developability threshold in deg for stats (default: 2.0)\n"
-               << "    --curv-tol <K>         Curvature threshold (fraction of global max |K|, default: 0.1)\n"
+               << "    --curv-tol <K>         Curvature threshold (fraction of global max |K|, default: 0.5)\n"
                << "    --max-depth <N>         Max refinement steps (default: 1000, safety cap)\n"
                << "    --max-cells <N>         Max grid cells (default: 10000, safety cap)\n"
                << "    --no-refine            Fixed grid (skip adaptive refinement; use nsplit-u/v)\n"
@@ -488,7 +488,7 @@ int main(int argc, char* argv[]) {
     int nSplitU = 2, nSplitV = 2, maxDepth = 1000, maxCells = 10000;
     double tolerance = 0.1;
     double devTol = 2.0;
-    double curvTol = 0.1;
+    double curvTol = 0.5;
     bool doBlend = false;
     bool noRefine = false;
     double fMax = 0.3;

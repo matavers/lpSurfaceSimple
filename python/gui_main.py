@@ -350,7 +350,7 @@ class MainWindow(QMainWindow):
         self._nSplitV = 2
         self._tolerance = 0.1
         self._devTol = 2.0
-        self._curvTol = 0.1
+        self._curvTol = 0.5
         self._maxDepth = 200
         self._maxCells = 10000
         self._doBlend = False
@@ -1129,7 +1129,7 @@ class MainWindow(QMainWindow):
             self._nSplitV = cfg.get("nSplitV", 2)
             self._tolerance = cfg.get("tolerance", 0.1)
             self._devTol = cfg.get("devTol", 2.0)
-            self._curvTol = cfg.get("curvTol", 0.1)
+            self._curvTol = cfg.get("curvTol", 0.5)
             self._maxDepth = cfg.get("maxDepth", 200)
             self._maxCells = cfg.get("maxCells", 10000)
             self._doBlend = cfg.get("doBlend", False)
