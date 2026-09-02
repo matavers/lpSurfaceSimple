@@ -192,7 +192,8 @@ class ToolpathWorker(QThread):
             point_lines = []
             for pp in patches:
                 point_lines.extend(
-                    _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r))
+                    _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
+                                       flip=pp.normal_flip))
             self.done.emit((patches, summary,
                             _build_line_arrays(feed_lines),
                             _build_line_arrays(axis_segs),

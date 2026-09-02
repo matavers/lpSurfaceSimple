@@ -224,9 +224,9 @@ def point_toolpath_lines(C0, C1, stepover, n_along=50, ball_r=None):
             lines.append([_lerp(C0[i], C1[i], t) for i in idx])
     return lines
 
-def flank_cl_lines(C0, C1, tool_r, n_along=50, axis_extend=None):
+def flank_cl_lines(C0, C1, tool_r, n_along=50, axis_extend=None, flip=1.0):
     """侧铣 CL 刀位（圆柱刀，半径 tool_r）：
-    刀轴沿母线方向，刀心沿曲面法向偏置 tool_r。
+    刀轴沿母线方向，刀心沿曲面法向偏置 tool_r（flip=±1 控制偏置到曲面的哪一侧）。
     返回 (feed_pts, axis_segs)
       feed_pts: 刀轴中心进给轨迹 [(x,y,z),...]，沿准线方向 = 刀具移动方向
       axis_segs: 每条采样母线的刀轴线段 [[p0,p1],...]，偏置后、两端各延伸 axis_extend
@@ -241,7 +241,7 @@ def flank_cl_lines(C0, C1, tool_r, n_along=50, axis_extend=None):
     feed, axes = [], []
     for i in idx:
         mid = _lerp(C0[i], C1[i], 0.5)
-        nm = _normalize(_add(n0s[i], n1s[i]))
+        nm = _scale(_normalize(_add(n0s[i], n1s[i])), flip)
         r = rs[i]
         rlen = _norm(r)
         if rlen < 1e-12:
@@ -254,9 +254,9 @@ def flank_cl_lines(C0, C1, tool_r, n_along=50, axis_extend=None):
                      _add(axis_p, _scale(rhat, half))])
     return feed, axes
 
-def point_cl_lines(C0, C1, stepover, ball_r, n_along=50):
+def point_cl_lines(C0, C1, stepover, ball_r, n_along=50, flip=1.0):
     """点铣 CL（球头刀，半径 ball_r）：刀心 = 曲面点 + ball_r·n，沿准线方向行切。
-    返回多条刀心行切折线（每条为点列）。"""
+    flip=±1 控制刀心偏置到曲面的哪一侧。返回多条刀心行切折线（每条为点列）。"""
     n = len(C0)
     if n < 2:
         return []
@@ -270,7 +270,7 @@ def point_cl_lines(C0, C1, stepover, ball_r, n_along=50):
         t = j / n_across if n_across > 0 else 0.0
         row = []
         for i in idx:
-            nm = _normalize(_lerp(n0s[i], n1s[i], t))
+            nm = _scale(_normalize(_lerp(n0s[i], n1s[i], t)), flip)
             surf = _lerp(C0[i], C1[i], t)
             row.append(_add(surf, _scale(nm, ball_r)))
         lines.append(row)
@@ -316,6 +316,7 @@ class Patch:
     cell_idx: int = -1           # 网格 cell 索引
     row: int = -1                # 网格行（-1 表示无 meta）
     col: int = -1                # 网格列
+    normal_flip: float = 1.0     # 法向翻转系数：+1 保持，-1 翻转到另一侧（刀具偏移到曲面外侧）
 
 # ===================== 标定参数 =====================
 
@@ -356,6 +357,40 @@ def _load_grid_meta(input_dir):
     for i, s in enumerate(meta.get('surfaces', [])):
         grid[i] = (s.get('nRows', 0), s.get('nCols', 0))
     return grid
+
+def _blade_normal_flips(patches):
+    """判定每个面的法向翻转系数：刀具应偏置到曲面外侧（远离另一面）。
+    返回 {blade: ±1.0}。只有单面时退化为 +1（无法判定外侧）。"""
+    cents = {}
+    for blade in (0, 1):
+        pts = []
+        for p in patches:
+            if p.blade == blade:
+                pts.extend(p.C0)
+                pts.extend(p.C1)
+        if pts:
+            cents[blade] = tuple(sum(c) / len(pts) for c in zip(*pts))
+        else:
+            cents[blade] = None
+
+    flips = {}
+    for blade in (0, 1):
+        other = 1 - blade
+        if cents[blade] is None or cents[other] is None:
+            flips[blade] = 1.0
+            continue
+        ref = cents[other]
+        s, n = 0.0, 0
+        for p in patches:
+            if p.blade != blade:
+                continue
+            n0s, n1s, _ = ruling_normals(p.C0, p.C1)
+            for i in range(len(n0s)):
+                mid = _lerp(p.C0[i], p.C1[i], 0.5)
+                s += _dot(n0s[i], _sub(mid, ref))
+                n += 1
+        flips[blade] = 1.0 if s >= 0 else -1.0
+    return flips
 
 def _connected_regions(patches, developable=None):
     """把格子按网格 4 邻接聚类成连通域。developable=None 表示所有格子（不分可展）。
@@ -403,12 +438,12 @@ def _snake_order(cells):
     return ordered
 
 def _flank_stitched_region(region, tool_r):
-    """把一个连通域内的可展片按蛇形拼成一条连续进给折线。
+    """把一个连通域内的片按蛇形拼成一条连续进给折线。
     返回 (feed_pts, axis_segs)。"""
     ordered = _snake_order(region)
     feed_all, axes_all = [], []
     for pi, p in enumerate(ordered):
-        feed, axes = flank_cl_lines(p.C0, p.C1, tool_r)
+        feed, axes = flank_cl_lines(p.C0, p.C1, tool_r, flip=p.normal_flip)
         if pi % 2 == 1:
             feed = list(reversed(feed))
         feed_all.extend(feed)
@@ -456,6 +491,10 @@ def compute(input_dir, args):
         p.point_time, p.stepover, p.point_len, _ = \
             point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
         patches.append(p)
+
+    flips = _blade_normal_flips(patches)
+    for p in patches:
+        p.normal_flip = flips.get(p.blade, 1.0)
     return patches
 
 def summarize(patches, args):

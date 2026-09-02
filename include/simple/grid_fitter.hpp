@@ -32,6 +32,7 @@ struct GridConfig {
     int nRibs = 20;           // 直纹面准线优化的 rib 采样数
     double lambda = 1.0;      // 直纹面准线正则强度
     double devTol = 2.0;      // 可展性阈值(度)：仅用于统计 developableCount（twist ≤ devTol），不参与细分
+    bool noRefine = false;    // true=固定分片（不自适应细分），只按 nSplitU×nSplitV 均匀网格
 };
 
 struct GridResult {

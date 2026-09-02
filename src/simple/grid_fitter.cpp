@@ -188,46 +188,48 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
     double minULen = (u1 - u0) * 1e-3;
     double minVLen = (v1 - v0) * 1e-3;
 
-    struct Entry { double err; int r, c; bool operator<(const Entry& o) const { return err < o.err; } };
+    if (!cfg.noRefine) {
+        struct Entry { double err; int r, c; bool operator<(const Entry& o) const { return err < o.err; } };
 
-    auto rebuild = [&](std::priority_queue<Entry>& pq) {
-        pq = std::priority_queue<Entry>();
-        for (int r = 0; r < g.nRows; ++r)
-            for (int c = 0; c < g.nCols; ++c) {
-                double e = g.cells[r * g.nCols + c].maxError;
-                if (e > cfg.tolerance) pq.push({e, r, c});
-            }
-    };
+        auto rebuild = [&](std::priority_queue<Entry>& pq) {
+            pq = std::priority_queue<Entry>();
+            for (int r = 0; r < g.nRows; ++r)
+                for (int c = 0; c < g.nCols; ++c) {
+                    double e = g.cells[r * g.nCols + c].maxError;
+                    if (e > cfg.tolerance) pq.push({e, r, c});
+                }
+        };
 
-    std::priority_queue<Entry> pq;
-    rebuild(pq);
-
-    int steps = 0;
-    while (!pq.empty() && steps < cfg.maxDepth && (int)g.cells.size() < cfg.maxCells) {
-        ++steps;
-        Entry top = pq.top();
-        pq.pop();
-        int r = top.r, c = top.c;
-
-        GridCell& cur = g.cells[r * g.nCols + c];
-        if (cur.maxError <= cfg.tolerance) continue;
-
-        double du = g.uEdges[c + 1] - g.uEdges[c];
-        double dv = g.vEdges[r + 1] - g.vEdges[r];
-        bool canU = du > minULen;
-        bool canV = dv > minVLen;
-        if (!canU && !canV) continue;
-
-        std::vector<GridCell> candU, candV;
-        double mU = std::numeric_limits<double>::infinity();
-        double mV = std::numeric_limits<double>::infinity();
-        if (canU) mU = buildColumnSplit(surf, g, c, cfg, planar, gDir, candU);
-        if (canV) mV = buildRowSplit(surf, g, r, cfg, planar, gDir, candV);
-
-        if (mU <= mV) applyColumnSplit(g, c, candU);
-        else          applyRowSplit(g, r, candV);
-
+        std::priority_queue<Entry> pq;
         rebuild(pq);
+
+        int steps = 0;
+        while (!pq.empty() && steps < cfg.maxDepth && (int)g.cells.size() < cfg.maxCells) {
+            ++steps;
+            Entry top = pq.top();
+            pq.pop();
+            int r = top.r, c = top.c;
+
+            GridCell& cur = g.cells[r * g.nCols + c];
+            if (cur.maxError <= cfg.tolerance) continue;
+
+            double du = g.uEdges[c + 1] - g.uEdges[c];
+            double dv = g.vEdges[r + 1] - g.vEdges[r];
+            bool canU = du > minULen;
+            bool canV = dv > minVLen;
+            if (!canU && !canV) continue;
+
+            std::vector<GridCell> candU, candV;
+            double mU = std::numeric_limits<double>::infinity();
+            double mV = std::numeric_limits<double>::infinity();
+            if (canU) mU = buildColumnSplit(surf, g, c, cfg, planar, gDir, candU);
+            if (canV) mV = buildRowSplit(surf, g, r, cfg, planar, gDir, candV);
+
+            if (mU <= mV) applyColumnSplit(g, c, candU);
+            else          applyRowSplit(g, r, candV);
+
+            rebuild(pq);
+        }
     }
 
     g.maxError = 0.0;
