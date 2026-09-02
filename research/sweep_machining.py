@@ -41,6 +41,10 @@ HEADERS = [
 ]
 
 
+def _key(tol, nu, nv):
+    return f"{tol}_{nu}_{nv}"
+
+
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -106,6 +110,28 @@ def write_xlsx(rows, out_path):
     wb.save(out_path)
 
 
+def load_xlsx_rows(path):
+    """读取已有 xlsx 的行（用于断点追加，不丢失历史数据）。"""
+    import openpyxl
+    if not os.path.exists(path):
+        return []
+    try:
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        headers = None
+        rows = []
+        for row in ws.iter_rows(values_only=True):
+            if headers is None:
+                headers = list(row)
+                continue
+            d = dict(zip(headers, row))
+            if d.get("tolerance") is not None and d.get("nsplit_u") is not None:
+                rows.append(d)
+        return rows
+    except Exception:
+        return []
+
+
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
         try:
@@ -149,15 +175,27 @@ def main():
         overhead=mcfg.get("overhead", 4.0),
         point_overhead=mcfg.get("point_overhead", 10.0))
 
-    # 断点重启：加载已完成的组合
-    results = []
+    # 断点重启：合并「已有 xlsx」+「checkpoint」，按 (tolerance, nsplit_u, nsplit_v) 去重，实现追加
+    def key_of(r):
+        if r.get("key"):
+            return r["key"]
+        return _key(r.get("tolerance"), r.get("nsplit_u"), r.get("nsplit_v"))
+
+    merged = {}
+    for r in load_xlsx_rows(args.out):
+        r.setdefault("key", key_of(r))
+        merged[r["key"]] = r
     if args.checkpoint and os.path.exists(args.checkpoint):
         try:
             with open(args.checkpoint, encoding="utf-8") as f:
-                results = json.load(f).get("results", [])
+                ck = json.load(f).get("results", [])
+            for r in ck:
+                r.setdefault("key", key_of(r))
+                merged[r["key"]] = r
         except Exception:
-            results = []
-    done_keys = {r["key"] for r in results if "key" in r}
+            pass
+    results = list(merged.values())
+    done_keys = {r["key"] for r in results if r.get("key")}
 
     workdir_base = args.workdir or tempfile.mkdtemp(prefix="sweep_")
     os.makedirs(workdir_base, exist_ok=True)
@@ -182,7 +220,7 @@ def main():
     i = 0
     for tol in tolerances:
         for (nu, nv) in splits:
-            key = f"{tol}_{nu}_{nv}"
+            key = _key(tol, nu, nv)
             i += 1
             if key in done_keys:
                 log(f"[{i}/{total}] skip (已完成): tol={tol} split={nu}x{nv}")
