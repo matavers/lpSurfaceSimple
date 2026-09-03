@@ -33,7 +33,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 BUILD_EXE = PROJECT_DIR / "build" / "Release" / "simple.exe"
 
 HEADERS = [
-    "nsplit_u", "nsplit_v", "num_patches", "flank_regions",
+    "total", "num_combos", "num_patches", "flank_regions",
     "max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm",
     "max_twist_deg",
     "flank_cut_s", "flank_overhead_s", "flank_total_s",
@@ -41,8 +41,8 @@ HEADERS = [
 ]
 
 
-def _key(nu, nv):
-    return f"{nu}_{nv}"
+def _key(total):
+    return str(total)
 
 
 def log(msg):
@@ -53,7 +53,7 @@ def run_fitting(file1, file2, outdir, tol, nu, nv, ps_ranges=None, face_idx=0):
     cmd = [str(BUILD_EXE), file1, file2, "--mode", "ruled",
            "--outdir", outdir, "--tolerance", str(tol),
            "--nsplit-u", str(nu), "--nsplit-v", str(nv),
-           "--no-refine", "--max-cells", "200000"]
+           "--no-refine", "--balance-edges", "--max-cells", "200000"]
     if ps_ranges:
         for k, (dir_, ranges) in enumerate(ps_ranges, start=1):
             if not ranges:
@@ -250,7 +250,7 @@ def load_xlsx_rows(path):
                 headers = list(row)
                 continue
             d = dict(zip(headers, row))
-            if d.get("nsplit_u") is not None:
+            if d.get("total") is not None:
                 rows.append(d)
         return rows
     except Exception:
@@ -264,27 +264,19 @@ def main():
             sys.stderr.reconfigure(encoding='utf-8', errors='replace')
         except Exception:
             pass
-    ap = argparse.ArgumentParser(description="单文件叶片：auto-identify→split-blade→拟合扫描，输出 xlsx")
+    ap = argparse.ArgumentParser(description="单文件叶片：auto-identify→split-blade→拟合扫描(总分片数范围)，输出 xlsx")
     ap.add_argument("file", help="叶片文件（单文件，如 blade.igs）")
     ap.add_argument("--out", required=True, help="输出 xlsx 路径")
     ap.add_argument("--checkpoint", default=None, help="断点检查点 JSON 路径")
-    ap.add_argument("--tolerance", type=float, default=0.1, help="拟合容差 mm（固定分片下仅传入，不影响分片数）")
-    ap.add_argument("--splits", default="1,1;2,2;3,3;4,4;6,6;8,8;10,10",
-                    help="分片列表 u,v 用分号分隔，如 1,1;2,2;3,3")
+    ap.add_argument("--tolerance", type=float, default=0.1, help="拟合容差 mm")
+    ap.add_argument("--total-min", type=int, default=4, help="总分片数下限（含）")
+    ap.add_argument("--total-max", type=int, default=100, help="总分片数上限（含）")
     ap.add_argument("--workdir", default=None, help="临时工作目录（默认系统临时目录）")
     args = ap.parse_args()
 
     if not BUILD_EXE.exists():
         log(f"[ERROR] simple.exe not found: {BUILD_EXE}")
         sys.exit(1)
-
-    splits = []
-    for tok in args.splits.split(";"):
-        tok = tok.strip()
-        if not tok:
-            continue
-        u, v = tok.split(",")
-        splits.append((int(u), int(v)))
 
     # 模拟 UI 手动流程：auto-identify → split-blade → identify pressure/suction，缓存结果
     log("auto-identify...")
@@ -319,11 +311,11 @@ def main():
         overhead=mcfg.get("overhead", 4.0),
         point_overhead=mcfg.get("point_overhead", 10.0))
 
-    # 断点重启：合并「已有 xlsx」+「checkpoint」，按 (nsplit_u, nsplit_v) 去重，实现追加
+    # 断点重启：合并「已有 xlsx」+「checkpoint」，按 total 去重
     def key_of(r):
         if r.get("key"):
             return r["key"]
-        return _key(r.get("nsplit_u"), r.get("nsplit_v"))
+        return _key(r.get("total"))
 
     merged = {}
     for r in load_xlsx_rows(args.out):
@@ -344,9 +336,17 @@ def main():
     workdir_base = args.workdir or tempfile.mkdtemp(prefix="sweep_")
     os.makedirs(workdir_base, exist_ok=True)
 
-    total = len(splits)
-    log(f"扫描 {total} 种分片（固定分片，容差={args.tolerance}）")
+    totals = list(range(args.total_min, args.total_max + 1))
+    log(f"扫描总分片数 {args.total_min}~{args.total_max}（{len(totals)} 个），"
+        f"每个 total 枚举所有乘法组合并取平均")
     log(f"simple.exe: {BUILD_EXE}")
+
+    def enumerate_splits(total):
+        combos = []
+        for nu in range(1, total + 1):
+            if total % nu == 0:
+                combos.append((nu, total // nu))
+        return combos
 
     def save():
         if args.checkpoint:
@@ -360,40 +360,58 @@ def main():
         except Exception as e:
             log(f"  [warn] 写 xlsx 失败: {e}")
 
+    def average_rows(rows):
+        if not rows:
+            return None
+        keys = [k for k in rows[0].keys() if k != "key"]
+        avg = {}
+        for k in keys:
+            vals = [r.get(k) for r in rows if r.get(k) is not None]
+            if vals and all(isinstance(v, (int, float)) for v in vals):
+                avg[k] = round(sum(vals) / len(vals), 4)
+            else:
+                avg[k] = rows[0].get(k)
+        return avg
+
     i = 0
-    for (nu, nv) in splits:
-        key = _key(nu, nv)
+    for total in totals:
+        key = _key(total)
         i += 1
         if key in done_keys:
-            log(f"[{i}/{total}] skip (已完成): split={nu}x{nv}")
+            log(f"[{i}/{len(totals)}] skip (已完成): total={total}")
             continue
-        log(f"[{i}/{total}] split={nu}x{nv} ...")
-        outdir = os.path.join(workdir_base, f"u{nu}_v{nv}")
-        if os.path.isdir(outdir):
-            shutil.rmtree(outdir, ignore_errors=True)
-        os.makedirs(outdir, exist_ok=True)
-
-        try:
-            rc = run_fitting(args.file, args.file, outdir, args.tolerance, nu, nv,
-                             ps_ranges, split_face_idx)
-        except Exception as e:
-            log(f"  [ERROR] 拟合执行异常: {e}")
+        combos = enumerate_splits(total)
+        log(f"[{i}/{len(totals)}] total={total} → {len(combos)} 组合 {combos}")
+        combo_rows = []
+        for (nu, nv) in combos:
+            outdir = os.path.join(workdir_base, f"t{total}_u{nu}_v{nv}")
+            if os.path.isdir(outdir):
+                shutil.rmtree(outdir, ignore_errors=True)
+            os.makedirs(outdir, exist_ok=True)
+            try:
+                rc = run_fitting(args.file, args.file, outdir, args.tolerance, nu, nv,
+                                 ps_ranges, split_face_idx)
+            except Exception as e:
+                log(f"    [{nu}x{nv}] 拟合执行异常: {e}")
+                continue
+            if rc != 0:
+                log(f"    [{nu}x{nv}] 拟合失败 rc={rc}")
+                continue
+            rec = collect(outdir, mach_args)
+            if rec is None:
+                log(f"    [{nu}x{nv}] 未解析到准线文件")
+                continue
+            combo_rows.append(rec)
+        if not combo_rows:
+            log(f"  total={total} 所有组合失败，跳过")
             continue
-        if rc != 0:
-            log(f"  [ERROR] 拟合失败 rc={rc}（不写断点，下次重试）")
-            continue
-
-        rec = collect(outdir, mach_args)
-        if rec is None:
-            log("  [ERROR] 未解析到准线文件（不写断点，下次重试）")
-            continue
-        rec["key"] = key
-        rec["nsplit_u"] = nu
-        rec["nsplit_v"] = nv
-        results.append(rec)
-        log(f"  → patches={rec['num_patches']} maxErr={rec['max_error_mm']}mm "
-            f"twist={rec['max_twist_deg']}° flank={rec['flank_total_s']}s "
-            f"point={rec['point_total_s']}s 提速={rec['speedup']}x")
+        avg = average_rows(combo_rows)
+        avg["key"] = key
+        avg["total"] = total
+        avg["num_combos"] = len(combo_rows)
+        results.append(avg)
+        log(f"  → avg: patches={avg['num_patches']} maxErr={avg['max_error_mm']}mm "
+            f"flank={avg['flank_total_s']}s point={avg['point_total_s']}s 提速={avg['speedup']}x")
         save()
 
     add_charts(args.out)

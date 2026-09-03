@@ -471,6 +471,7 @@ void printUsage() {
                << "    --max-depth <N>         Max refinement steps (default: 1000, safety cap)\n"
                << "    --max-cells <N>         Max grid cells (default: 10000, safety cap)\n"
                << "    --no-refine            Fixed grid (skip adaptive refinement; use nsplit-u/v)\n"
+               << "    --balance-edges        Move grid lines to balance error (fixed cell count)\n"
                << "    --blend                 Enable trim+blend post-pass (ruled mode only)\n"
               << "    --fmax <F>              Max per-cell trim fraction for blend (default: 0.3)\n"
                << "    --export-step           Export original NURBS + ruled cells as STEP for CAM (NX)\n"
@@ -489,6 +490,7 @@ int main(int argc, char* argv[]) {
     double devTol = 2.0;
     bool doBlend = false;
     bool noRefine = false;
+    bool balanceEdges = false;
     double fMax = 0.3;
     bool exportStep = false;
     int faceIdx1 = -1, faceIdx2 = -1;
@@ -549,6 +551,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--max-depth" && i + 1 < argc) { maxDepth = std::stoi(argv[++i]); }
         else if (arg == "--max-cells" && i + 1 < argc) { maxCells = std::stoi(argv[++i]); }
         else if (arg == "--no-refine") { noRefine = true; }
+        else if (arg == "--balance-edges") { balanceEdges = true; }
         else if (arg == "--blend") { doBlend = true; }
         else if (arg == "--fmax" && i + 1 < argc) { fMax = std::stod(argv[++i]); }
         else if (arg == "--export-step") { exportStep = true; }
@@ -886,6 +889,7 @@ int main(int argc, char* argv[]) {
     gcfg.maxDepth = maxDepth;
     gcfg.maxCells = maxCells;
     gcfg.noRefine = noRefine;
+    gcfg.balanceEdges = balanceEdges;
     gcfg.nUSamples = nUSamples;
     gcfg.nVSamples = nVSamples;
     gcfg.devTol = devTol;

@@ -160,6 +160,76 @@ void applyRowSplit(GridResult& g, int r, const std::vector<GridCell>& newCells)
     g.cells = std::move(nc);
 }
 
+// 固定分片下迭代移动分割线，使误差均衡（误差大的格更窄）。
+// 原理：按列/行累计误差，把分割线放在累计误差的等分点上。
+static void balanceEdges(GridResult& g, const SurfaceWrapper& surf,
+                         const GridConfig& cfg, ParamDir dir)
+{
+    const int maxIter = 20;
+    for (int iter = 0; iter < maxIter; ++iter) {
+        fitAllCells(g, surf, cfg, false, dir);
+
+        // U 方向（列）误差均衡
+        if (g.nCols > 1) {
+            std::vector<double> e(g.nCols, 0.0);
+            for (int r = 0; r < g.nRows; ++r)
+                for (int c = 0; c < g.nCols; ++c)
+                    e[c] = std::max(e[c], g.cells[r * g.nCols + c].maxError);
+            std::vector<double> cum(g.nCols + 1, 0.0);
+            for (int c = 0; c < g.nCols; ++c) cum[c + 1] = cum[c] + std::max(e[c], 1e-9);
+            double total = cum[g.nCols];
+            if (total > 1e-12) {
+                std::vector<double> nu(g.nCols + 1);
+                nu[0] = g.uEdges.front();
+                nu[g.nCols] = g.uEdges.back();
+                for (int c = 1; c < g.nCols; ++c) {
+                    double target = total * c / g.nCols;
+                    int ci = 0;
+                    while (ci + 1 < g.nCols && cum[ci + 1] < target) ++ci;
+                    double seg = cum[ci + 1] - cum[ci];
+                    double t = seg > 1e-12 ? (target - cum[ci]) / seg : 0.0;
+                    nu[c] = g.uEdges[ci] + (g.uEdges[ci + 1] - g.uEdges[ci]) * t;
+                }
+                g.uEdges = nu;
+            }
+        }
+
+        // V 方向（行）误差均衡
+        if (g.nRows > 1) {
+            std::vector<double> e(g.nRows, 0.0);
+            for (int r = 0; r < g.nRows; ++r)
+                for (int c = 0; c < g.nCols; ++c)
+                    e[r] = std::max(e[r], g.cells[r * g.nCols + c].maxError);
+            std::vector<double> cum(g.nRows + 1, 0.0);
+            for (int r = 0; r < g.nRows; ++r) cum[r + 1] = cum[r] + std::max(e[r], 1e-9);
+            double total = cum[g.nRows];
+            if (total > 1e-12) {
+                std::vector<double> nv(g.nRows + 1);
+                nv[0] = g.vEdges.front();
+                nv[g.nRows] = g.vEdges.back();
+                for (int r = 1; r < g.nRows; ++r) {
+                    double target = total * r / g.nRows;
+                    int ri = 0;
+                    while (ri + 1 < g.nRows && cum[ri + 1] < target) ++ri;
+                    double seg = cum[ri + 1] - cum[ri];
+                    double t = seg > 1e-12 ? (target - cum[ri]) / seg : 0.0;
+                    nv[r] = g.vEdges[ri] + (g.vEdges[ri + 1] - g.vEdges[ri]) * t;
+                }
+                g.vEdges = nv;
+            }
+        }
+
+        // 更新格子边界
+        for (int r = 0; r < g.nRows; ++r)
+            for (int c = 0; c < g.nCols; ++c) {
+                GridCell& cell = g.cells[r * g.nCols + c];
+                cell.u0 = g.uEdges[c]; cell.u1 = g.uEdges[c + 1];
+                cell.v0 = g.vEdges[r]; cell.v1 = g.vEdges[r + 1];
+            }
+    }
+    fitAllCells(g, surf, cfg, false, dir);
+}
+
 GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
                        const std::string& name, bool planar)
 {
@@ -183,7 +253,11 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
                            : determineDir(surf, g.uEdges, g.vEdges, nRows, nCols, cfg);
     g.fitDir = gDir;
     g.cells.resize(nRows * nCols);
-    fitAllCells(g, surf, cfg, planar, gDir);
+    if (cfg.balanceEdges && cfg.noRefine && !planar) {
+        balanceEdges(g, surf, cfg, gDir);
+    } else {
+        fitAllCells(g, surf, cfg, planar, gDir);
+    }
 
     double minULen = (u1 - u0) * 1e-3;
     double minVLen = (v1 - v0) * 1e-3;
