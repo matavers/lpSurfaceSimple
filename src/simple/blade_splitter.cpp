@@ -69,15 +69,16 @@ BladeSplitResult splitBladeFaceBySection(
     auto vOf = [&](int i) { return vMin + vRng * (double)i / (nPts - 1.0); };
 
     double thDrop = (mx - mn) * 0.15;
+    const int margin = 1;   // 切点向外扩 margin 个采样，微微加大叶缘切除范围
     std::vector<double> bp;
     for (int i = 0; i < nPts; ++i) {
         double prv = sm[(i - 1 + nPts) % nPts];
         double cur = sm[i];
         double nxt = sm[(i + 1) % nPts];
-        if (prv - cur > thDrop)             // 骤降：cur 是谷内第一个点 → 谷起点
-            bp.push_back(vOf(i));
-        if (nxt - cur > thDrop)             // 骤升：nxt 是谷外第一个点 → 谷终点
-            bp.push_back(vOf((i + 1) % nPts));
+        if (prv - cur > thDrop)             // 骤降：谷起点，向外扩 margin
+            bp.push_back(vOf((i - margin + nPts) % nPts));
+        if (nxt - cur > thDrop)             // 骤升：谷终点，向外扩 margin
+            bp.push_back(vOf((i + 1 + margin) % nPts));
     }
     std::sort(bp.begin(), bp.end());
     std::vector<double> bpu;
