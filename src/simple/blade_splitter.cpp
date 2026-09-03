@@ -64,47 +64,77 @@ BladeSplitResult splitBladeFaceBySection(
     double mn = *std::min_element(sm.begin(), sm.end());
     log << " maxC=" << mx;
 
-    std::vector<double> bp = {vMin};
-    for (int i = 2; i < nPts - 2; ++i) {
-        if (sm[i] > sm[i-1] && sm[i] > sm[i+1] &&
-            sm[i] > sm[i-2] && sm[i] > sm[i+2] && sm[i] > mn + (mx-mn)*0.05) {
-            double v = vMin + vRng * i / (nPts - 1);
-            if (bp.empty() || v - bp.back() > vRng * 0.005) bp.push_back(v);
-        }
+    // —— 叶缘识别：封闭面环绕，找曲率峰（前缘/后缘）与谷（叶盆/叶背）——
+    // 把最深谷旋转到环绕点，保证两个叶缘峰都在内部、峰谷交替、不跨环绕。
+    int sh = 0;
+    for (int i = 1; i < nPts; ++i) if (sm[i] < sm[sh]) sh = i;
+    auto s = [&](int i) { return sm[(i + sh) % nPts]; };
+    auto vOf = [&](int i) { return vMin + vRng * (double)i / (nPts - 1.0); };
+
+    std::vector<int> peaks, valleys;
+    for (int i = 1; i < nPts - 1; ++i) {
+        if (s(i) >= s(i - 1) && s(i) >= s(i + 1) && s(i) > mn + (mx - mn) * 0.05)
+            peaks.push_back(i);
+        if (s(i) <= s(i - 1) && s(i) <= s(i + 1))
+            valleys.push_back(i);
     }
-    bp.push_back(vMax);
+    if (peaks.size() > 2) {
+        std::sort(peaks.begin(), peaks.end(), [&](int a, int b) { return s(a) > s(b); });
+        peaks.resize(2);
+    }
+    if (valleys.size() > 2) {
+        std::sort(valleys.begin(), valleys.end(), [&](int a, int b) { return s(a) < s(b); });
+        valleys.resize(2);
+    }
 
-    // 前缘/后缘分别检测：边界处曲率相对自身下降即切出边缘条带（不再共用全局阈值，
-    // 避免一边叶缘曲率远小于另一边时被漏掉）。
-    auto cutEdge = [&](bool fromStart) {
-        double edgeC = fromStart ? sm[0] : sm[nPts - 1];
-        if (edgeC < 1e-12) return -1.0;
-        double th = edgeC * 0.25;
-        if (fromStart) {
-            for (int i = 1; i < nPts; ++i)
-                if (sm[i] < th) return vMin + vRng * i / (nPts - 1.0);
-        } else {
-            for (int i = nPts - 2; i >= 0; --i)
-                if (sm[i] < th) return vMin + vRng * i / (nPts - 1.0);
+    // 合并峰谷，排序，相邻中点作为切分点（含环绕）
+    std::vector<int> ext;
+    for (int p : peaks) ext.push_back(p);
+    for (int v : valleys) ext.push_back(v);
+    std::sort(ext.begin(), ext.end());
+
+    std::vector<double> bp;
+    if (ext.size() >= 2) {
+        for (size_t k = 0; k < ext.size(); ++k) {
+            int a = ext[k], b = ext[(k + 1) % ext.size()];
+            int d = (b - a + nPts) % nPts;
+            int mid = (a + d / 2) % nPts;
+            bp.push_back(vOf(mid));
         }
-        return -1.0;
-    };
-    double e0 = cutEdge(true);
-    if (e0 > vMin && e0 < vMax) bp.insert(bp.begin() + 1, e0);
-    double e1 = cutEdge(false);
-    if (e1 > vMin && e1 < vMax) bp.insert(bp.end() - 1, e1);
+        std::sort(bp.begin(), bp.end());
+        std::vector<double> bpu;
+        for (double c : bp)
+            if (bpu.empty() || c - bpu.back() > vRng * 0.005) bpu.push_back(c);
+        bp = bpu;
+    }
 
-    auto rc = [&](double a, double b) {
-        int is = std::max(0, (int)((a-vMin)/vRng*(nPts-1)));
-        int ie = std::min(nPts-1, (int)((b-vMin)/vRng*(nPts-1)));
-        double s = 0;
-        for (int i=is;i<=ie;++i) s+=sm[i];
-        return s / std::max(1, ie-is+1);
+    auto rcWrap = [&](double a, double b) {
+        int ia = (int)((a - vMin) / vRng * (nPts - 1.0));
+        int ib = (int)((b - vMin) / vRng * (nPts - 1.0));
+        double s = 0; int c = 0;
+        for (int i = ia; ; ++i) {
+            s += sm[i % nPts]; ++c;
+            if (i % nPts == ib % nPts) break;
+        }
+        return c > 0 ? s / c : 0.0;
     };
 
+    // 构建区域（环绕）：相邻切分点之间为一段
     std::vector<SplitRegion> regs;
-    for (size_t i = 0; i+1 < bp.size(); ++i) {
-        SplitRegion r; r.uStart = bp[i]; r.uEnd = bp[i+1]; r.avgCurv = rc(r.uStart, r.uEnd);
+    int nCuts = (int)bp.size();
+    if (nCuts >= 2) {
+        for (int k = 0; k < nCuts; ++k) {
+            double a = bp[k];
+            double b = bp[(k + 1) % nCuts];
+            double end = (k == nCuts - 1) ? b + vRng : b;  // 最后一段跨环绕
+            SplitRegion r;
+            r.uStart = a;
+            r.uEnd = end;
+            r.avgCurv = rcWrap(a, end);
+            regs.push_back(r);
+        }
+    } else {
+        SplitRegion r; r.uStart = vMin; r.uEnd = vMax; r.avgCurv = rcWrap(vMin, vMax);
         regs.push_back(r);
     }
 
