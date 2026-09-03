@@ -74,17 +74,25 @@ BladeSplitResult splitBladeFaceBySection(
     }
     bp.push_back(vMax);
 
-    double edgeTh = mx * 0.15;
-    if (sm[0] > edgeTh && sm[0] > sm[1] && sm[0] > sm[2]) {
-        int cut = 0;
-        for (int i = 1; i < nPts; ++i) if (sm[i] < edgeTh) { cut = i; break; }
-        if (cut > 0) bp.insert(bp.begin() + 1, vMin + vRng * cut / (nPts - 1));
-    }
-    if (sm[nPts-1] > edgeTh && sm[nPts-1] > sm[nPts-2] && sm[nPts-1] > sm[nPts-3]) {
-        int cut = nPts - 1;
-        for (int i = nPts - 2; i >= 0; --i) if (sm[i] < edgeTh) { cut = i; break; }
-        if (cut < nPts - 1) bp.insert(bp.end() - 1, vMin + vRng * cut / (nPts - 1));
-    }
+    // 前缘/后缘分别检测：边界处曲率相对自身下降即切出边缘条带（不再共用全局阈值，
+    // 避免一边叶缘曲率远小于另一边时被漏掉）。
+    auto cutEdge = [&](bool fromStart) {
+        double edgeC = fromStart ? sm[0] : sm[nPts - 1];
+        if (edgeC < 1e-12) return -1.0;
+        double th = edgeC * 0.25;
+        if (fromStart) {
+            for (int i = 1; i < nPts; ++i)
+                if (sm[i] < th) return vMin + vRng * i / (nPts - 1.0);
+        } else {
+            for (int i = nPts - 2; i >= 0; --i)
+                if (sm[i] < th) return vMin + vRng * i / (nPts - 1.0);
+        }
+        return -1.0;
+    };
+    double e0 = cutEdge(true);
+    if (e0 > vMin && e0 < vMax) bp.insert(bp.begin() + 1, e0);
+    double e1 = cutEdge(false);
+    if (e1 > vMin && e1 < vMax) bp.insert(bp.end() - 1, e1);
 
     auto rc = [&](double a, double b) {
         int is = std::max(0, (int)((a-vMin)/vRng*(nPts-1)));
