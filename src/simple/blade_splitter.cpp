@@ -64,49 +64,26 @@ BladeSplitResult splitBladeFaceBySection(
     double mn = *std::min_element(sm.begin(), sm.end());
     log << " maxC=" << mx;
 
-    // —— 叶缘识别：封闭面环绕，找曲率峰（前缘/后缘）与谷（叶盆/叶背）——
-    // 把最深谷旋转到环绕点，保证两个叶缘峰都在内部、峰谷交替、不跨环绕。
-    int sh = 0;
-    for (int i = 1; i < nPts; ++i) if (sm[i] < sm[sh]) sh = i;
-    auto s = [&](int i) { return sm[(i + sh) % nPts]; };
+    // —— 叶缘识别：叶缘 = 曲率谷（窄，远小于叶盆叶背）。
+    // 切分点 = 曲率急剧下降的起点（进入谷）与急剧上升的终点（离开谷），而非峰谷中点。
     auto vOf = [&](int i) { return vMin + vRng * (double)i / (nPts - 1.0); };
 
-    std::vector<int> peaks, valleys;
-    for (int i = 1; i < nPts - 1; ++i) {
-        if (s(i) >= s(i - 1) && s(i) >= s(i + 1) && s(i) > mn + (mx - mn) * 0.05)
-            peaks.push_back(i);
-        if (s(i) <= s(i - 1) && s(i) <= s(i + 1))
-            valleys.push_back(i);
-    }
-    if (peaks.size() > 2) {
-        std::sort(peaks.begin(), peaks.end(), [&](int a, int b) { return s(a) > s(b); });
-        peaks.resize(2);
-    }
-    if (valleys.size() > 2) {
-        std::sort(valleys.begin(), valleys.end(), [&](int a, int b) { return s(a) < s(b); });
-        valleys.resize(2);
-    }
-
-    // 合并峰谷，排序，相邻中点作为切分点（含环绕）
-    std::vector<int> ext;
-    for (int p : peaks) ext.push_back(p);
-    for (int v : valleys) ext.push_back(v);
-    std::sort(ext.begin(), ext.end());
-
+    double thDrop = (mx - mn) * 0.15;
     std::vector<double> bp;
-    if (ext.size() >= 2) {
-        for (size_t k = 0; k < ext.size(); ++k) {
-            int a = ext[k], b = ext[(k + 1) % ext.size()];
-            int d = (b - a + nPts) % nPts;
-            int mid = (a + d / 2) % nPts;
-            bp.push_back(vOf(mid));
-        }
-        std::sort(bp.begin(), bp.end());
-        std::vector<double> bpu;
-        for (double c : bp)
-            if (bpu.empty() || c - bpu.back() > vRng * 0.005) bpu.push_back(c);
-        bp = bpu;
+    for (int i = 0; i < nPts; ++i) {
+        double prv = sm[(i - 1 + nPts) % nPts];
+        double cur = sm[i];
+        double nxt = sm[(i + 1) % nPts];
+        if (prv - cur > thDrop)             // 骤降：cur 是谷内第一个点 → 谷起点
+            bp.push_back(vOf(i));
+        if (nxt - cur > thDrop)             // 骤升：nxt 是谷外第一个点 → 谷终点
+            bp.push_back(vOf((i + 1) % nPts));
     }
+    std::sort(bp.begin(), bp.end());
+    std::vector<double> bpu;
+    for (double v : bp)
+        if (bpu.empty() || v - bpu.back() > vRng * 0.005) bpu.push_back(v);
+    bp = bpu;
 
     auto rcWrap = [&](double a, double b) {
         int ia = (int)((a - vMin) / vRng * (nPts - 1.0));
