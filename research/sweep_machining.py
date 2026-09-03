@@ -33,11 +33,9 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 BUILD_EXE = PROJECT_DIR / "build" / "Release" / "simple.exe"
 
 HEADERS = [
-    "total", "num_combos", "num_patches", "flank_regions",
-    "max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm",
-    "max_twist_deg",
-    "flank_cut_s", "flank_overhead_s", "flank_total_s",
-    "point_cut_s", "point_total_s", "speedup",
+    "total", "num_combos", "num_patches",
+    "min_error_mm", "max_error_mm", "mean_error_mm", "max_twist_deg",
+    "flank_total_s", "point_total_s", "speedup",
 ]
 
 
@@ -201,7 +199,7 @@ def add_charts(out_path):
         x_idx = headers.index("total")
         speedup_idx = headers.index("speedup")
         err_cols = [headers.index(x) for x in
-                    ("max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm")]
+                    ("min_error_mm", "max_error_mm", "mean_error_mm")]
     except ValueError:
         return
 
@@ -373,18 +371,21 @@ def main():
         except Exception as e:
             log(f"  [warn] 写 xlsx 失败: {e}")
 
-    def average_rows(rows):
-        if not rows:
+    def aggregate_rows(combo_rows):
+        if not combo_rows:
             return None
-        keys = [k for k in rows[0].keys() if k != "key"]
-        avg = {}
-        for k in keys:
-            vals = [r.get(k) for r in rows if r.get(k) is not None]
-            if vals and all(isinstance(v, (int, float)) for v in vals):
-                avg[k] = round(sum(vals) / len(vals), 4)
-            else:
-                avg[k] = rows[0].get(k)
-        return avg
+        errs = [r["max_error_mm"] for r in combo_rows]
+        best = min(combo_rows, key=lambda r: r["max_error_mm"])
+        return {
+            "num_patches": best["num_patches"],
+            "min_error_mm": round(min(errs), 4),
+            "max_error_mm": round(max(errs), 4),
+            "mean_error_mm": round(sum(errs) / len(errs), 4),
+            "max_twist_deg": round(best["max_twist_deg"], 3),
+            "flank_total_s": best["flank_total_s"],
+            "point_total_s": best["point_total_s"],
+            "speedup": best["speedup"],
+        }
 
     i = 0
     for total in totals:
@@ -418,13 +419,13 @@ def main():
         if not combo_rows:
             log(f"  total={total} 所有组合失败，跳过")
             continue
-        avg = average_rows(combo_rows)
-        avg["key"] = key
-        avg["total"] = total
-        avg["num_combos"] = len(combo_rows)
-        results.append(avg)
-        log(f"  → avg: patches={avg['num_patches']} maxErr={avg['max_error_mm']}mm "
-            f"flank={avg['flank_total_s']}s point={avg['point_total_s']}s 提速={avg['speedup']}x")
+        agg = aggregate_rows(combo_rows)
+        agg["key"] = key
+        agg["total"] = total
+        agg["num_combos"] = len(combo_rows)
+        results.append(agg)
+        log(f"  → minErr={agg['min_error_mm']}mm maxErr={agg['max_error_mm']}mm "
+            f"meanErr={agg['mean_error_mm']}mm 最优提速={agg['speedup']}x")
         save()
 
     add_charts(args.out)

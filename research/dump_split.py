@@ -64,9 +64,9 @@ def main():
             m = pv.read(sub)
             plotter.add_mesh(m, color=COLORS.get(label, "gray"),
                              name=f"{label}_{k}", show_edges=True, edge_color="black")
-    plotter.add_legend([(COLORS["pressure"], "pressure"),
-                        (COLORS["suction"], "suction"),
-                        (COLORS["edge"], "edge")])
+    plotter.add_legend([("pressure", COLORS["pressure"]),
+                        ("suction", COLORS["suction"]),
+                        ("edge", COLORS["edge"])])
     print("[dump] 打开 3D 窗口（可旋转视角检查卷曲部分是否被切出）")
     plotter.show()
 
