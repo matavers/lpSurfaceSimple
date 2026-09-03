@@ -49,14 +49,51 @@ def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def run_fitting(file1, file2, outdir, tol, nu, nv):
+def run_fitting(file1, file2, outdir, tol, nu, nv, ps_ranges=None):
     cmd = [str(BUILD_EXE), file1, file2, "--mode", "ruled",
            "--outdir", outdir, "--tolerance", str(tol),
            "--nsplit-u", str(nu), "--nsplit-v", str(nv),
            "--no-refine", "--max-cells", "200000"]
+    if ps_ranges:
+        for k, (dir_, ranges) in enumerate(ps_ranges, start=1):
+            if not ranges:
+                continue
+            rk = 'v' if dir_ == 'V' else 'u'
+            us, ue = ranges[0]   # 取第一个（最大的）叶盆/叶背区间
+            cmd += [f"--face-idx{k}", f"--{rk}-range{k}", f"{us},{ue}"]
     r = subprocess.run(cmd, cwd=str(PROJECT_DIR), capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=900)
+    if r.returncode != 0:
+        err = (r.stderr or "").strip().splitlines()
+        if err:
+            log(f"  [fitting stderr] {'; '.join(err[-3:])}")
     return r.returncode
+
+
+def split_ps_ranges(filepath, face_idx=0):
+    """split-blade 后返回 (dir, [(start,end),...])，只含叶盆/叶背区间。"""
+    r = subprocess.run(
+        [str(BUILD_EXE), filepath, "--mode", "split-blade", "--face-idx", str(face_idx)],
+        cwd=str(PROJECT_DIR), capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=120)
+    s = r.stdout.strip()
+    i = s.find('{')
+    if i >= 0:
+        s = s[i:]
+    try:
+        info = json.loads(s)
+    except Exception:
+        return None, []
+    if not info.get('success'):
+        return None, []
+    regions = info.get('regions', [])
+    has_edge = any(reg.get('label') == 'edge' for reg in regions)
+    if not has_edge:
+        return None, []   # 没有叶缘段，无需切除
+    dir_ = info.get('dir', 'V')
+    ranges = [(reg['uStart'], reg['uEnd']) for reg in regions
+              if reg.get('label') in ('pressure', 'suction')]
+    return dir_, ranges
 
 
 def read_error_stats(outdir):
@@ -154,6 +191,8 @@ def main():
     ap.add_argument("--tolerance", type=float, default=0.1, help="拟合容差 mm（固定分片下仅传入，不影响分片数）")
     ap.add_argument("--splits", default="1,1;2,2;3,3;4,4;6,6;8,8;10,10",
                     help="分片列表 u,v 用分号分隔，如 1,1;2,2;3,3")
+    ap.add_argument("--split", action="store_true",
+                    help="拟合前先 split-blade 切除叶缘（卷曲），只拟合叶盆/叶背区间")
     ap.add_argument("--workdir", default=None, help="临时工作目录（默认系统临时目录）")
     args = ap.parse_args()
 
@@ -168,6 +207,16 @@ def main():
             continue
         u, v = tok.split(",")
         splits.append((int(u), int(v)))
+
+    # 可选：拟合前 split-blade 切除叶缘（卷曲），只拟合叶盆/叶背区间
+    ps_ranges = None
+    if args.split:
+        log("split-blade 切除叶缘...")
+        r1 = split_ps_ranges(args.file1)
+        r2 = split_ps_ranges(args.file2)
+        log(f"  file1 叶盆/叶背区间: dir={r1[0] if r1 else '?'} {r1[1] if r1 else []}")
+        log(f"  file2 叶盆/叶背区间: dir={r2[0] if r2 else '?'} {r2[1] if r2 else []}")
+        ps_ranges = [r1, r2]
 
     mcfg = cm.load_config()
     mach_args = argparse.Namespace(
@@ -233,7 +282,7 @@ def main():
         os.makedirs(outdir, exist_ok=True)
 
         try:
-            rc = run_fitting(args.file1, args.file2, outdir, args.tolerance, nu, nv)
+            rc = run_fitting(args.file1, args.file2, outdir, args.tolerance, nu, nv, ps_ranges)
         except Exception as e:
             log(f"  [ERROR] 拟合执行异常: {e}")
             continue
