@@ -33,8 +33,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 BUILD_EXE = PROJECT_DIR / "build" / "Release" / "simple.exe"
 
 HEADERS = [
-    "tolerance", "nsplit_u", "nsplit_v", "num_patches",
-    "developable", "non_developable", "flank_regions",
+    "tolerance", "nsplit_u", "nsplit_v", "num_patches", "flank_regions",
     "max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm",
     "max_twist_deg",
     "flank_cut_s", "flank_overhead_s", "flank_total_s",
@@ -98,8 +97,6 @@ def collect(outdir, args):
         speedup = round(s["point"]["total"] / s["flank"]["total"], 3)
     return {
         "num_patches": s["num_patches"],
-        "developable": s["developable"],
-        "non_developable": s["non_developable"],
         "flank_regions": s["flank_regions"],
         "max_twist_deg": round(max_twist, 3),
         "flank_cut_s": round(s["flank"]["cut"], 2),

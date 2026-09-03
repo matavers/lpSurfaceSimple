@@ -10,87 +10,6 @@ namespace simple {
 
 namespace {
 
-// 当前拟合的曲率阈值（绝对值 = curvTol × 全局最大 |K|），在 fitGridImpl 开始时设置。
-double g_curvThresh = 0.0;
-// 检测到的卷曲连通域在参数域的包围盒（若存在）。
-bool g_hasCurl = false;
-double g_curlU0 = 0, g_curlU1 = 0, g_curlV0 = 0, g_curlV1 = 0;
-
-// 全曲面最大高斯曲率绝对值（1/mm²），粗网格扫描。
-double surfaceMaxCurvature(const SurfaceWrapper& surf)
-{
-    auto [u0, u1] = surf.paramDomainU();
-    auto [v0, v1] = surf.paramDomainV();
-    double maxK = 0.0;
-    const int nU = 40, nV = 20;
-    for (int i = 0; i < nU; ++i) {
-        for (int j = 0; j < nV; ++j) {
-            double u = u0 + (u1 - u0) * i / (nU - 1.0);
-            double v = v0 + (v1 - v0) * j / (nV - 1.0);
-            maxK = std::max(maxK, std::fabs(surf.gaussianCurvature(u, v)));
-        }
-    }
-    return maxK;
-}
-
-// 检测高曲率连通域，返回最大连通域在参数域的包围盒（u0,u1,v0,v1）。
-// 用于把卷曲子区整块切出，而不是逐格二分。
-bool detectCurlBox(const SurfaceWrapper& surf, double curvTol,
-                   double& u0, double& u1, double& v0, double& v1)
-{
-    auto [uMin, uMax] = surf.paramDomainU();
-    auto [vMin, vMax] = surf.paramDomainV();
-    const int nU = 60, nV = 30;
-    double maxK = 0.0;
-    std::vector<std::vector<double>> K(nU, std::vector<double>(nV, 0.0));
-    for (int i = 0; i < nU; ++i)
-        for (int j = 0; j < nV; ++j) {
-            double u = uMin + (uMax - uMin) * i / (nU - 1.0);
-            double v = vMin + (vMax - vMin) * j / (nV - 1.0);
-            K[i][j] = std::fabs(surf.gaussianCurvature(u, v));
-            maxK = std::max(maxK, K[i][j]);
-        }
-    if (maxK < 1e-18) return false;
-    double thresh = curvTol * maxK;
-
-    std::vector<std::vector<bool>> vis(nU, std::vector<bool>(nV, false));
-    int bestArea = 0, bestI0 = 0, bestI1 = 0, bestJ0 = 0, bestJ1 = 0;
-    const int di[4] = {1, -1, 0, 0};
-    const int dj[4] = {0, 0, 1, -1};
-    for (int i = 0; i < nU; ++i)
-        for (int j = 0; j < nV; ++j) {
-            if (vis[i][j] || K[i][j] <= thresh) continue;
-            std::vector<std::pair<int, int>> stk;
-            stk.push_back({i, j});
-            vis[i][j] = true;
-            int i0 = i, i1 = i, j0 = j, j1 = j, area = 0;
-            while (!stk.empty()) {
-                auto [ci, cj] = stk.back();
-                stk.pop_back();
-                ++area;
-                i0 = std::min(i0, ci); i1 = std::max(i1, ci);
-                j0 = std::min(j0, cj); j1 = std::max(j1, cj);
-                for (int k = 0; k < 4; ++k) {
-                    int ni = ci + di[k], nj = cj + dj[k];
-                    if (ni < 0 || ni >= nU || nj < 0 || nj >= nV) continue;
-                    if (vis[ni][nj] || K[ni][nj] <= thresh) continue;
-                    vis[ni][nj] = true;
-                    stk.push_back({ni, nj});
-                }
-            }
-            if (area > bestArea) {
-                bestArea = area;
-                bestI0 = i0; bestI1 = i1; bestJ0 = j0; bestJ1 = j1;
-            }
-        }
-    if (bestArea < 3) return false;
-    u0 = uMin + (uMax - uMin) * bestI0 / (nU - 1.0);
-    u1 = uMin + (uMax - uMin) * bestI1 / (nU - 1.0);
-    v0 = vMin + (vMax - vMin) * bestJ0 / (nV - 1.0);
-    v1 = vMin + (vMax - vMin) * bestJ1 / (nV - 1.0);
-    return true;
-}
-
 // 拟合单个格子（指定方向 dir）。
 GridCell fitOneCell(const SurfaceWrapper& surf, int r, int c,
                     double u0, double u1, double v0, double v1,
@@ -100,19 +19,6 @@ GridCell fitOneCell(const SurfaceWrapper& surf, int r, int c,
     cell.row = r;
     cell.col = c;
     cell.u0 = u0; cell.u1 = u1; cell.v0 = v0; cell.v1 = v1;
-    // 卷曲区切出：格中心落在检测到的卷曲包围盒内 → 跳过直纹拟合，交原曲面点铣
-    if (!planar && g_hasCurl) {
-        double cu = (u0 + u1) * 0.5;
-        double cv = (v0 + v1) * 0.5;
-        if (cu >= g_curlU0 && cu <= g_curlU1 && cv >= g_curlV0 && cv <= g_curlV1) {
-            cell.curled = true;
-            cell.developable = false;
-            cell.maxError = 0.0;
-            cell.rmsError = 0.0;
-            cell.twist = 0.0;
-            return cell;
-        }
-    }
     if (planar) {
         cell.plane = fitCellPlane(surf, u0, u1, v0, v1, cfg.nUSamples, cfg.nVSamples);
         cell.fitDir = ParamDir::U;
@@ -142,12 +48,6 @@ ParamDir determineDir(const SurfaceWrapper& surf,
         for (int c = 0; c < nCols; ++c) {
             double u0 = uEdges[c], u1 = uEdges[c + 1];
             double v0 = vEdges[r], v1 = vEdges[r + 1];
-            if (g_hasCurl) {
-                double cu = (u0 + u1) * 0.5;
-                double cv = (v0 + v1) * 0.5;
-                if (cu >= g_curlU0 && cu <= g_curlU1 && cv >= g_curlV0 && cv <= g_curlV1)
-                    continue;  // 卷曲区不参与方向试算
-            }
             RuledCellFit fu = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::U,
                                            cfg.nUSamples, cfg.nVSamples,
                                            cfg.nRibs, cfg.lambda);
@@ -266,10 +166,6 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
     GridResult g;
     g.name = name;
 
-    // 曲率阈值（相对全局最大 |K|）+ 卷曲连通域包围盒（分片前整块切出）
-    g_curvThresh = cfg.curvTol * surfaceMaxCurvature(surf);
-    g_hasCurl = !planar && detectCurlBox(surf, cfg.curvTol, g_curlU0, g_curlU1, g_curlV0, g_curlV1);
-
     auto [u0, u1] = surf.paramDomainU();
     auto [v0, v1] = surf.paramDomainV();
 
@@ -342,9 +238,8 @@ GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
     for (auto& cell : g.cells) {
         g.maxError = std::max(g.maxError, cell.maxError);
         g.maxTwist = std::max(g.maxTwist, cell.twist);
-        cell.developable = !cell.curled;
-        if (cell.developable) ++g.developableCount;
     }
+    g.developableCount = (int)g.cells.size();
     g.toleranceMet = (g.maxError <= cfg.tolerance);
 
     return g;
@@ -370,7 +265,7 @@ GridResult fitGridPlanar(const SurfaceWrapper& surf, const GridConfig& cfg,
 }
 
 bool exportGridOBJs(const std::string& outDir, const std::string& prefix,
-                    const GridResult& gr, bool planar, const SurfaceWrapper* surf)
+                    const GridResult& gr, bool planar)
 {
     for (const auto& cell : gr.cells) {
         int idx = cell.row * gr.nCols + cell.col;
@@ -385,30 +280,6 @@ bool exportGridOBJs(const std::string& outDir, const std::string& prefix,
                   << " " << cell.plane.centroid.z() << "\n";
                 o << "normal = " << cell.plane.normal.x() << " " << cell.plane.normal.y()
                   << " " << cell.plane.normal.z() << "\n";
-            }
-        } else if (cell.curled) {
-            // 卷曲区：跳过直纹拟合，导出原曲面网格（供点铣）
-            if (surf) {
-                std::string op = outDir + "/" + prefix + "_cell" + std::to_string(idx) + ".obj";
-                int res = 12;
-                int nU = res + 1, nV = res + 1;
-                Vec3Arr verts(nU * nV);
-                for (int i = 0; i < nU; ++i) {
-                    double u = cell.u0 + (cell.u1 - cell.u0) * i / res;
-                    for (int j = 0; j < nV; ++j) {
-                        double v = cell.v0 + (cell.v1 - cell.v0) * j / res;
-                        verts[i * nV + j] = surf->evaluate(u, v);
-                    }
-                }
-                FaceArr faces;
-                for (int i = 0; i < nU - 1; ++i) {
-                    for (int j = 0; j < nV - 1; ++j) {
-                        int a = i * nV + j;
-                        faces.push_back({a, a + 1, a + nV});
-                        faces.push_back({a + 1, a + nV + 1, a + nV});
-                    }
-                }
-                exportOBJ(op, verts, faces);
             }
         } else {
             std::string op = outDir + "/" + prefix + "_cell" + std::to_string(idx) + ".obj";
@@ -508,8 +379,7 @@ std::string buildGridMetaJson(const std::vector<GridResult>& results,
               << ",\"fitDir\":\"" << (c.fitDir == ParamDir::U ? "U" : "V") << "\""
               << ",\"maxErr\":" << c.maxError
               << ",\"rmsErr\":" << c.rmsError
-              << ",\"twist\":" << c.twist
-              << ",\"developable\":" << (c.developable ? "true" : "false") << "}";
+              << ",\"twist\":" << c.twist << "}";
         }
         o << "]}";
     }

@@ -553,14 +553,13 @@ def flank_stitched_feed_lines(patches, tool_r):
 # ===================== 主流程 =====================
 
 def compute(input_dir, args):
-    """扫描 _params.txt + meta.json，返回 patches（可展区 + 卷曲区）。"""
+    """扫描 _params.txt，计算每块指标，返回 patches 列表。"""
     files = sorted(Path(input_dir).glob("*_params.txt"))
+    if not files:
+        print(f"[Error] 未找到 *_params.txt 文件: {input_dir}")
+        return []
     grid_meta = _load_grid_meta(input_dir)
-    curled = _load_curled_cells(input_dir)
-    stepover = 2.0 * math.sqrt(max(0.0, 2.0 * args.ball_r * args.scallop - args.scallop ** 2))
     patches = []
-
-    # 可展区（有 _params.txt）
     for fp in files:
         C0, C1 = load_directrix(fp)
         if len(C0) < 2 or len(C1) < 2:
@@ -581,31 +580,6 @@ def compute(input_dir, args):
             point_milling(C0, C1, args.feed, args.ball_r, args.scallop)
         patches.append(p)
 
-    # 卷曲区（原曲面网格 OBJ，无 _params.txt）
-    for (bi, idx), (row, col) in curled.items():
-        obj_path = os.path.join(input_dir, f"blade{bi + 1}_cell{idx}.obj")
-        verts, faces = load_obj(obj_path)
-        if not verts or not faces:
-            continue
-        p = Patch(name=f"blade{bi + 1}_cell{idx}", C0=None, C1=None)
-        p.blade = bi
-        p.cell_idx = idx
-        p.row = row
-        p.col = col
-        p.is_curl = True
-        p.developable = False
-        p.mesh_verts = verts
-        p.mesh_faces = faces
-        p.area = mesh_area(verts, faces)
-        p.stepover = stepover
-        p.point_len = p.area / stepover if stepover > 0 else 0.0
-        p.point_time = p.point_len / args.feed * 60.0
-        patches.append(p)
-
-    if not files and not curled:
-        print(f"[Error] 未找到 *_params.txt 或卷曲区 OBJ: {input_dir}")
-        return []
-
     flips = _blade_normal_flips(patches)
     for p in patches:
         p.normal_flip = flips.get(p.blade, 1.0)
@@ -613,21 +587,15 @@ def compute(input_dir, args):
 
 def summarize(patches, args):
     """汇总并返回结果 dict。
-    A 混合策略（可展区锥度刀侧铣 + 卷曲区点铣）vs B 传统整体点铣。
+    A 直纹面侧铣（全部片侧铣一次，按连通域拼接）vs B 传统整体点铣。
     非切削时间按「连通域数 × 每区域进退刀」计算（刀轨拼接后只进退刀一次/区域）。
     二者在同一精度指标下比较：点铣残留高度 = 拟合容差。"""
-    n_dev = sum(1 for p in patches if p.developable)
-    n_nondev = len(patches) - n_dev
-    flank_regions = _connected_regions(patches, True)   # 可展区连通域
-    point_regions = _connected_regions(patches, False)  # 卷曲区连通域
+    flank_regions = _connected_regions(patches)   # 全部片连通域
     n_flank_regions = len(flank_regions)
-    n_point_regions = len(point_regions)
 
-    flank_cut = sum(p.flank_time for p in patches)                       # 可展区侧铣
-    fallback_point_cut = sum(p.point_time for p in patches if not p.developable)  # 卷曲区点铣
+    flank_cut = sum(p.flank_time for p in patches)
     flank_overhead = n_flank_regions * args.overhead
-    fallback_overhead = n_point_regions * getattr(args, 'point_overhead', 10.0)
-    flank_total = flank_cut + fallback_point_cut + flank_overhead + fallback_overhead
+    flank_total = flank_cut + flank_overhead
 
     point_cut = sum(p.point_time for p in patches)   # 基线：整体点铣
     point_overhead = getattr(args, 'point_overhead', 10.0)
@@ -635,18 +603,11 @@ def summarize(patches, args):
     total_area = sum(p.area for p in patches)
     return {
         "num_patches": len(patches),
-        "developable": n_dev,
-        "non_developable": n_nondev,
         "flank_regions": n_flank_regions,
-        "point_regions": n_point_regions,
         "total_area": total_area,
         "flank": {
-            "cut": flank_cut + fallback_point_cut,
-            "flank_cut": flank_cut,
-            "fallback_point_cut": fallback_point_cut,
-            "overhead": flank_overhead + fallback_overhead,
-            "flank_overhead": flank_overhead,
-            "fallback_overhead": fallback_overhead,
+            "cut": flank_cut,
+            "overhead": flank_overhead,
             "total": flank_total,
         },
         "point": {"cut": point_cut, "overhead": point_overhead, "total": point_total},
@@ -657,18 +618,16 @@ def print_report(patches, args, summary):
     print(f"直纹面拟合 vs 传统点铣 加工时间仿真  (feed={args.feed} mm/min, "
           f"侧铣刀R={getattr(args, 'tool_r', args.ball_r):.1f}, "
           f"球刀R={args.ball_r}, 残留={args.scallop}, 可展阈值={args.twist_limit}°)")
-    print(f"面片数: {summary['num_patches']}（可展 {summary['developable']}，"
-          f"不可展 {summary['non_developable']}）")
+    print(f"面片数: {summary['num_patches']}")
     print("=" * 96)
-    print(f"{'面片':<28}{'可展':<5}{'扭转°':>8}{'准线mm':>9}{'母线mm':>9}"
+    print(f"{'面片':<28}{'扭转°':>8}{'准线mm':>9}{'母线mm':>9}"
           f"{'侧铣s':>9}{'点铣s':>9}")
     for p in patches:
-        print(f"{p.name:<28}{'是' if p.developable else '否':<5}{p.twist:>8.2f}"
+        print(f"{p.name:<28}{p.twist:>8.2f}"
               f"{p.directrix_len:>9.1f}{p.mean_ruling:>9.1f}"
               f"{p.flank_time:>9.2f}{p.point_time:>9.2f}")
     print("-" * 96)
-    print(f"可展面片: {summary['developable']}  不可展面片: {summary['non_developable']}  "
-          f"侧铣连通域 {summary.get('flank_regions', 0)}  总曲面面积: {summary['total_area']:.1f} mm^2")
+    print(f"侧铣连通域 {summary.get('flank_regions', 0)}  总曲面面积: {summary['total_area']:.1f} mm^2")
     twists = sorted((p.twist for p in patches), reverse=True)
     if twists:
         print(f"扭转角分布(deg): max={twists[0]:.2f}  "
@@ -676,8 +635,7 @@ def print_report(patches, args, summary):
               f"中位={twists[len(twists) // 2]:.2f}")
     print()
     f, p = summary["flank"], summary["point"]
-    print(f"A 混合策略(拟合后): 侧铣 {f['flank_cut']:8.1f}s "
-          f"+ 卷曲点铣 {f['fallback_point_cut']:8.1f}s "
+    print(f"A 直纹面侧铣(拟合后): 切削 {f['cut']:8.1f}s "
           f"+ 非切削 {f['overhead']:8.1f}s = {f['total']:8.1f}s")
     print(f"B 传统点铣(原曲面):   切削 {p['cut']:8.1f}s "
           f"+ 非切削 {p['overhead']:8.1f}s = {p['total']:8.1f}s")

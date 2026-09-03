@@ -188,18 +188,12 @@ class ToolpathWorker(QThread):
                 _cm.load_config().get('tool_r', 5.0)
             # 可展片：按连通域蛇形拼接成连续进给轨迹（锥度刀侧铣）
             feed_lines, axis_segs = _cm.flank_stitched_feed_lines(patches, tool_r)
-            # 卷曲片：球刀刀心在原曲面网格上行切（点铣兜底）
+            # 点铣基线：全部片球刀刀心行切（用于对比）
             point_lines = []
             for pp in patches:
-                if not pp.developable:
-                    if pp.is_curl:
-                        point_lines.extend(
-                            _cm.curl_point_cl_lines(pp.mesh_verts, pp.mesh_faces, stepover,
-                                                    self._args.ball_r, flip=pp.normal_flip))
-                    else:
-                        point_lines.extend(
-                            _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
-                                               flip=pp.normal_flip))
+                point_lines.extend(
+                    _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
+                                       flip=pp.normal_flip))
             self.done.emit((patches, summary,
                             _build_line_arrays(feed_lines),
                             _build_line_arrays(axis_segs),
@@ -350,7 +344,6 @@ class MainWindow(QMainWindow):
         self._nSplitV = 2
         self._tolerance = 0.1
         self._devTol = 2.0
-        self._curvTol = 0.5
         self._maxDepth = 200
         self._maxCells = 10000
         self._doBlend = False
@@ -358,7 +351,6 @@ class MainWindow(QMainWindow):
         self._exportStep = False
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
-        self._curlCounts = [0, 0]
         self._surfaceDims = [(0, 0), (0, 0)]
         self._surfaceDirs = ["", ""]
         self._blendTrim = [0, 0]
@@ -592,16 +584,6 @@ class MainWindow(QMainWindow):
         self._spn_devtol.setToolTip(
             "可展性阈值（母线法向扭转角，度），仅用于报告统计（可展片数），不参与细分。")
         form.addRow("可展阈值 (度):", self._spn_devtol)
-
-        self._spn_curvtol = QDoubleSpinBox()
-        self._spn_curvtol.setRange(0.001, 1.0)
-        self._spn_curvtol.setDecimals(3)
-        self._spn_curvtol.setSingleStep(0.02)
-        self._spn_curvtol.setValue(self._curvTol)
-        self._spn_curvtol.setToolTip(
-            "曲率阈值（相对全局最大 |高斯曲率| 的比例）。格内 max|K| 超过该比例视为卷曲区，"
-            "在分片拟合前切去、交原曲面点铣。越大切得越少。")
-        form.addRow("曲率阈值 (相对):", self._spn_curvtol)
 
         self._spn_depth = QSpinBox()
         self._spn_depth.setRange(1, 100000)
@@ -882,21 +864,14 @@ class MainWindow(QMainWindow):
     def _show_mach_report(self, patches, summary):
         lines = []
         f, p = summary['flank'], summary['point']
-        lines.append(f"面片数: {summary['num_patches']}（可展 {summary['developable']}→侧铣 "
-                     f"{summary.get('flank_regions', '?')} 区域，卷曲 {summary['non_developable']}→点铣 "
-                     f"{summary.get('point_regions', '?')} 区域）")
-        if 'flank_cut' in f and 'fallback_point_cut' in f:
-            lines.append(f"A 混合策略: 侧铣 {f['flank_cut']:.1f}s + 卷曲点铣 {f['fallback_point_cut']:.1f}s "
-                         f"+ 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
-        else:
-            lines.append(f"A 侧铣: 切削 {f['cut']:.1f}s + 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
+        lines.append(f"面片数: {summary['num_patches']}（侧铣连通域 {summary.get('flank_regions', '?')}）")
+        lines.append(f"A 侧铣: 切削 {f['cut']:.1f}s + 非切削 {f['overhead']:.1f}s = {f['total']:.1f}s")
         lines.append(f"B 原曲面点铣: 切削 {p['cut']:.1f}s + 非切削 {p['overhead']:.1f}s = {p['total']:.1f}s")
         if f['total'] > 0:
             lines.append(f"A 相对 B 提速: {p['total'] / f['total']:.1f}x")
         lines.append("")
         for pp in patches:
             lines.append(f"{pp.name}: 扭转 {pp.twist:.2f}° "
-                         f"{'可展' if pp.developable else '卷曲'} "
                          f"侧铣 {pp.flank_time:.1f}s / 点铣 {pp.point_time:.1f}s")
         self._txt_mach.setPlainText("\n".join(lines))
         self._log(f"[Machining] {summary['num_patches']} patches, "
@@ -1130,7 +1105,6 @@ class MainWindow(QMainWindow):
             self._nSplitV = cfg.get("nSplitV", 2)
             self._tolerance = cfg.get("tolerance", 0.1)
             self._devTol = cfg.get("devTol", 2.0)
-            self._curvTol = cfg.get("curvTol", 0.5)
             self._maxDepth = cfg.get("maxDepth", 200)
             self._maxCells = cfg.get("maxCells", 10000)
             self._doBlend = cfg.get("doBlend", False)
@@ -1145,7 +1119,6 @@ class MainWindow(QMainWindow):
             self._spn_split_v.setValue(self._nSplitV)
             self._spn_tol.setValue(self._tolerance)
             self._spn_devtol.setValue(self._devTol)
-            self._spn_curvtol.setValue(self._curvTol)
             self._spn_depth.setValue(self._maxDepth)
             self._spn_maxcells.setValue(self._maxCells)
             self._chk_blend.setChecked(self._doBlend)
@@ -1167,7 +1140,6 @@ class MainWindow(QMainWindow):
             "nSplitV": self._spn_split_v.value(),
             "tolerance": self._spn_tol.value(),
             "devTol": self._spn_devtol.value(),
-            "curvTol": self._spn_curvtol.value(),
             "maxDepth": self._spn_depth.value(),
             "maxCells": self._spn_maxcells.value(),
             "doBlend": self._chk_blend.isChecked(),
@@ -1696,7 +1668,6 @@ class MainWindow(QMainWindow):
         self._nSplitV = self._spn_split_v.value()
         self._tolerance = self._spn_tol.value()
         self._devTol = self._spn_devtol.value()
-        self._curvTol = self._spn_curvtol.value()
         self._maxDepth = self._spn_depth.value()
         self._maxCells = self._spn_maxcells.value()
         self._doBlend = self._chk_blend.isChecked()
@@ -1724,7 +1695,6 @@ class MainWindow(QMainWindow):
         self._loaded_files.clear()
         self._surfaceCellCounts = [4, 4]
         self._cellMeta = [[], []]
-        self._curlCounts = [0, 0]
         self._surfaceDims = [(0, 0), (0, 0)]
         self._surfaceDirs = ["", ""]
         self._blendTrim = [0, 0]
@@ -1757,7 +1727,6 @@ class MainWindow(QMainWindow):
             f'--nsplit-v {self._nSplitV} '
             f'--tolerance {self._tolerance} '
             f'--dev-tol {self._devTol} '
-            f'--curv-tol {self._curvTol} '
             f'--max-depth {self._maxDepth} '
             f'--max-cells {self._maxCells}'
         )
@@ -1854,20 +1823,12 @@ class MainWindow(QMainWindow):
             bnode.addChild(grid_item)
 
             if self._surfaceCellCounts[bi] > 0:
-                dev_count = self._surfaceCellCounts[bi] - self._curlCounts[bi]
-                ruled_item = QTreeWidgetItem([f"Ruled Cells ({dev_count}, dir={d})"])
+                ruled_item = QTreeWidgetItem([f"Ruled Cells ({self._surfaceCellCounts[bi]}, dir={d})"])
                 ruled_item.setFlags(ruled_item.flags() | Qt.ItemIsUserCheckable)
                 ruled_item.setCheckState(0, Qt.Checked)
                 ruled_item.setData(1, Qt.UserRole, f"blade{bi + 1}_ruled")
                 ruled_item.setData(2, Qt.UserRole, "ruled")
                 bnode.addChild(ruled_item)
-                if self._curlCounts[bi] > 0:
-                    curl_item = QTreeWidgetItem([f"Curled Cells ({self._curlCounts[bi]}, point-mill)"])
-                    curl_item.setFlags(curl_item.flags() | Qt.ItemIsUserCheckable)
-                    curl_item.setCheckState(0, Qt.Checked)
-                    curl_item.setData(1, Qt.UserRole, f"blade{bi + 1}_curl")
-                    curl_item.setData(2, Qt.UserRole, "curl")
-                    bnode.addChild(curl_item)
 
             if self._blendTrim[bi] or self._blendStrips[bi] or self._blendCorners[bi]:
                 blend_node = QTreeWidgetItem(["Blend"])
@@ -1921,7 +1882,6 @@ class MainWindow(QMainWindow):
             self._cmb_mode.setCurrentIndex(0 if self._mode.startswith("ruled") else 1)
             self._log(f"  Mode: {self._mode}")
         self._cellMeta = [[], []]
-        self._curlCounts = [0, 0]
         self._surfaceDims = [(0, 0), (0, 0)]
         self._surfaceDirs = ["", ""]
         for i, s in enumerate(meta.get("surfaces", [])):
@@ -1929,7 +1889,6 @@ class MainWindow(QMainWindow):
             if i < 2:
                 self._surfaceCellCounts[i] = len(cells)
                 self._cellMeta[i] = cells
-                self._curlCounts[i] = sum(1 for c in cells if not c.get('developable', True))
                 self._surfaceDims[i] = (s.get('nRows', 0), s.get('nCols', 0))
                 self._surfaceDirs[i] = s.get('fitDir', '')
             self._log(f"  {s['name']}: {len(cells)} cells, fitDir={self._surfaceDirs[i] if i < 2 else '?'}")
@@ -1949,12 +1908,6 @@ class MainWindow(QMainWindow):
         self._blendStrips = [0, 0]
         self._blendCorners = [0, 0]
 
-        curled = set()
-        for bi in range(2):
-            for c in self._cellMeta[bi]:
-                if not c.get('developable', True):
-                    curled.add((bi, c.get('index', -1)))
-
         for fn in sorted(os.listdir(out_dir)):
             if fn.endswith('.obj'):
                 bi = 0 if "blade1" in fn else 1
@@ -1973,15 +1926,8 @@ class MainWindow(QMainWindow):
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
                                   fn.replace('.obj', ''), "corner", bi))
                 else:
-                    name = fn.replace('.obj', '')
-                    idx = -1
-                    try:
-                        idx = int(name.split('_cell')[-1])
-                    except ValueError:
-                        idx = -1
-                    tag = "curl" if (bi, idx) in curled else "ruled"
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
-                                  name, tag, bi))
+                                  fn.replace('.obj', ''), "ruled", bi))
             elif fn.endswith('.vtk'):
                 bi = 0 if "blade1" in fn else 1
                 grid_files.append(fn)
@@ -2045,9 +1991,6 @@ class MainWindow(QMainWindow):
             elif tag == "ruled":
                 self._plotter.add_mesh(
                     mesh, name=name, color=[0.5, 0.7, 0.9], opacity=0.45)
-            elif tag == "curl":
-                self._plotter.add_mesh(
-                    mesh, name=name, color=[0.9, 0.3, 0.3], opacity=0.85)
             elif tag == "trim":
                 self._plotter.add_mesh(
                     mesh, name=name, color=[0.45, 0.75, 0.55], opacity=0.9)
