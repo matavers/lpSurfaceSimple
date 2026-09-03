@@ -210,12 +210,15 @@ def add_charts(out_path):
     for r in rows:
         cs.append(r)
 
-    # 图1：提速 vs 总分片数
+    # 图1：提速 vs 总分片数（纯折线）
     c1 = LineChart()
     c1.title = "Speedup vs Total Patches"
     c1.y_axis.title = "Speedup"
     c1.x_axis.title = "Total Patches"
-    c1.style = 2
+    c1.width = 22
+    c1.height = 11
+    c1.x_axis.tickLblSkip = 5
+    c1.x_axis.tickMarkSkip = 5
     ref_x = Reference(cs, min_col=x_idx + 1, min_row=2, max_row=cs.max_row)
     ref_y = Reference(cs, min_col=speedup_idx + 1, min_row=1, max_row=cs.max_row)
     c1.add_data(ref_y, titles_from_data=True)
@@ -227,7 +230,10 @@ def add_charts(out_path):
     c2.title = "Error vs Total Patches"
     c2.y_axis.title = "Error (mm)"
     c2.x_axis.title = "Total Patches"
-    c2.style = 2
+    c2.width = 22
+    c2.height = 11
+    c2.x_axis.tickLblSkip = 5
+    c2.x_axis.tickMarkSkip = 5
     ref_x2 = Reference(cs, min_col=x_idx + 1, min_row=2, max_row=cs.max_row)
     for ci in err_cols:
         ref = Reference(cs, min_col=ci + 1, min_row=1, max_row=cs.max_row)
