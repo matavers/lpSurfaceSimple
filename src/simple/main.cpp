@@ -660,7 +660,12 @@ int main(int argc, char* argv[]) {
                 double x1,y1,z1,x2,y2,z2; bb.Get(x1,y1,z1,x2,y2,z2);
                 sDiag = std::sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1)+(z2-z1)*(z2-z1));
             }
-            std::cout << "{\"file\":\"" << r.filename
+            std::string escapedFile = r.filename;
+            for (auto& c : escapedFile) {
+                if (c == '\\') c = '/';
+                if (c == '"') c = '\'';
+            }
+            std::cout << "{\"file\":\"" << escapedFile
                       << "\",\"numFaces\":" << r.faces.size()
                       << ",\"success\":" << (ident.success ? "true" : "false")
                       << ",\"pressureIndex\":" << ident.pressureFaceIndex

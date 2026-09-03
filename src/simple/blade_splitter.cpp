@@ -161,15 +161,20 @@ namespace simple
             regs.push_back(r);
         }
 
+        // 只用长区段（非叶缘）计算中位数，避免叶缘高曲率把中位数拉高导致叶背被误判成叶盆
         double rMax = 0, rMin = 1e30;
+        bool hasLong = false;
         for (auto &r : regs)
         {
+            if (r.uEnd - r.uStart < vRng * 0.08)
+                continue;
+            hasLong = true;
             if (r.avgCurv > rMax)
                 rMax = r.avgCurv;
             if (r.avgCurv < rMin)
                 rMin = r.avgCurv;
         }
-        double rMed = (rMax + rMin) * 0.5;
+        double rMed = hasLong ? (rMax + rMin) * 0.5 : 0.0;
 
         for (auto &r : regs)
         {
