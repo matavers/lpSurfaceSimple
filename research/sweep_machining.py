@@ -41,21 +41,19 @@ HEADERS = [
 ]
 
 
-def _key(tol, nu, nv):
-    return f"{tol}_{nu}_{nv}"
+def _key(nu, nv):
+    return f"{nu}_{nv}"
 
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def run_fitting(file1, file2, outdir, tol, nu, nv, no_refine):
+def run_fitting(file1, file2, outdir, tol, nu, nv):
     cmd = [str(BUILD_EXE), file1, file2, "--mode", "ruled",
            "--outdir", outdir, "--tolerance", str(tol),
            "--nsplit-u", str(nu), "--nsplit-v", str(nv),
-           "--max-cells", "200000"]
-    if no_refine:
-        cmd.append("--no-refine")
+           "--no-refine", "--max-cells", "200000"]
     r = subprocess.run(cmd, cwd=str(PROJECT_DIR), capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=900)
     return r.returncode
@@ -134,7 +132,7 @@ def load_xlsx_rows(path):
                 headers = list(row)
                 continue
             d = dict(zip(headers, row))
-            if d.get("tolerance") is not None and d.get("nsplit_u") is not None:
+            if d.get("nsplit_u") is not None:
                 rows.append(d)
         return rows
     except Exception:
@@ -148,18 +146,14 @@ def main():
             sys.stderr.reconfigure(encoding='utf-8', errors='replace')
         except Exception:
             pass
-    ap = argparse.ArgumentParser(description="扫描 (容差, 分片数) → 加工时间，输出 xlsx")
+    ap = argparse.ArgumentParser(description="扫描分片数 → 加工时间，输出 xlsx")
     ap.add_argument("file1", help="叶片文件1（STEP/IGES）")
     ap.add_argument("file2", help="叶片文件2（STEP/IGES）")
     ap.add_argument("--out", required=True, help="输出 xlsx 路径")
     ap.add_argument("--checkpoint", default=None, help="断点检查点 JSON 路径")
-    ap.add_argument("--tolerances", default="0.05,0.1,0.2,0.5", help="容差列表（逗号分隔）")
+    ap.add_argument("--tolerance", type=float, default=0.1, help="拟合容差 mm（固定分片下仅传入，不影响分片数）")
     ap.add_argument("--splits", default="1,1;2,2;3,3;4,4;6,6;8,8;10,10",
                     help="分片列表 u,v 用分号分隔，如 1,1;2,2;3,3")
-    ap.add_argument("--no-refine", action="store_true", default=True,
-                    help="固定分片（不自适应细分），按 nsplit-u/v 指定分片数量")
-    ap.add_argument("--adaptive", dest="no_refine", action="store_false",
-                    help="自适应细分（按容差自动决定分片数）")
     ap.add_argument("--workdir", default=None, help="临时工作目录（默认系统临时目录）")
     args = ap.parse_args()
 
@@ -167,7 +161,6 @@ def main():
         log(f"[ERROR] simple.exe not found: {BUILD_EXE}")
         sys.exit(1)
 
-    tolerances = [float(x) for x in args.tolerances.split(",") if x.strip()]
     splits = []
     for tok in args.splits.split(";"):
         tok = tok.strip()
@@ -185,11 +178,11 @@ def main():
         overhead=mcfg.get("overhead", 4.0),
         point_overhead=mcfg.get("point_overhead", 10.0))
 
-    # 断点重启：合并「已有 xlsx」+「checkpoint」，按 (tolerance, nsplit_u, nsplit_v) 去重，实现追加
+    # 断点重启：合并「已有 xlsx」+「checkpoint」，按 (nsplit_u, nsplit_v) 去重，实现追加
     def key_of(r):
         if r.get("key"):
             return r["key"]
-        return _key(r.get("tolerance"), r.get("nsplit_u"), r.get("nsplit_v"))
+        return _key(r.get("nsplit_u"), r.get("nsplit_v"))
 
     merged = {}
     for r in load_xlsx_rows(args.out):
@@ -210,9 +203,8 @@ def main():
     workdir_base = args.workdir or tempfile.mkdtemp(prefix="sweep_")
     os.makedirs(workdir_base, exist_ok=True)
 
-    total = len(tolerances) * len(splits)
-    log(f"扫描 {len(tolerances)} 容差 × {len(splits)} 分片 = {total} 组合 "
-        f"({'固定分片' if args.no_refine else '自适应细分'})")
+    total = len(splits)
+    log(f"扫描 {total} 种分片（固定分片，容差={args.tolerance}）")
     log(f"simple.exe: {BUILD_EXE}")
 
     def save():
@@ -228,41 +220,39 @@ def main():
             log(f"  [warn] 写 xlsx 失败: {e}")
 
     i = 0
-    for tol in tolerances:
-        for (nu, nv) in splits:
-            key = _key(tol, nu, nv)
-            i += 1
-            if key in done_keys:
-                log(f"[{i}/{total}] skip (已完成): tol={tol} split={nu}x{nv}")
-                continue
-            log(f"[{i}/{total}] tol={tol} split={nu}x{nv} ...")
-            outdir = os.path.join(workdir_base, f"tol{tol}_u{nu}_v{nv}")
-            if os.path.isdir(outdir):
-                shutil.rmtree(outdir, ignore_errors=True)
-            os.makedirs(outdir, exist_ok=True)
+    for (nu, nv) in splits:
+        key = _key(nu, nv)
+        i += 1
+        if key in done_keys:
+            log(f"[{i}/{total}] skip (已完成): split={nu}x{nv}")
+            continue
+        log(f"[{i}/{total}] split={nu}x{nv} ...")
+        outdir = os.path.join(workdir_base, f"u{nu}_v{nv}")
+        if os.path.isdir(outdir):
+            shutil.rmtree(outdir, ignore_errors=True)
+        os.makedirs(outdir, exist_ok=True)
 
-            try:
-                rc = run_fitting(args.file1, args.file2, outdir, tol, nu, nv, args.no_refine)
-            except Exception as e:
-                log(f"  [ERROR] 拟合执行异常: {e}")
-                continue
-            if rc != 0:
-                log(f"  [ERROR] 拟合失败 rc={rc}（不写断点，下次重试）")
-                continue
+        try:
+            rc = run_fitting(args.file1, args.file2, outdir, args.tolerance, nu, nv)
+        except Exception as e:
+            log(f"  [ERROR] 拟合执行异常: {e}")
+            continue
+        if rc != 0:
+            log(f"  [ERROR] 拟合失败 rc={rc}（不写断点，下次重试）")
+            continue
 
-            rec = collect(outdir, mach_args)
-            if rec is None:
-                log("  [ERROR] 未解析到准线文件（不写断点，下次重试）")
-                continue
-            rec["key"] = key
-            rec["tolerance"] = tol
-            rec["nsplit_u"] = nu
-            rec["nsplit_v"] = nv
-            results.append(rec)
-            log(f"  → patches={rec['num_patches']} maxErr={rec['max_error_mm']}mm "
-                f"twist={rec['max_twist_deg']}° flank={rec['flank_total_s']}s "
-                f"point={rec['point_total_s']}s 提速={rec['speedup']}x")
-            save()
+        rec = collect(outdir, mach_args)
+        if rec is None:
+            log("  [ERROR] 未解析到准线文件（不写断点，下次重试）")
+            continue
+        rec["key"] = key
+        rec["nsplit_u"] = nu
+        rec["nsplit_v"] = nv
+        results.append(rec)
+        log(f"  → patches={rec['num_patches']} maxErr={rec['max_error_mm']}mm "
+            f"twist={rec['max_twist_deg']}° flank={rec['flank_total_s']}s "
+            f"point={rec['point_total_s']}s 提速={rec['speedup']}x")
+        save()
 
     log(f"完成。共 {len(results)} 条结果 → {args.out}")
     if args.checkpoint:
