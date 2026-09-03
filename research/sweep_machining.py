@@ -70,14 +70,55 @@ def run_fitting(file1, file2, outdir, tol, nu, nv, ps_ranges=None, face_idx=0):
     return r.returncode
 
 
-def load_split_config(path):
-    """读取 UI 导出的 blade_split.json，返回 (dir, [pressure_suction dict, ...])。"""
+def run_exe_json(args_list):
+    """运行 simple.exe 并从 stdout 解析 JSON（跳过前面的日志行）。"""
+    r = subprocess.run([str(BUILD_EXE)] + args_list, cwd=str(PROJECT_DIR),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=300)
+    s = r.stdout.strip()
+    i = s.find('{')
+    if i >= 0:
+        s = s[i:]
     try:
-        with open(path, encoding="utf-8") as f:
-            cfg = json.load(f)
+        return json.loads(s)
     except Exception:
         return None
-    return cfg.get("dir", "V"), cfg.get("pressure_suction", [])
+
+
+def auto_identify(filepath):
+    """auto-identify 找叶片面，返回 (pressureIndex, suctionIndex)。"""
+    info = run_exe_json([filepath, "--mode", "auto-identify"])
+    if not info or not info.get('success'):
+        return 0, 0
+    return info.get('pressureIndex', 0), info.get('suctionIndex', 0)
+
+
+def split_blade(filepath, face_idx):
+    """split-blade 一个面，返回 (dir, [regions])。"""
+    info = run_exe_json([filepath, "--mode", "split-blade",
+                         "--face-idx", str(face_idx)])
+    if not info or not info.get('success'):
+        return None, []
+    return info.get('dir', 'V'), info.get('regions', [])
+
+
+def identify_ps(regions):
+    """从 split-blade 结果里挑出叶盆/叶背区间，返回 (pressure, suction) 两个 (u_start, u_end)。"""
+    pressure = [r for r in regions if r.get('label') == 'pressure']
+    suction = [r for r in regions if r.get('label') == 'suction']
+    nonedge = [r for r in regions if r.get('label') != 'edge']
+    if not pressure and not suction:
+        # 标签不全时，按宽度取两个非 edge 区间
+        nonedge.sort(key=lambda r: r.get('uEnd', 0) - r.get('uStart', 0), reverse=True)
+        if len(nonedge) >= 2:
+            return (nonedge[0]['uStart'], nonedge[0]['uEnd']), \
+                   (nonedge[1]['uStart'], nonedge[1]['uEnd'])
+        if nonedge:
+            return (nonedge[0]['uStart'], nonedge[0]['uEnd']), None
+        return None, None
+    p = (pressure[0]['uStart'], pressure[0]['uEnd']) if pressure else None
+    s = (suction[0]['uStart'], suction[0]['uEnd']) if suction else None
+    return p, s
 
 
 def read_error_stats(outdir):
@@ -167,16 +208,13 @@ def main():
             sys.stderr.reconfigure(encoding='utf-8', errors='replace')
         except Exception:
             pass
-    ap = argparse.ArgumentParser(description="扫描分片数 → 加工时间，输出 xlsx")
-    ap.add_argument("file1", help="叶片文件1（STEP/IGES）")
-    ap.add_argument("file2", help="叶片文件2（STEP/IGES）")
+    ap = argparse.ArgumentParser(description="单文件叶片：auto-identify→split-blade→拟合扫描，输出 xlsx")
+    ap.add_argument("file", help="叶片文件（单文件，如 blade.igs）")
     ap.add_argument("--out", required=True, help="输出 xlsx 路径")
     ap.add_argument("--checkpoint", default=None, help="断点检查点 JSON 路径")
     ap.add_argument("--tolerance", type=float, default=0.1, help="拟合容差 mm（固定分片下仅传入，不影响分片数）")
     ap.add_argument("--splits", default="1,1;2,2;3,3;4,4;6,6;8,8;10,10",
                     help="分片列表 u,v 用分号分隔，如 1,1;2,2;3,3")
-    ap.add_argument("--split-config", default=None,
-                    help="UI 导出的 blade_split.json 路径（含叶盆/叶背区间，拟合时切除叶缘）")
     ap.add_argument("--workdir", default=None, help="临时工作目录（默认系统临时目录）")
     args = ap.parse_args()
 
@@ -192,23 +230,29 @@ def main():
         u, v = tok.split(",")
         splits.append((int(u), int(v)))
 
-    # 可选：读取 UI 导出的 split 配置，拟合时只取叶盆/叶背区间（切除叶缘/卷曲）
+    # 模拟 UI 手动流程：auto-identify → split-blade → identify pressure/suction，缓存结果
+    log("auto-identify...")
+    pidx, sidx = auto_identify(args.file)
+    log(f"  pressureIndex={pidx} suctionIndex={sidx}")
+
+    split_face_idx = pidx if pidx >= 0 else 0
+    log(f"split-blade face {split_face_idx}...")
+    split_dir, regions = split_blade(args.file, split_face_idx)
+    log(f"  dir={split_dir} regions={len(regions)}")
+    for reg in regions:
+        log(f"    {reg.get('label')} V[{reg.get('uStart')},{reg.get('uEnd')}]")
+
+    pressure, suction = identify_ps(regions)
+    log(f"  pressure={pressure} suction={suction}")
+
     ps_ranges = None
-    split_face_idx = 0
-    if args.split_config:
-        sc = load_split_config(args.split_config)
-        if sc:
-            dir_, ps = sc
-            split_face_idx = sc.get("face_idx", 0)
-            pressure = next((p for p in ps if p.get("label") == "pressure"), None)
-            suction = next((p for p in ps if p.get("label") == "suction"), None)
-            r1 = (dir_, [(pressure["u_start"], pressure["u_end"])]) if pressure else (dir_, [])
-            r2 = (dir_, [(suction["u_start"], suction["u_end"])]) if suction else (dir_, [])
-            ps_ranges = [r1, r2]
-            log(f"读取 split 配置: face={split_face_idx} dir={dir_} "
-                f"pressure={pressure} suction={suction}")
-        else:
-            log(f"[warn] 无法读取 split 配置: {args.split_config}")
+    if pressure or suction:
+        ps_ranges = [
+            (split_dir, [pressure] if pressure else []),
+            (split_dir, [suction] if suction else []),
+        ]
+    else:
+        log("  未识别到叶盆/叶背区间，将拟合整面")
 
     mcfg = cm.load_config()
     mach_args = argparse.Namespace(
@@ -274,7 +318,7 @@ def main():
         os.makedirs(outdir, exist_ok=True)
 
         try:
-            rc = run_fitting(args.file1, args.file2, outdir, args.tolerance, nu, nv,
+            rc = run_fitting(args.file, args.file, outdir, args.tolerance, nu, nv,
                              ps_ranges, split_face_idx)
         except Exception as e:
             log(f"  [ERROR] 拟合执行异常: {e}")
