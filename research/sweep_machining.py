@@ -180,9 +180,13 @@ def write_xlsx(rows, out_path):
 
 
 def add_charts(out_path):
-    """在 xlsx 里加图表：提速 vs 总分片数、误差 vs 总分片数。"""
+    """用 matplotlib 生成 PNG 图表并嵌入 xlsx（样式完全可控，无图例重叠问题）。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
     import openpyxl
-    from openpyxl.chart import LineChart, Reference
+    from openpyxl.drawing.image import Image as XLImage
+
     try:
         wb = openpyxl.load_workbook(out_path)
     except Exception:
@@ -190,9 +194,6 @@ def add_charts(out_path):
     ws = wb.active
     if ws.max_row < 2:
         return
-
-    if "charts" in wb.sheetnames:
-        del wb["charts"]
 
     headers = [c.value for c in ws[1]]
     rows = [list(r) for r in ws.iter_rows(min_row=2, values_only=True)]
@@ -203,44 +204,47 @@ def add_charts(out_path):
                     ("max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm")]
     except ValueError:
         return
-    rows.sort(key=lambda r: r[x_idx] if r[x_idx] is not None else 0)
 
-    cs = wb.create_sheet("charts")
-    cs.append(headers)
-    for r in rows:
-        cs.append(r)
+    data = sorted((r for r in rows if r[x_idx] is not None),
+                  key=lambda r: r[x_idx])
+    totals = [r[x_idx] for r in data]
+    speedup = [r[speedup_idx] for r in data]
 
-    # 图1：提速 vs 总分片数（纯折线）
-    c1 = LineChart()
-    c1.title = "Speedup vs Total Patches"
-    c1.y_axis.title = "Speedup"
-    c1.x_axis.title = "Total Patches"
-    c1.width = 22
-    c1.height = 11
-    c1.x_axis.tickLblSkip = 5
-    c1.x_axis.tickMarkSkip = 5
-    ref_x = Reference(cs, min_col=x_idx + 1, min_row=2, max_row=cs.max_row)
-    ref_y = Reference(cs, min_col=speedup_idx + 1, min_row=1, max_row=cs.max_row)
-    c1.add_data(ref_y, titles_from_data=True)
-    c1.set_categories(ref_x)
-    cs.add_chart(c1, "A" + str(cs.max_row + 3))
+    tmp = os.path.join(tempfile.gettempdir(), "sweep_charts")
+    os.makedirs(tmp, exist_ok=True)
 
-    # 图2：误差 vs 总分片数
-    c2 = LineChart()
-    c2.title = "Error vs Total Patches"
-    c2.y_axis.title = "Error (mm)"
-    c2.x_axis.title = "Total Patches"
-    c2.width = 22
-    c2.height = 11
-    c2.x_axis.tickLblSkip = 5
-    c2.x_axis.tickMarkSkip = 5
-    ref_x2 = Reference(cs, min_col=x_idx + 1, min_row=2, max_row=cs.max_row)
+    # 图1：提速 vs 总分片数（单色折线，无图例）
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
+    ax.plot(totals, speedup, color="#1f77b4", linewidth=1.6)
+    ax.set_xlabel("Total Patches")
+    ax.set_ylabel("Speedup")
+    ax.set_title("Speedup vs Total Patches")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    p1 = os.path.join(tmp, "speedup.png")
+    fig.savefig(p1)
+    plt.close(fig)
+
+    # 图2：误差 vs 总分片数（4 条误差曲线，带图例）
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
     for ci in err_cols:
-        ref = Reference(cs, min_col=ci + 1, min_row=1, max_row=cs.max_row)
-        c2.add_data(ref, titles_from_data=True)
-    c2.set_categories(ref_x2)
-    cs.add_chart(c2, "A" + str(cs.max_row + 22))
+        ys = [r[ci] for r in data]
+        ax.plot(totals, ys, linewidth=1.3, label=headers[ci])
+    ax.set_xlabel("Total Patches")
+    ax.set_ylabel("Error (mm)")
+    ax.set_title("Error vs Total Patches")
+    ax.legend(fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    p2 = os.path.join(tmp, "error.png")
+    fig.savefig(p2)
+    plt.close(fig)
 
+    if "charts" in wb.sheetnames:
+        del wb["charts"]
+    cs = wb.create_sheet("charts")
+    cs.add_image(XLImage(p1), "A1")
+    cs.add_image(XLImage(p2), "A22")
     wb.save(out_path)
 
 
