@@ -33,7 +33,7 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 BUILD_EXE = PROJECT_DIR / "build" / "Release" / "simple.exe"
 
 HEADERS = [
-    "tolerance", "nsplit_u", "nsplit_v", "num_patches", "flank_regions",
+    "nsplit_u", "nsplit_v", "num_patches", "flank_regions",
     "max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm",
     "max_twist_deg",
     "flank_cut_s", "flank_overhead_s", "flank_total_s",
@@ -176,6 +176,62 @@ def write_xlsx(rows, out_path):
     ws.append(HEADERS)
     for r in rows:
         ws.append([r.get(h) for h in HEADERS])
+    wb.save(out_path)
+
+
+def add_charts(out_path):
+    """在 xlsx 里加图表：提速 vs 面片数、误差 vs 面片数。"""
+    import openpyxl
+    from openpyxl.chart import LineChart, Reference
+    try:
+        wb = openpyxl.load_workbook(out_path)
+    except Exception:
+        return
+    ws = wb.active
+    if ws.max_row < 2:
+        return
+
+    headers = [c.value for c in ws[1]]
+    rows = [list(r) for r in ws.iter_rows(min_row=2, values_only=True)]
+    try:
+        num_idx = headers.index("num_patches")
+        speedup_idx = headers.index("speedup")
+        err_cols = [headers.index(x) for x in
+                    ("max_error_mm", "mean_error_mm", "q95_error_mm", "rms_error_mm")]
+    except ValueError:
+        return
+    rows.sort(key=lambda r: r[num_idx] if r[num_idx] is not None else 0)
+
+    cs = wb.create_sheet("charts")
+    cs.append(headers)
+    for r in rows:
+        cs.append(r)
+
+    # 图1：提速 vs 面片数
+    c1 = LineChart()
+    c1.title = "Speedup vs Num Patches"
+    c1.y_axis.title = "Speedup"
+    c1.x_axis.title = "Num Patches"
+    c1.style = 2
+    ref_x = Reference(cs, min_col=num_idx + 1, min_row=2, max_row=cs.max_row)
+    ref_y = Reference(cs, min_col=speedup_idx + 1, min_row=1, max_row=cs.max_row)
+    c1.add_data(ref_y, titles_from_data=True)
+    c1.set_categories(ref_x)
+    cs.add_chart(c1, "A" + str(cs.max_row + 3))
+
+    # 图2：误差 vs 面片数
+    c2 = LineChart()
+    c2.title = "Error vs Num Patches"
+    c2.y_axis.title = "Error (mm)"
+    c2.x_axis.title = "Num Patches"
+    c2.style = 2
+    ref_x2 = Reference(cs, min_col=num_idx + 1, min_row=2, max_row=cs.max_row)
+    for ci in err_cols:
+        ref = Reference(cs, min_col=ci + 1, min_row=1, max_row=cs.max_row)
+        c2.add_data(ref, titles_from_data=True)
+    c2.set_categories(ref_x2)
+    cs.add_chart(c2, "A" + str(cs.max_row + 22))
+
     wb.save(out_path)
 
 
@@ -340,6 +396,7 @@ def main():
             f"point={rec['point_total_s']}s 提速={rec['speedup']}x")
         save()
 
+    add_charts(args.out)
     log(f"完成。共 {len(results)} 条结果 → {args.out}")
     if args.checkpoint:
         log(f"断点文件 → {args.checkpoint}")
