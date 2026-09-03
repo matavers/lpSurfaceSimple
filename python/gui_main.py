@@ -1518,6 +1518,22 @@ class MainWindow(QMainWindow):
             self._cmb_face1.addItem(f"Face{kept[0]['face_idx']}-split-{kept[0]['sub_idx']} {kept[0]['label']}",
                                     kept[0])
             self._log(f"  Only one side found: {self._cmb_face1.currentText()}")
+
+        # 导出 split 结果到 output（供 sweep 等复用），无需开关
+        try:
+            dir_ = self._split_items[0].get('dir', 'V') if self._split_items else 'V'
+            ps = [{"u_start": si["u_start"], "u_end": si["u_end"], "label": si["label"]}
+                  for si in kept]
+            cfg = {"face_idx": getattr(self, "_split_face_idx", 0), "dir": dir_,
+                   "pressure_suction": ps}
+            out_split = os.path.join(self._out_dir, "blade_split.json")
+            os.makedirs(self._out_dir, exist_ok=True)
+            with open(out_split, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=1)
+            self._log(f"  Exported split result: {out_split}")
+        except Exception as e:
+            self._log(f"  [Error] export split result: {e}")
+
         self._refocus_camera()
         self._log(f"  Ready. Click Run to process.")
 
