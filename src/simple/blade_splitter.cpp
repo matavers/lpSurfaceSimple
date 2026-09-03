@@ -68,17 +68,16 @@ BladeSplitResult splitBladeFaceBySection(
     // 切分点 = 曲率急剧下降的起点（进入谷）与急剧上升的终点（离开谷），而非峰谷中点。
     auto vOf = [&](int i) { return vMin + vRng * (double)i / (nPts - 1.0); };
 
-    double thDrop = (mx - mn) * 0.15;
-    const int margin = 1;   // 切点向外扩 margin 个采样，微微加大叶缘切除范围
+    double thDrop = (mx - mn) * 0.10;   // 阈值调小 → 更早识别曲率下降，切除范围更大
     std::vector<double> bp;
     for (int i = 0; i < nPts; ++i) {
         double prv = sm[(i - 1 + nPts) % nPts];
         double cur = sm[i];
         double nxt = sm[(i + 1) % nPts];
-        if (prv - cur > thDrop)             // 骤降：谷起点，向外扩 margin
-            bp.push_back(vOf((i - margin + nPts) % nPts));
-        if (nxt - cur > thDrop)             // 骤升：谷终点，向外扩 margin
-            bp.push_back(vOf((i + 1 + margin) % nPts));
+        if (prv - cur > thDrop)             // 骤降：谷起点
+            bp.push_back(vOf(i));
+        if (nxt - cur > thDrop)             // 骤升：谷终点
+            bp.push_back(vOf((i + 1) % nPts));
     }
     std::sort(bp.begin(), bp.end());
     std::vector<double> bpu;
