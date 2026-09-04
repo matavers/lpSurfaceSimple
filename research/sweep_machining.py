@@ -238,15 +238,19 @@ def add_charts(out_path):
     fig.savefig(p2)
     plt.close(fig)
 
-    # 图3：提速 vs 平均误差（权衡关系，红虚线=提速1，绿虚线=容差0.1mm）
+    # 图3：提速 vs 平均误差（侧铣 vs 点铣基线）
     fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
     mean_err = [r[headers.index("mean_error_mm")] for r in data]
-    ax.scatter(mean_err, speedup, color="#1f77b4", s=18)
-    ax.axhline(1.0, color="red", linestyle="--", linewidth=1, label="speedup=1 (不更慢)")
-    ax.axvline(0.1, color="green", linestyle=":", linewidth=1, label="tolerance 0.1mm")
+    ax.scatter(mean_err, speedup, color="#1f77b4", s=18, label="侧铣(直纹面拟合)")
+    mcfg = cm.load_config()
+    scallop = mcfg.get("scallop", 0.1)
+    ax.scatter([scallop], [1.0], color="red", marker="*", s=200, zorder=5,
+               label=f"点铣基线(残留{scallop}mm, 提速1)")
+    ax.axhline(1.0, color="red", linestyle="--", linewidth=1, alpha=0.6)
+    ax.axvline(scallop, color="green", linestyle=":", linewidth=1, alpha=0.6)
     ax.set_xlabel("Mean Error (mm)")
     ax.set_ylabel("Speedup")
-    ax.set_title("Speedup vs Mean Error")
+    ax.set_title("Speedup vs Mean Error (flank vs point)")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
     fig.tight_layout()
