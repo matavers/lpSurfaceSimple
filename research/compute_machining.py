@@ -134,6 +134,19 @@ def mesh_area(verts, faces):
         area += 0.5 * _norm(_cross(_sub(b, a), _sub(c, a)))
     return area
 
+def read_original_area(input_dir):
+    """读取原始 NURBS 采样网格（blade*_mesh.obj）的总面积，用于点铣基线 B。
+    找不到网格时返回 None。"""
+    files = sorted(Path(input_dir).glob("blade*_mesh.obj"))
+    if not files:
+        return None
+    total = 0.0
+    for fp in files:
+        verts, faces = load_obj(fp)
+        if verts and faces:
+            total += mesh_area(verts, faces)
+    return total if total > 0 else None
+
 def curve_length(C):
     return sum(_norm(_sub(C[i + 1], C[i])) for i in range(len(C) - 1))
 
@@ -583,6 +596,8 @@ def compute(input_dir, args):
     flips = _blade_normal_flips(patches)
     for p in patches:
         p.normal_flip = flips.get(p.blade, 1.0)
+    # 原始 NURBS 面积，供点铣基线 B 使用
+    args.original_area = read_original_area(input_dir)
     return patches
 
 def summarize(patches, args):
@@ -597,7 +612,13 @@ def summarize(patches, args):
     flank_overhead = n_flank_regions * args.overhead
     flank_total = flank_cut + flank_overhead
 
-    point_cut = sum(p.point_time for p in patches)   # 基线：整体点铣
+    # B 点铣基线：用原始 NURBS 网格面积（传统做法不拟合原曲面），行距与 A 同精度
+    orig_area = getattr(args, 'original_area', None)
+    stepover = 2.0 * math.sqrt(max(0.0, 2.0 * args.ball_r * args.scallop - args.scallop ** 2))
+    if orig_area and stepover > 0:
+        point_cut = orig_area / stepover / args.feed * 60.0
+    else:
+        point_cut = sum(p.point_time for p in patches)   # 兜底：拟合面面积
     point_overhead = getattr(args, 'point_overhead', 10.0)
     point_total = point_cut + point_overhead
     total_area = sum(p.area for p in patches)
@@ -605,6 +626,7 @@ def summarize(patches, args):
         "num_patches": len(patches),
         "flank_regions": n_flank_regions,
         "total_area": total_area,
+        "original_area": orig_area,
         "flank": {
             "cut": flank_cut,
             "overhead": flank_overhead,
@@ -627,7 +649,9 @@ def print_report(patches, args, summary):
               f"{p.directrix_len:>9.1f}{p.mean_ruling:>9.1f}"
               f"{p.flank_time:>9.2f}{p.point_time:>9.2f}")
     print("-" * 96)
-    print(f"侧铣连通域 {summary.get('flank_regions', 0)}  总曲面面积: {summary['total_area']:.1f} mm^2")
+    print(f"侧铣连通域 {summary.get('flank_regions', 0)}  "
+          f"拟合面面积: {summary['total_area']:.1f} mm^2  "
+          f"原曲面面积: {summary.get('original_area') or 0.0:.1f} mm^2")
     twists = sorted((p.twist for p in patches), reverse=True)
     if twists:
         print(f"扭转角分布(deg): max={twists[0]:.2f}  "
