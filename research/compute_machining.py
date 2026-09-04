@@ -375,6 +375,35 @@ def write_vtk_polylines(path, lines):
         for a, b in segs:
             f.write(f"2 {a} {b}\n")
 
+def write_lines_csv(path, lines):
+    """把多条折线写成通用 CSV（line_id,point_idx,x,y,z），任何软件都能读。"""
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write("line_id,point_idx,x,y,z\n")
+        for li, line in enumerate(lines):
+            for pi, p in enumerate(line):
+                f.write(f"{li},{pi},{p[0]:.6f},{p[1]:.6f},{p[2]:.6f}\n")
+
+def export_toolpaths(out_dir, patches, args):
+    """导出刀轨数据（VTK + CSV），供 ParaView 等工业软件可视化。"""
+    tool_r = getattr(args, 'tool_r', None) or 5.0
+    ball_r = args.ball_r
+    stepover = 2.0 * math.sqrt(max(0.0, 2.0 * ball_r * args.scallop - args.scallop ** 2))
+    os.makedirs(out_dir, exist_ok=True)
+
+    flank_lines, point_lines = [], []
+    for p in patches:
+        feed, axes = flank_cl_lines(p.C0, p.C1, tool_r, flip=p.normal_flip)
+        if len(feed) >= 2:
+            flank_lines.append(feed)
+        flank_lines.extend(axes)
+        point_lines.extend(point_cl_lines(p.C0, p.C1, stepover, ball_r, flip=p.normal_flip))
+
+    write_vtk_polylines(os.path.join(out_dir, "toolpath_flank.vtk"), flank_lines)
+    write_lines_csv(os.path.join(out_dir, "toolpath_flank.csv"), flank_lines)
+    write_vtk_polylines(os.path.join(out_dir, "toolpath_point.vtk"), point_lines)
+    write_lines_csv(os.path.join(out_dir, "toolpath_point.csv"), point_lines)
+    return os.path.abspath(out_dir)
+
 # ===================== 数据模型 =====================
 
 @dataclass

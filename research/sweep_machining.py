@@ -238,11 +238,28 @@ def add_charts(out_path):
     fig.savefig(p2)
     plt.close(fig)
 
+    # 图3：提速 vs 平均误差（权衡关系，红虚线=提速1，绿虚线=容差0.1mm）
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
+    mean_err = [r[headers.index("mean_error_mm")] for r in data]
+    ax.scatter(mean_err, speedup, color="#1f77b4", s=18)
+    ax.axhline(1.0, color="red", linestyle="--", linewidth=1, label="speedup=1 (不更慢)")
+    ax.axvline(0.1, color="green", linestyle=":", linewidth=1, label="tolerance 0.1mm")
+    ax.set_xlabel("Mean Error (mm)")
+    ax.set_ylabel("Speedup")
+    ax.set_title("Speedup vs Mean Error")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    p3 = os.path.join(tmp, "speedup_vs_error.png")
+    fig.savefig(p3)
+    plt.close(fig)
+
     if "charts" in wb.sheetnames:
         del wb["charts"]
     cs = wb.create_sheet("charts")
     cs.add_image(XLImage(p1), "A1")
     cs.add_image(XLImage(p2), "A22")
+    cs.add_image(XLImage(p3), "H1")
     wb.save(out_path)
 
 

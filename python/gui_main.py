@@ -194,6 +194,12 @@ class ToolpathWorker(QThread):
                 point_lines.extend(
                     _cm.point_cl_lines(pp.C0, pp.C1, stepover, self._args.ball_r,
                                        flip=pp.normal_flip))
+            # 导出刀轨数据（VTK + CSV），供工业软件可视化
+            try:
+                tp_dir = os.path.join(self._out_dir, "toolpath")
+                _cm.export_toolpaths(tp_dir, patches, self._args)
+            except Exception:
+                pass
             self.done.emit((patches, summary,
                             _build_line_arrays(feed_lines),
                             _build_line_arrays(axis_segs),
