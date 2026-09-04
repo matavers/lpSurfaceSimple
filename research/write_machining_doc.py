@@ -117,6 +117,14 @@ def main():
     ]:
         doc.add_paragraph(s, style="List Bullet")
 
+    doc.add_heading("9. 算法输入与输出", level=1)
+    for s in [
+        "输入：文件 *_params.txt，数学格式：B 样条曲线的定义参数。",
+        "输出：文件 toolpath_*.csv、toolpath_*.vtk、toolpath_*.dxf。",
+        "备注：csv 文件用于绘制折线，vtk 文件用于 ParaView 可视化，dxf 文件可直接导入 NX。",
+    ]:
+        doc.add_paragraph(s, style="List Bullet")
+
     doc.save(out)
     print(f"[doc] -> {out}")
 

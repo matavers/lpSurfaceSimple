@@ -383,6 +383,20 @@ def write_lines_csv(path, lines):
             for pi, p in enumerate(line):
                 f.write(f"{li},{pi},{p[0]:.6f},{p[1]:.6f},{p[2]:.6f}\n")
 
+def write_lines_dxf(path, lines):
+    """把多条折线写成 DXF（3D POLYLINE），NX/AutoCAD 可直接导入。"""
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write("0\nSECTION\n2\nENTITIES\n")
+        for line in lines:
+            if len(line) < 2:
+                continue
+            f.write("0\nPOLYLINE\n8\n0\n66\n1\n70\n8\n")
+            for p in line:
+                f.write("0\nVERTEX\n8\n0\n")
+                f.write(f"10\n{p[0]:.6f}\n20\n{p[1]:.6f}\n30\n{p[2]:.6f}\n")
+            f.write("0\nSEQEND\n")
+        f.write("0\nENDSEC\n0\nEOF\n")
+
 def export_toolpaths(out_dir, patches, args):
     """导出刀轨数据（VTK + CSV），供 ParaView 等工业软件可视化。"""
     tool_r = getattr(args, 'tool_r', None) or 5.0
@@ -400,8 +414,10 @@ def export_toolpaths(out_dir, patches, args):
 
     write_vtk_polylines(os.path.join(out_dir, "toolpath_flank.vtk"), flank_lines)
     write_lines_csv(os.path.join(out_dir, "toolpath_flank.csv"), flank_lines)
+    write_lines_dxf(os.path.join(out_dir, "toolpath_flank.dxf"), flank_lines)
     write_vtk_polylines(os.path.join(out_dir, "toolpath_point.vtk"), point_lines)
     write_lines_csv(os.path.join(out_dir, "toolpath_point.csv"), point_lines)
+    write_lines_dxf(os.path.join(out_dir, "toolpath_point.dxf"), point_lines)
     return os.path.abspath(out_dir)
 
 # ===================== 数据模型 =====================
