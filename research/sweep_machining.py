@@ -182,6 +182,12 @@ def add_charts(out_path):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+    for _f in ["Microsoft YaHei", "SimHei", "SimSun"]:
+        if any(f.name == _f for f in font_manager.fontManager.ttflist):
+            plt.rcParams["font.sans-serif"] = [_f]
+            break
+    plt.rcParams["axes.unicode_minus"] = False
     import openpyxl
     from openpyxl.drawing.image import Image as XLImage
 

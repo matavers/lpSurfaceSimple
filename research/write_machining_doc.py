@@ -27,9 +27,29 @@ def main():
 
     from docx import Document
     from docx.shared import Pt
+    from docx.oxml.ns import qn
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     doc = Document()
+
+    # 论文格式：正文宋体+Times New Roman 小四(12pt)，标题黑体
+    def set_style_font(style, latin, east, size=None, bold=None):
+        style.font.name = latin
+        if size is not None:
+            style.font.size = Pt(size)
+        if bold is not None:
+            style.font.bold = bold
+        rpr = style.element.get_or_add_rPr()
+        rfonts = rpr.get_or_add_rFonts()
+        rfonts.set(qn('w:eastAsia'), east)
+
+    set_style_font(doc.styles['Normal'], 'Times New Roman', '宋体', 12)
+    for hname, hsize in [('Title', 16), ('Heading 1', 14), ('Heading 2', 12)]:
+        try:
+            set_style_font(doc.styles[hname], 'Times New Roman', '黑体', hsize, True)
+        except Exception:
+            pass
+
     doc.add_heading("直纹面拟合叶片加工仿真说明", level=0)
 
     doc.add_heading("1. 概述", level=1)
