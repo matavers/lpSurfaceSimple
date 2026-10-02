@@ -418,6 +418,37 @@ class SweepWorker(QThread):
         self._stop = True
 
 
+class ContinuousToolpathWorker(QThread):
+    """后台运行 toolpath_continuous.py（连续刀轨计算，完整版）。"""
+    done = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, out_dir):
+        super().__init__()
+        self._out_dir = out_dir
+
+    def run(self):
+        try:
+            script = str(PROJECT_DIR / "research" / "toolpath_continuous.py")
+            models = [os.path.join(self._out_dir, fn)
+                      for fn in sorted(os.listdir(self._out_dir))
+                      if fn.endswith("_surface_model.json")]
+            if not models:
+                self.failed.emit("未找到 *_surface_model.json（请先在拟合工作台开启过渡面并运行拟合）")
+                return
+            for mp in models:
+                r = subprocess.run(
+                    [sys.executable, script, mp, "--out", self._out_dir],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=1200)
+                if r.returncode != 0:
+                    self.failed.emit((r.stderr or r.stdout or "").strip()[-600:])
+                    return
+            self.done.emit(self._out_dir)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -963,26 +994,29 @@ class MainWindow(QMainWindow):
             self._plotter.render()
 
     def _on_compute_tool(self):
-        if not HAS_MACHINING or not HAS_PYVISTA:
-            QMessageBox.warning(self, "Error", "加工仿真模块或 pyvista 不可用。")
+        if not HAS_PYVISTA:
+            QMessageBox.warning(self, "Error", "pyvista 不可用。")
             return
         if self._tool_worker and self._tool_worker.isRunning():
-            self._log("[Machining] 刀具计算进行中，请稍候。")
+            self._log("[Machining] 连续刀轨计算进行中，请稍候。")
             return
         out_dir = self._out_dir
-        if not os.path.isdir(out_dir) or not list(Path(out_dir).glob("*_params.txt")):
-            QMessageBox.warning(self, "Error", "请先在拟合工作台运行拟合，生成 *_params.txt。")
+        if not os.path.isdir(out_dir) or not list(Path(out_dir).glob("*_surface_model.json")):
+            QMessageBox.warning(self, "Error", "请先在拟合工作台开启「过渡面」并运行拟合，生成 *_surface_model.json。")
             return
-        if self._chk_use_cpp.isChecked():
-            self._run_tool_cpp(out_dir)
-            return
-        args = self._mach_args()
         self._btn_tool.setEnabled(False)
-        self._log("[Machining] 刀具计算中（Python，后台线程）...")
-        self._tool_worker = ToolpathWorker(out_dir, args)
-        self._tool_worker.done.connect(self._on_tool_computed)
+        self._log("[Machining] 连续刀轨计算中（toolpath_continuous.py）...")
+        self._tool_worker = ContinuousToolpathWorker(out_dir)
+        self._tool_worker.done.connect(self._on_tool_computed_continuous)
         self._tool_worker.failed.connect(self._on_tool_failed)
         self._tool_worker.start()
+
+    def _on_tool_computed_continuous(self, out_dir):
+        self._btn_tool.setEnabled(True)
+        self._log("[Machining] 连续刀轨计算完成。")
+        self._load_all_objs()
+        self._build_tree()
+        self._apply_visibility()
 
     def _on_tool_failed(self, msg):
         self._btn_tool.setEnabled(True)
