@@ -480,6 +480,69 @@ def flank_quality_stats(patches, tool_r):
         "twist": dist_stats([p.twist for p in patches]),
     }
 
+def optimize_tool_axes_global(patches, tool_r, w_smooth=0.5, maxiter=100, n_along=20):
+    """全局刀轴场优化（离散近似方案 v2 的 J = ∫[w0·e² + w2·‖T'‖²]）：
+      联合最小化 点-轴残差² + w_smooth·相邻刀轴夹角²。
+      变量 = 每个非可展格刀轴在共轭最优方向切平面内的 2 个扰动角；可展格固定。
+      用 scipy L-BFGS-B 求解，无需 CasADi 依赖。"""
+    import numpy as np
+    try:
+        from scipy.optimize import minimize
+    except Exception:
+        return
+    nondev = [p for p in patches
+              if p.row >= 0 and p.col >= 0 and not p.developable and p.tool_axis is not None]
+    if len(nondev) < 1:
+        return
+    by_key = {(p.blade, p.row, p.col): p for p in patches if p.row >= 0 and p.col >= 0}
+    bases = {}
+    for p in nondev:
+        T = np.array(p.tool_axis, float)
+        ref = np.array([1.0, 0.0, 0.0]) if abs(T[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        e1 = np.cross(T, ref)
+        e1 = e1 / np.linalg.norm(e1)
+        e2 = np.cross(T, e1)
+        bases[(p.blade, p.row, p.col)] = (T, e1, e2)
+    keys = list(bases.keys())
+    x0 = np.zeros(2 * len(keys))
+
+    def decode(x):
+        Tmap = {}
+        for k, key in enumerate(keys):
+            T0, e1, e2 = bases[key]
+            a, b = x[2 * k], x[2 * k + 1]
+            T = T0 + a * e1 + b * e2
+            T = T / np.linalg.norm(T)
+            Tmap[key] = T
+        return Tmap
+
+    def objective(x):
+        Tmap = decode(x)
+        cost = 0.0
+        for key in keys:
+            p = by_key[key]
+            T = tuple(float(v) for v in Tmap[key])
+            for r in flank_residuals(p.C0, p.C1, tool_r, flip=p.normal_flip, T=T, n_along=n_along):
+                cost += r * r
+        for (blade, row, col) in keys:
+            Ti = Tmap[(blade, row, col)]
+            for dr, dc in ((0, 1), (1, 0)):
+                q = by_key.get((blade, row + dr, col + dc))
+                if q is None or q.tool_axis is None:
+                    continue
+                Tj = np.array(q.tool_axis, float)
+                if np.dot(Ti, Tj) < 0:
+                    Tj = -Tj
+                cost += w_smooth * float(np.sum((Ti - Tj) ** 2))
+        return cost
+
+    res = minimize(objective, x0, method='L-BFGS-B',
+                   options={'maxiter': maxiter, 'ftol': 1e-6})
+    Tmap = decode(res.x)
+    for key in keys:
+        by_key[key].tool_axis = tuple(float(v) for v in Tmap[key])
+    return True
+
 def point_quality_stats(patches, scallop, ball_r):
     """点铣（常规球头刀行切）质量统计：残留高度/行距/总行数/总刀轨长。
     点铣加工误差即残留高度（相邻行之间的残脊高度）。"""
@@ -847,11 +910,14 @@ def compute(input_dir, args):
     flips = _blade_normal_flips(patches)
     for p in patches:
         p.normal_flip = flips.get(p.blade, 1.0)
-    # 弱共轭最优刀轴（分片），再跨格光顺得到连续刀轴场
+    # 弱共轭最优刀轴（分片），再做全局刀轴场优化（联合最小化残差 + 光顺）
     for p in patches:
         p.tool_axis = conjugate_tool_axis(p.C0, p.C1)
     args.tool_axis_disc_before = tool_axis_discontinuity_deg(patches)
-    smooth_tool_axes(patches, iterations=2)
+    w_smooth = getattr(args, 'w_smooth', 0.5)
+    r = optimize_tool_axes_global(patches, getattr(args, 'tool_r', args.ball_r), w_smooth=w_smooth)
+    if r is None:
+        smooth_tool_axes(patches, iterations=2)  # scipy 不可用时的兜底
     args.tool_axis_disc_after = tool_axis_discontinuity_deg(patches)
     # 严谨侧铣误差：用光顺后的刀轴场计算点-轴距离残差
     for p in patches:
