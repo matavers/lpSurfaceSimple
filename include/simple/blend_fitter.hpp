@@ -43,4 +43,11 @@ bool exportTransitionBandVTK(const std::string& path,
                              const BlendConfig& cfg,
                              int nPerEdge = 40);
 
+// 导出「完整曲面模型」到 JSON，供外部（Python/CasADi）精确重建 C^k 曲面：
+// 网格 (uEdges/vEdges/fitDir)、每格直纹准线 B 样条（控制点+节点+次数）、
+// 单位分解函数参数（bandWidth/continuity）。保证曲面被完整、可微地导出。
+bool exportSurfaceModelJson(const std::string& path,
+                            const GridResult& gr,
+                            const BlendConfig& cfg);
+
 } // namespace simple

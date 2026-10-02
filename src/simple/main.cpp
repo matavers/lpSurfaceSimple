@@ -1001,7 +1001,11 @@ int main(int argc, char* argv[]) {
     if (doBlend && !isPlanar) {
         exportTransitionBandVTK(outDir + "/blade1_transition_band.vtk", gr1, bcfg);
         exportTransitionBandVTK(outDir + "/blade2_transition_band.vtk", gr2, bcfg);
-        std::cout << "  wrote transition band VTKs (retracted core boundaries)" << std::endl;
+        exportSurfaceModelJson(outDir + "/blade1_surface_model.json", gr1, bcfg);
+        exportSurfaceModelJson(outDir + "/blade2_surface_model.json", gr2, bcfg);
+        std::cout << "  wrote transition band VTKs + surface model JSONs "
+                  << "(complete C^k surface, partition function + ruled B-splines)"
+                  << std::endl;
     }
 
     {

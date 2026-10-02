@@ -2,11 +2,17 @@
 
 #include "simple/ruled_fitter.hpp"
 
+#include <Geom_BSplineCurve.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+
 #include <cmath>
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <sstream>
 
 namespace simple {
 
@@ -225,6 +231,74 @@ bool exportTransitionBandVTK(const std::string& path,
             out << "2 " << (base + i) << " " << (base + i + 1) << "\n";
         base += static_cast<int>(L.pts.size());
     }
+    return true;
+}
+
+namespace {
+
+std::string bsplineToJson(const Handle(Geom_BSplineCurve)& c) {
+    std::ostringstream o;
+    o << std::fixed << std::setprecision(12);
+    if (c.IsNull()) return "{\"degree\":0,\"knots\":[],\"ctrl\":[]}";
+    int degree = c->Degree();
+    int nCtrl = c->NbPoles();
+    TColgp_Array1OfPnt poles(1, nCtrl);
+    c->Poles(poles);
+    int nKnots = c->NbKnots();
+    TColStd_Array1OfReal knots(1, nKnots);
+    c->Knots(knots);
+    TColStd_Array1OfInteger mults(1, nKnots);
+    c->Multiplicities(mults);
+    o << "{\"degree\":" << degree << ",\"knots\":[";
+    bool first = true;
+    for (int k = 1; k <= nKnots; ++k) {
+        for (int m = 0; m < mults(k); ++m) {
+            if (!first) o << ",";
+            first = false;
+            o << knots(k);
+        }
+    }
+    o << "],\"ctrl\":[";
+    first = true;
+    for (int i = 1; i <= nCtrl; ++i) {
+        if (!first) o << ",";
+        first = false;
+        o << "[" << poles(i).X() << "," << poles(i).Y() << "," << poles(i).Z() << "]";
+    }
+    o << "]}";
+    return o.str();
+}
+
+} // namespace
+
+bool exportSurfaceModelJson(const std::string& path,
+                            const GridResult& gr,
+                            const BlendConfig& cfg) {
+    std::ofstream o(path);
+    if (!o) return false;
+    o << std::fixed << std::setprecision(12);
+    o << "{\"name\":\"" << gr.name << "\"";
+    o << ",\"nRows\":" << gr.nRows << ",\"nCols\":" << gr.nCols;
+    o << ",\"fitDir\":\"" << (gr.fitDir == ParamDir::U ? "U" : "V") << "\"";
+    o << ",\"uEdges\":[";
+    for (size_t i = 0; i < gr.uEdges.size(); ++i) { if (i) o << ","; o << gr.uEdges[i]; }
+    o << "],\"vEdges\":[";
+    for (size_t i = 0; i < gr.vEdges.size(); ++i) { if (i) o << ","; o << gr.vEdges[i]; }
+    o << "],\"partition\":{\"type\":\"smootherstep\",\"bandWidth\":" << cfg.bandWidth
+      << ",\"continuity\":" << cfg.continuity << "}";
+    o << ",\"cells\":[";
+    bool firstCell = true;
+    for (const auto& c : gr.cells) {
+        if (!firstCell) o << ",";
+        firstCell = false;
+        o << "{\"row\":" << c.row << ",\"col\":" << c.col;
+        o << ",\"u0\":" << c.u0 << ",\"u1\":" << c.u1;
+        o << ",\"v0\":" << c.v0 << ",\"v1\":" << c.v1;
+        o << ",\"c0\":" << bsplineToJson(c.ruled.curveC0);
+        o << ",\"c1\":" << bsplineToJson(c.ruled.curveC1);
+        o << "}";
+    }
+    o << "]}";
     return true;
 }
 
