@@ -306,11 +306,23 @@ def _optimal_tool_axis(normals):
     _w, V = np.linalg.eigh(C)
     return tuple(float(V[k, 0]) for k in range(3))
 
-def flank_cl_rigorous(C0, C1, tool_r, flip=1.0, n_along=50, axis_extend=None):
+def conjugate_tool_axis(C0, C1):
+    """返回弱共轭最优刀轴方向（单位、符号对齐母线）。"""
+    n = len(C0)
+    n0s, n1s, rs = ruling_normals(C0, C1)
+    navg = [_normalize(_add(n0s[i], n1s[i])) for i in range(n)]
+    T = _optimal_tool_axis(navg)
+    rmid = rs[n // 2]
+    if _dot(T, rmid) < 0:
+        T = tuple(-x for x in T)
+    return T
+
+def flank_cl_rigorous(C0, C1, tool_r, flip=1.0, n_along=50, axis_extend=None, T=None):
     """严谨侧铣 CL（点-轴距离 + 弱共轭，单位分解刀位方案 v2 的落点）：
       刀轴 T* = 法矢协方差最小特征向量（弱共轭最优，可展时=母线方向）；
       刀心 axis_p = 母线中点沿 T* 正交方向偏置 tool_r；
-      返回 (feed, axes, max_err, mean_err)，其中 err = |ρ(P) − R| 为点-轴距离残差。"""
+      返回 (feed, axes, max_err, mean_err)，其中 err = |ρ(P) − R| 为点-轴距离残差。
+      T 可外部传入（用于刀轴场光顺后的覆盖）。"""
     n = len(C0)
     if n < 2:
         return [], [], 0.0, 0.0
@@ -318,10 +330,8 @@ def flank_cl_rigorous(C0, C1, tool_r, flip=1.0, n_along=50, axis_extend=None):
            if n > n_along else list(range(n)))
     n0s, n1s, rs = ruling_normals(C0, C1)
     navg = [_normalize(_add(n0s[i], n1s[i])) for i in range(n)]
-    T = _optimal_tool_axis(navg)
-    rmid = rs[n // 2]
-    if _dot(T, rmid) < 0:
-        T = tuple(-x for x in T)
+    if T is None:
+        T = conjugate_tool_axis(C0, C1)
     ext = tool_r if axis_extend is None else axis_extend
     feed, axes = [], []
     errs = []
@@ -348,6 +358,46 @@ def flank_cl_rigorous(C0, C1, tool_r, flip=1.0, n_along=50, axis_extend=None):
     max_err = max(errs) if errs else 0.0
     mean_err = sum(errs) / len(errs) if errs else 0.0
     return feed, axes, max_err, mean_err
+
+def smooth_tool_axes(patches, iterations=2):
+    """对相邻格胞的弱共轭刀轴做符号对齐的拉普拉斯光顺，得到跨格连续的刀轴场
+    （实现单位分解方案的“连续性传递”）。只作用于有 row/col 网格信息的格胞。"""
+    by_key = {(p.blade, p.row, p.col): p
+              for p in patches if p.row >= 0 and p.col >= 0 and p.tool_axis is not None}
+    if not by_key:
+        return
+    for _ in range(iterations):
+        new = {}
+        for (blade, row, col), p in by_key.items():
+            acc = list(p.tool_axis)
+            cnt = 1
+            for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                q = by_key.get((blade, row + dr, col + dc))
+                if q is None or q.tool_axis is None:
+                    continue
+                t = q.tool_axis
+                if _dot(acc, t) < 0:
+                    t = tuple(-x for x in t)
+                acc = _add(acc, t)
+                cnt += 1
+            new[(blade, row, col)] = _normalize(acc)
+        for (blade, row, col), p in by_key.items():
+            p.tool_axis = new[(blade, row, col)]
+
+def tool_axis_discontinuity_deg(patches):
+    """相邻格胞刀轴的最大夹角（度），用于衡量刀轴场连续性。"""
+    by_key = {(p.blade, p.row, p.col): p
+              for p in patches if p.row >= 0 and p.col >= 0 and p.tool_axis is not None}
+    mx = 0.0
+    for (blade, row, col), p in by_key.items():
+        for dr, dc in ((0, 1), (1, 0)):
+            q = by_key.get((blade, row + dr, col + dc))
+            if q is None or q.tool_axis is None:
+                continue
+            d = abs(_dot(p.tool_axis, q.tool_axis))
+            d = max(-1.0, min(1.0, d))
+            mx = max(mx, math.degrees(math.acos(d)))
+    return mx
 
 def point_cl_lines(C0, C1, stepover, ball_r, n_along=50, flip=1.0):
     """点铣 CL（球头刀，半径 ball_r）：刀心 = 曲面点 + ball_r·n，沿准线方向行切。
@@ -460,7 +510,8 @@ def export_toolpaths(out_dir, patches, args):
 
     flank_lines, point_lines = [], []
     for p in patches:
-        feed, axes, _maxe, _meane = flank_cl_rigorous(p.C0, p.C1, tool_r, flip=p.normal_flip)
+        feed, axes, _maxe, _meane = flank_cl_rigorous(
+            p.C0, p.C1, tool_r, flip=p.normal_flip, T=p.tool_axis)
         if len(feed) >= 2:
             flank_lines.append(feed)
         flank_lines.extend(axes)
@@ -486,6 +537,7 @@ class Patch:
     area: float = 0.0
     twist: float = 0.0            # 法向扭转角（度）
     flank_err: float = 0.0        # 严谨侧铣点-轴距离最大残差（mm）
+    tool_axis: object = None      # 弱共轭最优刀轴（光顺后为跨格连续刀轴场）
     developable: bool = True
     flank_time: float = 0.0
     flank_len: float = 0.0
@@ -696,10 +748,17 @@ def compute(input_dir, args):
     flips = _blade_normal_flips(patches)
     for p in patches:
         p.normal_flip = flips.get(p.blade, 1.0)
-    # 严谨侧铣误差：点-轴距离残差（需在确定法向翻转后，用正确的偏置侧计算）
+    # 弱共轭最优刀轴（分片），再跨格光顺得到连续刀轴场
+    for p in patches:
+        p.tool_axis = conjugate_tool_axis(p.C0, p.C1)
+    args.tool_axis_disc_before = tool_axis_discontinuity_deg(patches)
+    smooth_tool_axes(patches, iterations=2)
+    args.tool_axis_disc_after = tool_axis_discontinuity_deg(patches)
+    # 严谨侧铣误差：用光顺后的刀轴场计算点-轴距离残差
     for p in patches:
         _f, _a, p.flank_err, _m = flank_cl_rigorous(
-            p.C0, p.C1, getattr(args, 'tool_r', args.ball_r), flip=p.normal_flip)
+            p.C0, p.C1, getattr(args, 'tool_r', args.ball_r),
+            flip=p.normal_flip, T=p.tool_axis)
     # 原始 NURBS 面积，供点铣基线 B 使用
     args.original_area = read_original_area(input_dir)
     return patches
@@ -733,6 +792,8 @@ def summarize(patches, args):
         "total_area": total_area,
         "original_area": orig_area,
         "flank_err": flank_err,
+        "tool_axis_disc_before": round(getattr(args, 'tool_axis_disc_before', 0.0), 3),
+        "tool_axis_disc_after": round(getattr(args, 'tool_axis_disc_after', 0.0), 3),
         "flank": {
             "cut": flank_cut,
             "overhead": flank_overhead,
@@ -771,6 +832,9 @@ def print_report(patches, args, summary):
           f"+ 非切削 {p['overhead']:8.1f}s = {p['total']:8.1f}s")
     if f['total'] > 0:
         print(f"A 相对 B 提速: {p['total'] / f['total']:.1f}x")
+    print(f"严谨侧铣点轴最大残差: {summary.get('flank_err', 0.0):.4f} mm  "
+          f"刀轴相邻最大夹角: 光顺前 {summary.get('tool_axis_disc_before', 0.0):.2f}° "
+          f"→ 光顺后 {summary.get('tool_axis_disc_after', 0.0):.2f}°")
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):

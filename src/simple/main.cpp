@@ -567,6 +567,8 @@ int main(int argc, char* argv[]) {
                    << ",\"totalArea\":" << s.totalArea
                    << ",\"originalArea\":" << s.originalArea
                    << ",\"maxFlankErr\":" << s.maxFlankErr
+                   << ",\"toolAxisDiscBefore\":" << s.toolAxisDiscBefore
+                   << ",\"toolAxisDiscAfter\":" << s.toolAxisDiscAfter
                    << ",\"elapsedSec\":" << s.elapsedSec
                   << ",\"message\":\"" << jsonSafe(s.errorMsg) << "\"}" << std::endl;
         return s.ok ? 0 : 1;

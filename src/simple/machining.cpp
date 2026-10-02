@@ -432,10 +432,23 @@ struct RigorousFlank {
     double meanErr = 0.0;
 };
 
+// 弱共轭最优刀轴（单位、符号对齐母线）
+static Vec3 conjugateToolAxis(const Vec3Arr& C0, const Vec3Arr& C1) {
+    RulingNormals rn = rulingNormals(C0, C1);
+    int n = (int)C0.size();
+    std::vector<Vec3> navg(n);
+    for (int i = 0; i < n; ++i) navg[i] = normalized(rn.n0[i] + rn.n1[i]);
+    Vec3 T = smallestEigenvector(navg);
+    if (n > 0 && T.dot(rn.r[n / 2]) < 0.0) T = -T;
+    return T;
+}
+
 // 严谨侧铣 CL：刀轴 = 弱共轭最优方向，刀心 = 母线中点沿 T 正交方向偏置 R；
 // err = |ρ(P) − R| 为点-轴距离残差（过切/欠切口径）。
+// T_override 非零时使用该刀轴（用于刀轴场光顺后的覆盖）。
 static RigorousFlank flankClRigorous(const Vec3Arr& C0, const Vec3Arr& C1,
-                                     double toolR, double flip, int nAlong) {
+                                     double toolR, double flip, int nAlong,
+                                     const Vec3& T_override = Vec3(0, 0, 0)) {
     RigorousFlank out;
     int n = (int)C0.size();
     if (n < 2) return out;
@@ -443,8 +456,7 @@ static RigorousFlank flankClRigorous(const Vec3Arr& C0, const Vec3Arr& C1,
     RulingNormals rn = rulingNormals(C0, C1);
     std::vector<Vec3> navg(n);
     for (int i = 0; i < n; ++i) navg[i] = normalized(rn.n0[i] + rn.n1[i]);
-    Vec3 T = smallestEigenvector(navg);
-    if (T.dot(rn.r[n / 2]) < 0.0) T = -T;
+    Vec3 T = T_override.squaredNorm() > 0.0 ? T_override : conjugateToolAxis(C0, C1);
     double ext = toolR;
     double sumErr = 0.0;
     int cnt = 0;
@@ -574,7 +586,56 @@ struct Patch {
     double pointTime = 0.0;
     double stepover = 0.0;
     double normalFlip = 1.0;
+    Vec3 toolAxis = Vec3(0, 0, 0);
+    bool hasToolAxis = false;
 };
+
+// 跨格刀轴光顺（符号对齐的拉普拉斯，迭代 iterations 次）
+static void smoothToolAxes(std::vector<Patch>& patches, int iterations) {
+    auto key = [](int blade, int row, int col) { return (blade * 1000000) + row * 10000 + col; };
+    std::unordered_map<int, Patch*> byKey;
+    for (auto& p : patches)
+        if (p.row >= 0 && p.col >= 0 && p.hasToolAxis) byKey[key(p.blade, p.row, p.col)] = &p;
+    for (int it = 0; it < iterations; ++it) {
+        std::unordered_map<int, Vec3> acc;
+        for (auto& kv : byKey) {
+            Patch* p = kv.second;
+            Vec3 sum = p->toolAxis;
+            int cnt = 1;
+            int dirs[4][2] = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+            for (auto& d : dirs) {
+                auto it2 = byKey.find(key(p->blade, p->row + d[0], p->col + d[1]));
+                if (it2 == byKey.end()) continue;
+                Vec3 t = it2->second->toolAxis;
+                if (sum.dot(t) < 0.0) t = -t;
+                sum += t;
+                ++cnt;
+            }
+            acc[kv.first] = normalized(sum);
+        }
+        for (auto& kv : byKey) kv.second->toolAxis = acc[kv.first];
+    }
+}
+
+// 相邻格胞刀轴最大夹角（度）
+static double toolAxisDiscontinuityDeg(const std::vector<Patch>& patches) {
+    auto key = [](int blade, int row, int col) { return (blade * 1000000) + row * 10000 + col; };
+    std::unordered_map<int, const Patch*> byKey;
+    for (const auto& p : patches)
+        if (p.row >= 0 && p.col >= 0 && p.hasToolAxis) byKey[key(p.blade, p.row, p.col)] = &p;
+    double mx = 0.0;
+    int dirs[2][2] = {{0, 1}, {1, 0}};
+    for (auto& kv : byKey) {
+        const Patch* p = kv.second;
+        for (auto& d : dirs) {
+            auto it2 = byKey.find(key(p->blade, p->row + d[0], p->col + d[1]));
+            if (it2 == byKey.end()) continue;
+            double dot = std::max(-1.0, std::min(1.0, std::fabs(p->toolAxis.dot(it2->second->toolAxis))));
+            mx = std::max(mx, std::acos(dot) * 180.0 / 3.14159265358979323846);
+        }
+    }
+    return mx;
+}
 
 std::pair<int, int> parseCellName(const std::string& name) {
     int blade = (name.find("blade1") != std::string::npos) ? 0 : 1;
@@ -766,6 +827,12 @@ MachiningSummary computeToolpath(const std::string& inputDir,
     auto flips = bladeNormalFlips(patches);
     for (auto& p : patches) p.normalFlip = flips.count(p.blade) ? flips[p.blade] : 1.0;
 
+    // 4b) 弱共轭最优刀轴（分片），再跨格光顺得到连续刀轴场
+    for (auto& p : patches) { p.toolAxis = conjugateToolAxis(p.C0, p.C1); p.hasToolAxis = true; }
+    double discBefore = toolAxisDiscontinuityDeg(patches);
+    smoothToolAxes(patches, 2);
+    double discAfter = toolAxisDiscontinuityDeg(patches);
+
     // 5) 原始曲面面积（点铣基线）
     double originalArea = readOriginalArea(inputDir);
 
@@ -794,7 +861,8 @@ MachiningSummary computeToolpath(const std::string& inputDir,
         std::vector<Vec3Arr> flankLines, feedLines, axisLines, pointLines;
         double maxFlankErr = 0.0;
         for (const auto& p : patches) {
-            RigorousFlank rf = flankClRigorous(p.C0, p.C1, cfg.tool_r, p.normalFlip, 50);
+            RigorousFlank rf = flankClRigorous(p.C0, p.C1, cfg.tool_r, p.normalFlip, 50,
+                                               p.toolAxis);
             maxFlankErr = std::max(maxFlankErr, rf.maxErr);
             if (rf.feed.size() >= 2) {
                 flankLines.push_back(rf.feed);
@@ -846,6 +914,8 @@ MachiningSummary computeToolpath(const std::string& inputDir,
               << ",\"total\":" << pointTotal << "},"
               << "\"speedup\":" << speedup
               << ",\"max_flank_err\":" << sum.maxFlankErr
+              << ",\"tool_axis_disc_before\":" << discBefore
+              << ",\"tool_axis_disc_after\":" << discAfter
               << ",\"elapsed_sec\":" << sum.elapsedSec
               << ",\"patches\":[";
             for (size_t i = 0; i < patches.size(); ++i) {
@@ -874,6 +944,8 @@ MachiningSummary computeToolpath(const std::string& inputDir,
     sum.speedup = speedup;
     sum.totalArea = totalArea;
     sum.originalArea = originalArea > 0.0 ? originalArea : 0.0;
+    sum.toolAxisDiscBefore = discBefore;
+    sum.toolAxisDiscAfter = discAfter;
     return sum;
 }
 

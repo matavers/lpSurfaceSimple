@@ -28,6 +28,8 @@ struct MachiningSummary {
     double totalArea = 0.0;     /* 拟合面面积 mm² */
     double originalArea = 0.0;  /* 原曲面面积 mm² */
     double maxFlankErr = 0.0;   /* 严谨侧铣点-轴距离最大残差 mm */
+    double toolAxisDiscBefore = 0.0; /* 光顺前相邻刀轴最大夹角 deg */
+    double toolAxisDiscAfter = 0.0;  /* 光顺后相邻刀轴最大夹角 deg */
     double elapsedSec = 0.0;    /* 刀轨计算耗时 s */
 };
 
