@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """在完整 C^k 连续曲面上做可微刀位规划（CasADi + IPOPT）——完整版。
 
-不把曲面降维成点云：曲面 S 按解析的 C^k 单位分解公式用 CasADi 符号重建，
-法矢 nS 用自动微分解析求得；刀轴场 T(u)、刀心 A(u)、接触点 v(u) 都用 B 样条
-参数化（控制点可学习）。目标泛函
-  J = ∫[ (ρ(S(u,v(u)), axis(A,T)) − R)^2 + w1·(nS·T)^2
-         + w2·‖T'‖^2 + w3·‖A'‖^2 + w4·‖v'‖^2 ] du
-在 Gauss-Legendre 求积点上求值，用 IPOPT 梯度下降。
+不把曲面降维成点云：曲面 S 按解析的 C^k 单位分解公式数值精确重建，
+法矢 nS 用解析导数求值；刀轴场 T(u) 用 B 样条参数化（控制点可学习）。
+刀心 A(u) 固定为「母线中点沿法向偏置 R」（避免刀心沿刀轴方向漂移的自由度）。
+目标泛函（包络 + 共轭 + 光顺）：
+  J = ∫[ (ρ(S(u,v), axis(A,T)) − R)^2 + w1·(nS·T)^2 + w2·‖T'‖^2 ] du
+包络残差在 v∈{v_min, v_mid, v_max} 三处求值，用 IPOPT 梯度下降。
 连续性体现在：S∈C^k ⇒ nS∈C^{k-1} 连续 ⇒ 目标泛函连续可微 ⇒ 精确梯度。
 """
 import json
@@ -23,15 +23,14 @@ def load_surface_model(path):
 
 
 # ════════════════════════════════════════════════════════════
-# 数值曲面（用于刀位输出 VTK + 初值；非优化路径）
+# 数值曲面（解析求值，非点云）
 # ════════════════════════════════════════════════════════════
 def _smootherstep_poly(k):
     if k <= 0:
         return np.array([0.0, 1.0]), np.array([1.0])
     p = np.polynomial.Polynomial([0.0])
     for i in range(k + 1):
-        omt = np.polynomial.Polynomial([1.0, -1.0]) ** i
-        p = p + math.comb(k + i, i) * omt
+        p = p + math.comb(k + i, i) * np.polynomial.Polynomial([1.0, -1.0]) ** i
     p = p * np.polynomial.Polynomial([0.0] * (k + 1) + [1.0])
     c = p.coef
     dc = np.polynomial.Polynomial(c).deriv().coef
@@ -112,10 +111,9 @@ def build_surface_eval(model):
 
 
 # ════════════════════════════════════════════════════════════
-# Cox-de Boor B 样条（CasADi MX，可微；规避 ca.bspline 的 AD 缺陷）
+# Cox-de Boor B 样条（CasADi MX，可微）
 # ════════════════════════════════════════════════════════════
 def _bspline_mx(u, P, knots, degree):
-    """B 样条 C(u)=Σ N_{i,p}(u) P_i。P 为 (n_ctrl, dim) MX，返回 (dim,1)。"""
     from functools import lru_cache
     n = len(knots) - degree - 1
     dim = P.shape[1]
@@ -135,7 +133,6 @@ def _bspline_mx(u, P, knots, degree):
 
 
 def _bspline_deriv_ctrl(P, knots, degree):
-    """B 样条导数控制点（线性于 P），返回 (n_ctrl-1, dim)。"""
     n = P.shape[0]
     rows = []
     for j in range(n - 1):
@@ -146,95 +143,31 @@ def _bspline_deriv_ctrl(P, knots, degree):
 
 
 # ════════════════════════════════════════════════════════════
-# 符号曲面（CasADi MX，对 u、v 都可微）
-# ════════════════════════════════════════════════════════════
-def _smootherstep_mx(t, k):
-    if k <= 0:
-        return t
-    omt = 1.0 - t
-    s = 0
-    for i in range(k + 1):
-        s = s + math.comb(k + i, i) * omt ** i
-    return t ** (k + 1) * s
-
-
-def _chi1_mx(u, uL, uR, a, b, k):
-    tL = (u - (uL - a)) / a
-    tR = (u - uR) / b
-    return ca.if_else(
-        u <= uL - a, 0.0,
-        ca.if_else(u < uL, _smootherstep_mx(tL, k),
-        ca.if_else(u <= uR, 1.0,
-        ca.if_else(u < uR + b, 1.0 - _smootherstep_mx(tR, k), 0.0))))
-
-
-def build_surface_mx(model):
-    """符号重建 C^k 曲面 S(u,v) 与法矢 nS(u,v)。返回 (S_func, nS_func, meta)。"""
-    k = model["partition"]["continuity"]
-    band_w = model["partition"]["bandWidth"]
-    cells = model["cells"]
-    min_u = min(c["u1"] - c["u0"] for c in cells)
-    min_v = min(c["v1"] - c["v0"] for c in cells)
-    a_u = band_w * min_u
-    a_v = band_w * min_v
-
-    u = ca.MX.sym("u")
-    v = ca.MX.sym("v")
-    acc = ca.MX.zeros(3, 1)
-    sum_phi = 0.0
-    for c in cells:
-        cu = _chi1_mx(u, c["u0"], c["u1"], a_u, a_u, k)
-        cv = _chi1_mx(v, c["v0"], c["v1"], a_v, a_v, k)
-        phi = cu * cv
-        c0 = _bspline_mx(u, ca.DM(np.array(c["c0"]["ctrl"], dtype=float)), c["c0"]["knots"], c["c0"]["degree"])
-        c1 = _bspline_mx(u, ca.DM(np.array(c["c1"]["ctrl"], dtype=float)), c["c1"]["knots"], c["c1"]["degree"])
-        R = (1.0 - v) * c0 + v * c1
-        acc = acc + phi * R
-        sum_phi = sum_phi + phi
-    S = acc / sum_phi
-
-    Su = ca.jacobian(S, u)
-    Sv = ca.jacobian(S, v)
-    nS = ca.cross(Su, Sv)
-    nS = nS / (ca.norm_2(nS) + 1e-12)
-
-    S_func = ca.Function("S", [u, v], [S])
-    nS_func = ca.Function("nS", [u, v], [nS])
-    meta = {
-        "u_min": model["uEdges"][0], "u_max": model["uEdges"][-1],
-        "v_min": model["vEdges"][0], "v_max": model["vEdges"][-1],
-        "fitDir": model["fitDir"], "continuity": k,
-        "bandWidth": band_w, "n_cells": len(cells),
-    }
-    return S_func, nS_func, meta
-
-
-# ════════════════════════════════════════════════════════════
 # 完整版刀轴场优化（CasADi + IPOPT）
 # ════════════════════════════════════════════════════════════
-def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=40, tool_r=5.0,
-                             w_conj=1.0, w_smooth_T=0.5, w_smooth_A=0.05,
-                             w_smooth_v=0.05, continuity=None, max_iter=300):
+def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=30, tool_r=5.0,
+                             w_conj=1.0, w_smooth_T=0.5, continuity=None,
+                             max_iter=300):
     model = load_surface_model(model_path)
     k = continuity if continuity is not None else model["partition"]["continuity"]
     u_min, u_max = model["uEdges"][0], model["uEdges"][-1]
     v_min, v_max = model["vEdges"][0], model["vEdges"][-1]
     v_mid = 0.5 * (v_min + v_max)
 
-    # Gauss-Legendre 求积点
     pts, wts = np.polynomial.legendre.leggauss(n_quad)
     us = 0.5 * (u_max - u_min) * pts + 0.5 * (u_max + u_min)
     wts = wts * 0.5 * (u_max - u_min)
 
-    # 数值预计算曲面在求积点 (u_g, v_mid) 的 S、nS、Sv（解析求值，非点云）
-    # v 向用线性 Taylor 模型 P(v)=S0+Sv0·(v-v_mid)，接触点 v 作为变量仍可微。
+    # 数值预计算曲面在求积点的 S、nS（解析求值），以及包络 v 两端点
     surf = build_surface_eval(model)
-    eps = 1e-4 * (v_max - v_min)
-    S0 = np.array([surf(ui, v_mid)[0] for ui in us])
-    nS0 = np.array([surf(ui, v_mid)[1] for ui in us])
-    Sv0 = np.array([(surf(ui, v_mid + eps)[0] - surf(ui, v_mid - eps)[0]) / (2 * eps) for ui in us])
+    S_mid = np.array([surf(ui, v_mid)[0] for ui in us])
+    nS_mid = np.array([surf(ui, v_mid)[1] for ui in us])
+    S_lo = np.array([surf(ui, v_min)[0] for ui in us])
+    S_hi = np.array([surf(ui, v_max)[0] for ui in us])
+    # 刀心固定：母线中点沿法向偏置 R（避免刀心沿刀轴漂移）
+    A_fix = S_mid + tool_r * nS_mid
 
-    # 刀轴/刀心/接触点 B 样条（degree = k+1，C^k 连续）
+    # 刀轴 B 样条（degree = k+1，C^k 连续）
     degree = k + 1
     n_ctrl = max(degree + 1, n_ctrl)
     inner = n_ctrl - degree - 1
@@ -244,109 +177,75 @@ def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=40, tool_r=5.0,
 
     u = ca.MX.sym("u")
     nT = 3 * n_ctrl
-    nA = 3 * n_ctrl
-    nv = n_ctrl
-    xvec = ca.MX.sym("x", nT + nA + nv)
-    pT = ca.reshape(xvec[0:nT], n_ctrl, 3)
-    pA = ca.reshape(xvec[nT:nT + nA], n_ctrl, 3)
-    pv = ca.reshape(xvec[nT + nA:], n_ctrl, 1)
-
-    T_raw = _bspline_mx(u, pT, knots, degree)          # (3,1)
-    A_raw = _bspline_mx(u, pA, knots, degree)          # (3,1)
-    v_raw = _bspline_mx(u, pv, knots, degree)          # (1,1)
-    v_sig = v_min + (v_max - v_min) / (1.0 + ca.exp(-v_raw))  # 映射到 [v_min,v_max]
-
+    xvec = ca.MX.sym("x", nT)
+    pT = ca.reshape(xvec, n_ctrl, 3)
+    T_raw = _bspline_mx(u, pT, knots, degree)
     Tp_raw = _bspline_mx(u, _bspline_deriv_ctrl(pT, knots, degree), knots[1:-1], degree - 1)
-    Ap_raw = _bspline_mx(u, _bspline_deriv_ctrl(pA, knots, degree), knots[1:-1], degree - 1)
-    vp_raw = _bspline_mx(u, _bspline_deriv_ctrl(pv, knots, degree), knots[1:-1], degree - 1)
 
     obj = 0.0
     for i in range(n_quad):
         ui = float(us[i])
         wi = float(wts[i])
-        Ti = ca.substitute(T_raw, u, ui)               # (3,1)
-        Ai = ca.substitute(A_raw, u, ui)
-        vi = ca.substitute(v_sig, u, ui)               # (1,1)
-        Pi = ca.DM(S0[i]) + ca.DM(Sv0[i]) * (vi - v_mid)   # 线性 Taylor 接触点 (3,1)
-        nSi = ca.DM(nS0[i])                            # (3,1)
-        d = Pi - Ai
-        proj = ca.dot(d, Ti)
-        rho = ca.norm_2(d - Ti * proj)
-        e = rho - tool_r
-        conj = ca.dot(nSi, Ti)
-        Tpi = ca.substitute(Tp_raw, u, ui)
-        Api = ca.substitute(Ap_raw, u, ui)
-        vpi = ca.substitute(vp_raw, u, ui)
-        obj += wi * (e ** 2 + w_conj * conj ** 2
-                     + w_smooth_T * ca.dot(Tpi, Tpi)
-                     + w_smooth_A * ca.dot(Api, Api)
-                     + w_smooth_v * ca.dot(vpi, vpi)
+        Ti = ca.substitute(T_raw, u, ui)              # (3,1)
+        Tn = Ti / (ca.norm_2(Ti) + 1e-12)
+        Ai = ca.DM(A_fix[i])                           # (3,1)
+        nSi = ca.DM(nS_mid[i])
+        # 包络残差：v_min / v_mid / v_max 三处点-轴距离
+        for P in (S_lo[i], S_mid[i], S_hi[i]):
+            d = ca.DM(P) - Ai
+            proj = ca.dot(d, Tn)
+            rho = ca.norm_2(d - Tn * proj)
+            obj += wi * (rho - tool_r) ** 2
+        # 共轭 + 光顺 + 单位约束
+        obj += wi * (w_conj * (ca.dot(nSi, Tn)) ** 2
+                     + w_smooth_T * ca.dot(ca.substitute(Tp_raw, u, ui), ca.substitute(Tp_raw, u, ui))
                      + 1.0 * (ca.dot(Ti, Ti) - 1.0) ** 2)
 
-    # 初值
-    nS_init = nS0
+    # 初值：法矢协方差最小特征向量（⊥ 平均法矢）
     C = np.zeros((3, 3))
-    for ni in nS_init:
+    for ni in nS_mid:
         C += np.outer(ni, ni)
     _, V = np.linalg.eigh(C)
     T_init = V[:, 0]
-    if np.dot(T_init, nS_init.mean(axis=0)) > 0:
+    if np.dot(T_init, nS_mid.mean(axis=0)) > 0:
         T_init = -T_init
-
-    p0_T = np.tile(T_init, (n_ctrl, 1))                       # (n_ctrl,3)
-    p0_A = np.array([surf(ui, v_mid)[0] + tool_r * surf(ui, v_mid)[1]
-                     for ui in np.linspace(u_min, u_max, n_ctrl)])  # (n_ctrl,3)
-    p0_v = np.full((n_ctrl, 1), 0.0)                          # v_raw=0 -> v=v_mid
-
-    # 决策变量拼接（列主序展平）
-    x0 = np.concatenate([p0_T.ravel(order="F"), p0_A.ravel(order="F"), p0_v.ravel()])
+    x0 = np.tile(T_init, n_ctrl).astype(float)          # 列主序展平
 
     nlp = {"x": xvec, "f": obj}
     opts = {"ipopt.print_level": 0, "print_time": 0, "ipopt.max_iter": max_iter}
-    print("[optimize] IPOPT solving...")
     sol = ca.nlpsol("S", "ipopt", nlp, opts)(x0=x0)
     x_opt = np.array(sol["x"]).ravel()
-    T_opt = x_opt[0:nT].reshape(n_ctrl, 3, order="F")
-    A_opt = x_opt[nT:nT + nA].reshape(n_ctrl, 3, order="F")
-    v_opt = x_opt[nT + nA:].reshape(n_ctrl, 1)
 
-    # 输出刀轴场
     T_func = ca.Function("T", [u, xvec], [T_raw])
-    A_func = ca.Function("A", [u, xvec], [A_raw])
-    v_func = ca.Function("v", [u, xvec], [v_sig])
     Tp_func = ca.Function("Tp", [u, xvec], [Tp_raw])
     u_grid = np.linspace(u_min, u_max, 201)
     T_grid = np.array([T_func(ui, x_opt).full().ravel() for ui in u_grid])
     T_grid = T_grid / (np.linalg.norm(T_grid, axis=1, keepdims=True) + 1e-12)
-    A_grid = np.array([A_func(ui, x_opt).full().ravel() for ui in u_grid])
-    v_grid = np.array([v_func(ui, x_opt).full().ravel() for ui in u_grid])
     Tp_grid = np.array([Tp_func(ui, x_opt).full().ravel() for ui in u_grid])
 
-    # 点轴残差与共轭统计（数值求值）
+    # 刀心（固定）与刀轴线段
+    A_grid = np.array([surf(ui, v_mid)[0] + tool_r * surf(ui, v_mid)[1] for ui in u_grid])
+    edge_lens = [np.linalg.norm(surf(ui, v_max)[0] - surf(ui, v_min)[0]) for ui in u_grid[::20]]
+    L = float(np.mean(edge_lens)) if edge_lens else 0.0
+    half = L * 0.5 + tool_r
+    axis_segs = np.stack([A_grid - half * T_grid, A_grid + half * T_grid], axis=1)
+
+    # 点轴残差 + 共轭统计（数值求值）
     resid = []
     conjv = []
     for i in range(n_quad):
         ui = float(us[i])
         Ti = T_func(ui, x_opt).full().ravel()
         Ti = Ti / (np.linalg.norm(Ti) + 1e-12)
-        Ai = A_func(ui, x_opt).full().ravel()
-        vi = float(v_func(ui, x_opt))
-        Pi = surf(ui, vi)[0]
-        nSi = surf(ui, vi)[1]
-        d = Pi - Ai
-        rho = np.linalg.norm(d - np.dot(d, Ti) * Ti)
-        resid.append(abs(rho - tool_r))
-        conjv.append(float(np.dot(nSi, Ti)) ** 2)
-
-    # 刀轴线段（母线长度近似）
-    edge_lens = [np.linalg.norm(surf(ui, v_max)[0] - surf(ui, v_min)[0]) for ui in u_grid[::20]]
-    L = float(np.mean(edge_lens)) if edge_lens else 0.0
-    half = L * 0.5 + tool_r
-    axis_segs = np.stack([A_grid - half * T_grid, A_grid + half * T_grid], axis=1)
+        for P in (S_lo[i], S_mid[i], S_hi[i]):
+            d = P - A_fix[i]
+            rho = np.linalg.norm(d - np.dot(d, Ti) * Ti)
+            resid.append(abs(rho - tool_r))
+        conjv.append(float(np.dot(nS_mid[i], Ti)) ** 2)
 
     return {
         "u_grid": u_grid, "T_grid": T_grid, "Tp_grid": Tp_grid,
-        "A_grid": A_grid, "v_grid": v_grid, "axis_segs": axis_segs,
+        "A_grid": A_grid, "axis_segs": axis_segs,
         "residual": {"mean": float(np.mean(resid)), "rms": float(np.sqrt(np.mean(np.array(resid) ** 2))),
                      "max": float(np.max(resid))},
         "conjugate": {"mean": float(np.mean(conjv)), "rms": float(np.sqrt(np.mean(np.array(conjv) ** 2)))},

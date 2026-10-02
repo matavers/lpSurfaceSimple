@@ -1017,6 +1017,8 @@ class MainWindow(QMainWindow):
         self._load_all_objs()
         self._build_tree()
         self._apply_visibility()
+        if HAS_PYVISTA:
+            self._plotter.render()
 
     def _on_tool_failed(self, msg):
         self._btn_tool.setEnabled(True)
