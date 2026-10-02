@@ -637,6 +637,82 @@ static double toolAxisDiscontinuityDeg(const std::vector<Patch>& patches) {
     return mx;
 }
 
+// ── 刀轨质量鲁棒统计（分布，避免局部极值主导） ──────────────
+struct DistStats {
+    int count = 0;
+    double mean = 0.0, rms = 0.0, max = 0.0;
+    double p50 = 0.0, p90 = 0.0, p95 = 0.0, p99 = 0.0;
+};
+
+static double percentileOf(const std::vector<double>& s, double p) {
+    if (s.empty()) return 0.0;
+    double k = (s.size() - 1) * p;
+    int lo = (int)std::floor(k), hi = (int)std::ceil(k);
+    if (lo == hi) return s[lo];
+    return s[lo] + (s[hi] - s[lo]) * (k - lo);
+}
+
+static DistStats distStats(std::vector<double> vals) {
+    DistStats d;
+    if (vals.empty()) return d;
+    std::sort(vals.begin(), vals.end());
+    double sum = 0.0, sumSq = 0.0;
+    for (double v : vals) { sum += v; sumSq += v * v; }
+    d.count = (int)vals.size();
+    d.mean = sum / d.count;
+    d.rms = std::sqrt(sumSq / d.count);
+    d.max = vals.back();
+    d.p50 = percentileOf(vals, 0.50);
+    d.p90 = percentileOf(vals, 0.90);
+    d.p95 = percentileOf(vals, 0.95);
+    d.p99 = percentileOf(vals, 0.99);
+    return d;
+}
+
+static std::vector<double> flankResiduals(const Vec3Arr& C0, const Vec3Arr& C1,
+                                          double toolR, double flip, const Vec3& T,
+                                          int nAlong) {
+    std::vector<double> residuals;
+    int n = (int)C0.size();
+    if (n < 2) return residuals;
+    auto idx = sampleIndices(n, nAlong);
+    RulingNormals rn = rulingNormals(C0, C1);
+    for (int i : idx) {
+        Vec3 mid = lerp3(C0[i], C1[i], 0.5);
+        Vec3 nm = normalized(rn.n0[i] + rn.n1[i]) * flip;
+        double proj = nm.dot(T);
+        Vec3 nmPerp = normalized(nm - T * proj);
+        Vec3 axisP = mid + nmPerp * toolR;
+        for (double t : {0.0, 0.5, 1.0}) {
+            Vec3 P = lerp3(C0[i], C1[i], t);
+            Vec3 dvec = P - axisP;
+            double pl = dvec.dot(T);
+            double rho = (dvec - T * pl).norm();
+            residuals.push_back(std::fabs(rho - toolR));
+        }
+    }
+    return residuals;
+}
+
+static std::vector<double> toolAxisDiscValues(const std::vector<Patch>& patches) {
+    auto key = [](int blade, int row, int col) { return (blade * 1000000) + row * 10000 + col; };
+    std::unordered_map<int, const Patch*> byKey;
+    for (const auto& p : patches)
+        if (p.row >= 0 && p.col >= 0 && p.hasToolAxis) byKey[key(p.blade, p.row, p.col)] = &p;
+    std::vector<double> vals;
+    int dirs[2][2] = {{0, 1}, {1, 0}};
+    for (auto& kv : byKey) {
+        const Patch* p = kv.second;
+        for (auto& d : dirs) {
+            auto it2 = byKey.find(key(p->blade, p->row + d[0], p->col + d[1]));
+            if (it2 == byKey.end()) continue;
+            double dot = std::max(-1.0, std::min(1.0, std::fabs(p->toolAxis.dot(it2->second->toolAxis))));
+            vals.push_back(std::acos(dot) * 180.0 / 3.14159265358979323846);
+        }
+    }
+    return vals;
+}
+
 std::pair<int, int> parseCellName(const std::string& name) {
     int blade = (name.find("blade1") != std::string::npos) ? 0 : 1;
     int idx = -1;
@@ -891,6 +967,17 @@ MachiningSummary computeToolpath(const std::string& inputDir,
 
     // 8) summary.json
     sum.elapsedSec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    // 8b) 刀轨质量鲁棒统计
+    std::vector<double> residAll, twistAll;
+    for (const auto& p : patches) {
+        auto r = flankResiduals(p.C0, p.C1, cfg.tool_r, p.normalFlip, p.toolAxis, 50);
+        residAll.insert(residAll.end(), r.begin(), r.end());
+        twistAll.push_back(p.twist);
+    }
+    DistStats residSt = distStats(std::move(residAll));
+    DistStats discSt = distStats(toolAxisDiscValues(patches));
+    DistStats twistSt = distStats(std::move(twistAll));
     {
         std::ofstream o(outputDir + "/summary.json");
         if (o) {
@@ -916,6 +1003,21 @@ MachiningSummary computeToolpath(const std::string& inputDir,
               << ",\"max_flank_err\":" << sum.maxFlankErr
               << ",\"tool_axis_disc_before\":" << discBefore
               << ",\"tool_axis_disc_after\":" << discAfter
+              << ",\"quality\":{\"residual\":"
+              << "{\"mean\":" << residSt.mean << ",\"rms\":" << residSt.rms
+              << ",\"max\":" << residSt.max << ",\"p50\":" << residSt.p50
+              << ",\"p90\":" << residSt.p90 << ",\"p95\":" << residSt.p95
+              << ",\"p99\":" << residSt.p99 << ",\"count\":" << residSt.count << "}"
+              << ",\"tool_axis_disc\":"
+              << "{\"mean\":" << discSt.mean << ",\"rms\":" << discSt.rms
+              << ",\"max\":" << discSt.max << ",\"p50\":" << discSt.p50
+              << ",\"p90\":" << discSt.p90 << ",\"p95\":" << discSt.p95
+              << ",\"p99\":" << discSt.p99 << ",\"count\":" << discSt.count << "}"
+              << ",\"twist\":"
+              << "{\"mean\":" << twistSt.mean << ",\"rms\":" << twistSt.rms
+              << ",\"max\":" << twistSt.max << ",\"p50\":" << twistSt.p50
+              << ",\"p90\":" << twistSt.p90 << ",\"p95\":" << twistSt.p95
+              << ",\"p99\":" << twistSt.p99 << ",\"count\":" << twistSt.count << "}}"
               << ",\"elapsed_sec\":" << sum.elapsedSec
               << ",\"patches\":[";
             for (size_t i = 0; i < patches.size(); ++i) {

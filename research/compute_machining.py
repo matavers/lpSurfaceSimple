@@ -399,6 +399,81 @@ def tool_axis_discontinuity_deg(patches):
             mx = max(mx, math.degrees(math.acos(d)))
     return mx
 
+def _percentile(sorted_vals, p):
+    """线性插值百分位（sorted_vals 已排序）。"""
+    if not sorted_vals:
+        return 0.0
+    k = (len(sorted_vals) - 1) * p
+    lo = int(math.floor(k))
+    hi = int(math.ceil(k))
+    if lo == hi:
+        return sorted_vals[lo]
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+def dist_stats(vals):
+    """分布统计：count/mean/rms/max/p50/p90/p95/p99（鲁棒，避免局部极值主导）。"""
+    if not vals:
+        return {"count": 0, "mean": 0.0, "rms": 0.0, "max": 0.0,
+                "p50": 0.0, "p90": 0.0, "p95": 0.0, "p99": 0.0}
+    s = sorted(vals)
+    n = len(vals)
+    return {"count": n, "mean": sum(vals) / n,
+            "rms": math.sqrt(sum(v * v for v in vals) / n),
+            "max": s[-1], "p50": _percentile(s, 0.5), "p90": _percentile(s, 0.9),
+            "p95": _percentile(s, 0.95), "p99": _percentile(s, 0.99)}
+
+def flank_residuals(C0, C1, tool_r, flip=1.0, T=None, n_along=50):
+    """返回该格所有采样点的点-轴距离残差 |ρ−R| 列表（供分布统计）。"""
+    n = len(C0)
+    if n < 2:
+        return []
+    if T is None:
+        T = conjugate_tool_axis(C0, C1)
+    idx = ([int(round(i * (n - 1) / (n_along - 1))) for i in range(n_along)]
+           if n > n_along else list(range(n)))
+    n0s, n1s, rs = ruling_normals(C0, C1)
+    navg = [_normalize(_add(n0s[i], n1s[i])) for i in range(n)]
+    residuals = []
+    for i in idx:
+        mid = _lerp(C0[i], C1[i], 0.5)
+        nm = _scale(navg[i], flip)
+        proj = _dot(nm, T)
+        nm_perp = _normalize((nm[0] - proj * T[0], nm[1] - proj * T[1], nm[2] - proj * T[2]))
+        axis_p = _add(mid, _scale(nm_perp, tool_r))
+        for t in (0.0, 0.5, 1.0):
+            P = _lerp(C0[i], C1[i], t)
+            d = _sub(P, axis_p)
+            pl = _dot(d, T)
+            rho = _norm((d[0] - pl * T[0], d[1] - pl * T[1], d[2] - pl * T[2]))
+            residuals.append(abs(rho - tool_r))
+    return residuals
+
+def tool_axis_disc_values(patches):
+    """返回所有相邻格胞刀轴夹角的列表（供分布统计）。"""
+    by_key = {(p.blade, p.row, p.col): p
+              for p in patches if p.row >= 0 and p.col >= 0 and p.tool_axis is not None}
+    vals = []
+    for (blade, row, col), p in by_key.items():
+        for dr, dc in ((0, 1), (1, 0)):
+            q = by_key.get((blade, row + dr, col + dc))
+            if q is None or q.tool_axis is None:
+                continue
+            d = abs(_dot(p.tool_axis, q.tool_axis))
+            d = max(-1.0, min(1.0, d))
+            vals.append(math.degrees(math.acos(d)))
+    return vals
+
+def flank_quality_stats(patches, tool_r):
+    """刀轨质量鲁棒统计：点-轴残差 / 刀轴不连续度 / 扭转角的分布统计。"""
+    residuals = []
+    for p in patches:
+        residuals.extend(flank_residuals(p.C0, p.C1, tool_r, flip=p.normal_flip, T=p.tool_axis))
+    return {
+        "residual": dist_stats(residuals),
+        "tool_axis_disc": dist_stats(tool_axis_disc_values(patches)),
+        "twist": dist_stats([p.twist for p in patches]),
+    }
+
 def point_cl_lines(C0, C1, stepover, ball_r, n_along=50, flip=1.0):
     """点铣 CL（球头刀，半径 ball_r）：刀心 = 曲面点 + ball_r·n，沿准线方向行切。
     flip=±1 控制刀心偏置到曲面的哪一侧。返回多条刀心行切折线（每条为点列）。"""
@@ -786,12 +861,14 @@ def summarize(patches, args):
     point_total = point_cut + point_overhead
     total_area = sum(p.area for p in patches)
     flank_err = max((p.flank_err for p in patches), default=0.0)
+    quality = flank_quality_stats(patches, getattr(args, 'tool_r', args.ball_r))
     return {
         "num_patches": len(patches),
         "flank_regions": n_flank_regions,
         "total_area": total_area,
         "original_area": orig_area,
         "flank_err": flank_err,
+        "quality": quality,
         "tool_axis_disc_before": round(getattr(args, 'tool_axis_disc_before', 0.0), 3),
         "tool_axis_disc_after": round(getattr(args, 'tool_axis_disc_after', 0.0), 3),
         "flank": {
@@ -835,6 +912,17 @@ def print_report(patches, args, summary):
     print(f"严谨侧铣点轴最大残差: {summary.get('flank_err', 0.0):.4f} mm  "
           f"刀轴相邻最大夹角: 光顺前 {summary.get('tool_axis_disc_before', 0.0):.2f}° "
           f"→ 光顺后 {summary.get('tool_axis_disc_after', 0.0):.2f}°")
+    q = summary.get("quality", {})
+    if q:
+        def fmt(d, unit=""):
+            return (f"max={d['max']:.4f}{unit} mean={d['mean']:.4f}{unit} "
+                    f"rms={d['rms']:.4f}{unit} p50={d['p50']:.4f}{unit} "
+                    f"p90={d['p90']:.4f}{unit} p95={d['p95']:.4f}{unit} "
+                    f"p99={d['p99']:.4f}{unit} (n={d['count']})")
+        print(f"刀轨质量统计（鲁棒分布，避免局部极值主导）:")
+        print(f"  点-轴残差(mm): {fmt(q['residual'], '')}")
+        print(f"  刀轴不连续度(°): {fmt(q['tool_axis_disc'], '')}")
+        print(f"  扭转角(°): {fmt(q['twist'], '')}")
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
