@@ -474,6 +474,24 @@ def flank_quality_stats(patches, tool_r):
         "twist": dist_stats([p.twist for p in patches]),
     }
 
+def point_quality_stats(patches, scallop, ball_r):
+    """点铣（常规球头刀行切）质量统计：残留高度/行距/总行数/总刀轨长。
+    点铣加工误差即残留高度（相邻行之间的残脊高度）。"""
+    stepover = 2.0 * math.sqrt(max(0.0, 2.0 * ball_r * scallop - scallop * scallop))
+    num_rows = 0
+    cl_len = 0.0
+    for p in patches:
+        n_across = max(1, int(round(p.mean_ruling / stepover))) if stepover > 0 else 1
+        num_rows += n_across + 1
+        cl_len += (n_across + 1) * p.directrix_len
+    return {
+        "scallop_mm": scallop,
+        "stepover_mm": round(stepover, 4),
+        "num_rows": num_rows,
+        "cl_len_mm": round(cl_len, 1),
+        "residual_mm": scallop,  # 残留高度即点铣加工误差（残脊高度）
+    }
+
 def point_cl_lines(C0, C1, stepover, ball_r, n_along=50, flip=1.0):
     """点铣 CL（球头刀，半径 ball_r）：刀心 = 曲面点 + ball_r·n，沿准线方向行切。
     flip=±1 控制刀心偏置到曲面的哪一侧。返回多条刀心行切折线（每条为点列）。"""
@@ -862,6 +880,7 @@ def summarize(patches, args):
     total_area = sum(p.area for p in patches)
     flank_err = max((p.flank_err for p in patches), default=0.0)
     quality = flank_quality_stats(patches, getattr(args, 'tool_r', args.ball_r))
+    point_quality = point_quality_stats(patches, args.scallop, args.ball_r)
     return {
         "num_patches": len(patches),
         "flank_regions": n_flank_regions,
@@ -869,6 +888,7 @@ def summarize(patches, args):
         "original_area": orig_area,
         "flank_err": flank_err,
         "quality": quality,
+        "point_quality": point_quality,
         "tool_axis_disc_before": round(getattr(args, 'tool_axis_disc_before', 0.0), 3),
         "tool_axis_disc_after": round(getattr(args, 'tool_axis_disc_after', 0.0), 3),
         "flank": {
@@ -923,6 +943,12 @@ def print_report(patches, args, summary):
         print(f"  点-轴残差(mm): {fmt(q['residual'], '')}")
         print(f"  刀轴不连续度(°): {fmt(q['tool_axis_disc'], '')}")
         print(f"  扭转角(°): {fmt(q['twist'], '')}")
+    pq = summary.get("point_quality", {})
+    if pq:
+        print(f"点铣质量统计（常规球头刀行切）:")
+        print(f"  残留高度={pq['scallop_mm']:.3f} mm  行距={pq['stepover_mm']:.3f} mm  "
+              f"总行数={pq['num_rows']}  总刀轨长={pq['cl_len_mm']:.1f} mm  "
+              f"加工误差(残脊)={pq['residual_mm']:.3f} mm")
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):

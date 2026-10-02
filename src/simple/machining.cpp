@@ -978,6 +978,14 @@ MachiningSummary computeToolpath(const std::string& inputDir,
     DistStats residSt = distStats(std::move(residAll));
     DistStats discSt = distStats(toolAxisDiscValues(patches));
     DistStats twistSt = distStats(std::move(twistAll));
+    // 点铣质量统计（常规球头刀行切）
+    int pointNumRows = 0;
+    double pointClLen = 0.0;
+    for (const auto& p : patches) {
+        int nAcross = stepover > 0 ? std::max(1, (int)std::lround(p.meanRuling / stepover)) : 1;
+        pointNumRows += nAcross + 1;
+        pointClLen += (nAcross + 1) * p.directrixLen;
+    }
     {
         std::ofstream o(outputDir + "/summary.json");
         if (o) {
@@ -1018,6 +1026,11 @@ MachiningSummary computeToolpath(const std::string& inputDir,
               << ",\"max\":" << twistSt.max << ",\"p50\":" << twistSt.p50
               << ",\"p90\":" << twistSt.p90 << ",\"p95\":" << twistSt.p95
               << ",\"p99\":" << twistSt.p99 << ",\"count\":" << twistSt.count << "}}"
+              << ",\"point_quality\":{\"scallop_mm\":" << cfg.scallop
+              << ",\"stepover_mm\":" << stepover
+              << ",\"num_rows\":" << pointNumRows
+              << ",\"cl_len_mm\":" << pointClLen
+              << ",\"residual_mm\":" << cfg.scallop << "}"
               << ",\"elapsed_sec\":" << sum.elapsedSec
               << ",\"patches\":[";
             for (size_t i = 0; i < patches.size(); ++i) {
