@@ -295,6 +295,60 @@ def flank_cl_lines(C0, C1, tool_r, n_along=50, axis_extend=None, flip=1.0):
                      _add(axis_p, _scale(rhat, half))])
     return feed, axes
 
+def _optimal_tool_axis(normals):
+    """弱共轭最优刀轴方向：法矢协方差矩阵的最小特征向量，即
+    argmin_{||T||=1} Σ(nS·T)²。可展时退化为母线方向（法矢共线、协方差秩1）。"""
+    import numpy as np
+    C = np.zeros((3, 3), dtype=float)
+    for v in normals:
+        vv = np.asarray(v, dtype=float)
+        C += np.outer(vv, vv)
+    _w, V = np.linalg.eigh(C)
+    return tuple(float(V[k, 0]) for k in range(3))
+
+def flank_cl_rigorous(C0, C1, tool_r, flip=1.0, n_along=50, axis_extend=None):
+    """严谨侧铣 CL（点-轴距离 + 弱共轭，单位分解刀位方案 v2 的落点）：
+      刀轴 T* = 法矢协方差最小特征向量（弱共轭最优，可展时=母线方向）；
+      刀心 axis_p = 母线中点沿 T* 正交方向偏置 tool_r；
+      返回 (feed, axes, max_err, mean_err)，其中 err = |ρ(P) − R| 为点-轴距离残差。"""
+    n = len(C0)
+    if n < 2:
+        return [], [], 0.0, 0.0
+    idx = ([int(round(i * (n - 1) / (n_along - 1))) for i in range(n_along)]
+           if n > n_along else list(range(n)))
+    n0s, n1s, rs = ruling_normals(C0, C1)
+    navg = [_normalize(_add(n0s[i], n1s[i])) for i in range(n)]
+    T = _optimal_tool_axis(navg)
+    rmid = rs[n // 2]
+    if _dot(T, rmid) < 0:
+        T = tuple(-x for x in T)
+    ext = tool_r if axis_extend is None else axis_extend
+    feed, axes = [], []
+    errs = []
+    for i in idx:
+        mid = _lerp(C0[i], C1[i], 0.5)
+        nm = _scale(navg[i], flip)
+        proj = _dot(nm, T)
+        nm_perp = _normalize((nm[0] - proj * T[0],
+                              nm[1] - proj * T[1],
+                              nm[2] - proj * T[2]))
+        axis_p = _add(mid, _scale(nm_perp, tool_r))
+        feed.append(axis_p)
+        r = rs[i]
+        rlen = _norm(r)
+        half = rlen * 0.5 + ext
+        axes.append([_add(axis_p, _scale(T, -half)),
+                     _add(axis_p, _scale(T, half))])
+        for t in (0.0, 0.5, 1.0):
+            P = _lerp(C0[i], C1[i], t)
+            d = _sub(P, axis_p)
+            pl = _dot(d, T)
+            rho = _norm((d[0] - pl * T[0], d[1] - pl * T[1], d[2] - pl * T[2]))
+            errs.append(abs(rho - tool_r))
+    max_err = max(errs) if errs else 0.0
+    mean_err = sum(errs) / len(errs) if errs else 0.0
+    return feed, axes, max_err, mean_err
+
 def point_cl_lines(C0, C1, stepover, ball_r, n_along=50, flip=1.0):
     """点铣 CL（球头刀，半径 ball_r）：刀心 = 曲面点 + ball_r·n，沿准线方向行切。
     flip=±1 控制刀心偏置到曲面的哪一侧。返回多条刀心行切折线（每条为点列）。"""
@@ -406,7 +460,7 @@ def export_toolpaths(out_dir, patches, args):
 
     flank_lines, point_lines = [], []
     for p in patches:
-        feed, axes = flank_cl_lines(p.C0, p.C1, tool_r, flip=p.normal_flip)
+        feed, axes, _maxe, _meane = flank_cl_rigorous(p.C0, p.C1, tool_r, flip=p.normal_flip)
         if len(feed) >= 2:
             flank_lines.append(feed)
         flank_lines.extend(axes)
@@ -431,6 +485,7 @@ class Patch:
     mean_ruling: float = 0.0
     area: float = 0.0
     twist: float = 0.0            # 法向扭转角（度）
+    flank_err: float = 0.0        # 严谨侧铣点-轴距离最大残差（mm）
     developable: bool = True
     flank_time: float = 0.0
     flank_len: float = 0.0
@@ -641,6 +696,10 @@ def compute(input_dir, args):
     flips = _blade_normal_flips(patches)
     for p in patches:
         p.normal_flip = flips.get(p.blade, 1.0)
+    # 严谨侧铣误差：点-轴距离残差（需在确定法向翻转后，用正确的偏置侧计算）
+    for p in patches:
+        _f, _a, p.flank_err, _m = flank_cl_rigorous(
+            p.C0, p.C1, getattr(args, 'tool_r', args.ball_r), flip=p.normal_flip)
     # 原始 NURBS 面积，供点铣基线 B 使用
     args.original_area = read_original_area(input_dir)
     return patches
@@ -667,11 +726,13 @@ def summarize(patches, args):
     point_overhead = getattr(args, 'point_overhead', 10.0)
     point_total = point_cut + point_overhead
     total_area = sum(p.area for p in patches)
+    flank_err = max((p.flank_err for p in patches), default=0.0)
     return {
         "num_patches": len(patches),
         "flank_regions": n_flank_regions,
         "total_area": total_area,
         "original_area": orig_area,
+        "flank_err": flank_err,
         "flank": {
             "cut": flank_cut,
             "overhead": flank_overhead,
@@ -687,10 +748,10 @@ def print_report(patches, args, summary):
           f"球刀R={args.ball_r}, 残留={args.scallop}, 可展阈值={args.twist_limit}°)")
     print(f"面片数: {summary['num_patches']}")
     print("=" * 96)
-    print(f"{'面片':<28}{'扭转°':>8}{'准线mm':>9}{'母线mm':>9}"
+    print(f"{'面片':<28}{'扭转°':>8}{'点轴误差mm':>10}{'准线mm':>9}{'母线mm':>9}"
           f"{'侧铣s':>9}{'点铣s':>9}")
     for p in patches:
-        print(f"{p.name:<28}{p.twist:>8.2f}"
+        print(f"{p.name:<28}{p.twist:>8.2f}{p.flank_err:>10.4f}"
               f"{p.directrix_len:>9.1f}{p.mean_ruling:>9.1f}"
               f"{p.flank_time:>9.2f}{p.point_time:>9.2f}")
     print("-" * 96)

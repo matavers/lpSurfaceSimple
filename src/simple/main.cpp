@@ -564,9 +564,10 @@ int main(int argc, char* argv[]) {
                   << ",\"pointCut\":" << s.pointCut
                   << ",\"pointTotal\":" << s.pointTotal
                   << ",\"speedup\":" << s.speedup
-                  << ",\"totalArea\":" << s.totalArea
-                  << ",\"originalArea\":" << s.originalArea
-                  << ",\"elapsedSec\":" << s.elapsedSec
+                   << ",\"totalArea\":" << s.totalArea
+                   << ",\"originalArea\":" << s.originalArea
+                   << ",\"maxFlankErr\":" << s.maxFlankErr
+                   << ",\"elapsedSec\":" << s.elapsedSec
                   << ",\"message\":\"" << jsonSafe(s.errorMsg) << "\"}" << std::endl;
         return s.ok ? 0 : 1;
     }

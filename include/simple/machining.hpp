@@ -27,6 +27,7 @@ struct MachiningSummary {
     double speedup = 0.0;       /* 提速比 */
     double totalArea = 0.0;     /* 拟合面面积 mm² */
     double originalArea = 0.0;  /* 原曲面面积 mm² */
+    double maxFlankErr = 0.0;   /* 严谨侧铣点-轴距离最大残差 mm */
     double elapsedSec = 0.0;    /* 刀轨计算耗时 s */
 };
 

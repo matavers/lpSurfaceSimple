@@ -366,29 +366,113 @@ std::vector<int> sampleIndices(int n, int nAlong) {
     return idx;
 }
 
-// 返回 (feed_pts, axis_segs)
-std::pair<Vec3Arr, std::vector<std::array<Vec3, 2>>> flankClLines(
-    const Vec3Arr& C0, const Vec3Arr& C1, double toolR, double flip, int nAlong) {
+// ────────────────────────────────────────────────────────────
+// 严谨侧铣刀位：弱共轭最优刀轴（法矢协方差最小特征向量）+ 点-轴距离残差
+// ────────────────────────────────────────────────────────────
+
+// 3x3 对称矩阵 Jacobi 特征分解，返回特征值升序 vals[3] 与特征向量 vecs[3][3]（列）
+static void jacobi3(const double A[3][3], double vals[3], double vecs[3][3]) {
+    double a[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) a[i][j] = A[i][j];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) vecs[i][j] = (i == j) ? 1.0 : 0.0;
+    for (int iter = 0; iter < 64; ++iter) {
+        int p = 0, q = 1;
+        double mx = std::fabs(a[0][1]);
+        if (std::fabs(a[0][2]) > mx) { mx = std::fabs(a[0][2]); p = 0; q = 2; }
+        if (std::fabs(a[1][2]) > mx) { mx = std::fabs(a[1][2]); p = 1; q = 2; }
+        if (mx < 1e-15) break;
+        double app = a[p][p], aqq = a[q][q], apq = a[p][q];
+        double theta = 0.5 * std::atan2(2.0 * apq, app - aqq);
+        double c = std::cos(theta), s = std::sin(theta);
+        a[p][p] = c * c * app + 2.0 * s * c * apq + s * s * aqq;
+        a[q][q] = s * s * app - 2.0 * s * c * apq + c * c * aqq;
+        a[p][q] = a[q][p] = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            if (k == p || k == q) continue;
+            double akp = a[k][p], akq = a[k][q];
+            a[k][p] = a[p][k] = c * akp + s * akq;
+            a[k][q] = a[q][k] = -s * akp + c * akq;
+        }
+        for (int k = 0; k < 3; ++k) {
+            double vkp = vecs[k][p], vkq = vecs[k][q];
+            vecs[k][p] = c * vkp + s * vkq;
+            vecs[k][q] = -s * vkp + c * vkq;
+        }
+    }
+    int idx[3] = {0, 1, 2};
+    for (int i = 0; i < 3; ++i)
+        for (int j = i + 1; j < 3; ++j)
+            if (a[idx[j]][idx[j]] < a[idx[i]][idx[i]]) std::swap(idx[i], idx[j]);
+    double tmpV[3];
+    for (int j = 0; j < 3; ++j) {
+        vals[j] = a[idx[j]][idx[j]];
+        for (int k = 0; k < 3; ++k) tmpV[k] = vecs[k][idx[j]];
+        for (int k = 0; k < 3; ++k) vecs[k][j] = tmpV[k];
+    }
+}
+
+// 弱共轭最优刀轴方向：法矢协方差矩阵的最小特征向量（min Σ(nS·T)², ||T||=1）
+static Vec3 smallestEigenvector(const std::vector<Vec3>& normals) {
+    double C[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    for (const auto& n : normals)
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                C[a][b] += n[a] * n[b];
+    double vals[3], vecs[3][3];
+    jacobi3(C, vals, vecs);
+    return Vec3(vecs[0][0], vecs[1][0], vecs[2][0]);
+}
+
+struct RigorousFlank {
     Vec3Arr feed;
     std::vector<std::array<Vec3, 2>> axes;
+    double maxErr = 0.0;
+    double meanErr = 0.0;
+};
+
+// 严谨侧铣 CL：刀轴 = 弱共轭最优方向，刀心 = 母线中点沿 T 正交方向偏置 R；
+// err = |ρ(P) − R| 为点-轴距离残差（过切/欠切口径）。
+static RigorousFlank flankClRigorous(const Vec3Arr& C0, const Vec3Arr& C1,
+                                     double toolR, double flip, int nAlong) {
+    RigorousFlank out;
     int n = (int)C0.size();
-    if (n < 2) return {feed, axes};
+    if (n < 2) return out;
     auto idx = sampleIndices(n, nAlong);
     RulingNormals rn = rulingNormals(C0, C1);
+    std::vector<Vec3> navg(n);
+    for (int i = 0; i < n; ++i) navg[i] = normalized(rn.n0[i] + rn.n1[i]);
+    Vec3 T = smallestEigenvector(navg);
+    if (T.dot(rn.r[n / 2]) < 0.0) T = -T;
     double ext = toolR;
+    double sumErr = 0.0;
+    int cnt = 0;
     for (int i : idx) {
         Vec3 mid = lerp3(C0[i], C1[i], 0.5);
         Vec3 nm = normalized(rn.n0[i] + rn.n1[i]) * flip;
+        double proj = nm.dot(T);
+        Vec3 nmPerp = normalized(nm - T * proj);
+        Vec3 axisP = mid + nmPerp * toolR;
+        out.feed.push_back(axisP);
         Vec3 r = rn.r[i];
         double rlen = r.norm();
         if (rlen < 1e-12) continue;
-        Vec3 rhat = r / rlen;
-        Vec3 axisP = mid + nm * toolR;
-        feed.push_back(axisP);
         double half = rlen * 0.5 + ext;
-        axes.push_back({axisP - rhat * half, axisP + rhat * half});
+        out.axes.push_back({axisP - T * half, axisP + T * half});
+        for (double t : {0.0, 0.5, 1.0}) {
+            Vec3 P = lerp3(C0[i], C1[i], t);
+            Vec3 d = P - axisP;
+            double pl = d.dot(T);
+            double rho = (d - T * pl).norm();
+            double err = std::fabs(rho - toolR);
+            out.maxErr = std::max(out.maxErr, err);
+            sumErr += err;
+            ++cnt;
+        }
     }
-    return {feed, axes};
+    out.meanErr = cnt > 0 ? sumErr / cnt : 0.0;
+    return out;
 }
 
 // 返回多条行切折线
@@ -708,19 +792,22 @@ MachiningSummary computeToolpath(const std::string& inputDir,
     // 7) 导出刀轨（侧铣 + 点铣）
     {
         std::vector<Vec3Arr> flankLines, feedLines, axisLines, pointLines;
+        double maxFlankErr = 0.0;
         for (const auto& p : patches) {
-            auto [feed, axes] = flankClLines(p.C0, p.C1, cfg.tool_r, p.normalFlip, 50);
-            if (feed.size() >= 2) {
-                flankLines.push_back(feed);
-                feedLines.push_back(feed);
+            RigorousFlank rf = flankClRigorous(p.C0, p.C1, cfg.tool_r, p.normalFlip, 50);
+            maxFlankErr = std::max(maxFlankErr, rf.maxErr);
+            if (rf.feed.size() >= 2) {
+                flankLines.push_back(rf.feed);
+                feedLines.push_back(rf.feed);
             }
-            for (const auto& seg : axes) {
+            for (const auto& seg : rf.axes) {
                 flankLines.push_back({seg[0], seg[1]});
                 axisLines.push_back({seg[0], seg[1]});
             }
             for (auto& l : pointClLines(p.C0, p.C1, stepover, cfg.ball_r, p.normalFlip, 50))
                 pointLines.push_back(std::move(l));
         }
+        sum.maxFlankErr = maxFlankErr;
         // 合并（进给 + 刀轴），供 NX/DXF 导入
         writeVtkPolylines(outputDir + "/toolpath_flank.vtk", flankLines);
         writeLinesCsv(outputDir + "/toolpath_flank.csv", flankLines);
@@ -758,6 +845,7 @@ MachiningSummary computeToolpath(const std::string& inputDir,
               << ",\"overhead\":" << cfg.point_overhead
               << ",\"total\":" << pointTotal << "},"
               << "\"speedup\":" << speedup
+              << ",\"max_flank_err\":" << sum.maxFlankErr
               << ",\"elapsed_sec\":" << sum.elapsedSec
               << ",\"patches\":[";
             for (size_t i = 0; i < patches.size(); ++i) {

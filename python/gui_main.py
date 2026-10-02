@@ -258,6 +258,7 @@ class MachiningCppWorker(QThread):
                     'total': info.get('pointTotal', 0.0),
                 },
                 'elapsed': info.get('elapsedSec', 0.0),
+                'flank_err': info.get('maxFlankErr', 0.0),
             }
             patches = []
             sj = os.path.join(self._tp_dir, "summary.json")
@@ -1059,6 +1060,8 @@ class MainWindow(QMainWindow):
             lines.append(f"A 相对 B 提速: {p['total'] / f['total']:.1f}x")
         if summary.get('elapsed'):
             lines.append(f"C++ 刀轨计算耗时: {summary['elapsed']:.3f}s")
+        if summary.get('flank_err'):
+            lines.append(f"严谨侧铣点轴最大残差: {summary['flank_err']:.4f} mm")
         lines.append("")
         for pp in patches:
             lines.append(f"{pp.name}: 扭转 {pp.twist:.2f}° "
