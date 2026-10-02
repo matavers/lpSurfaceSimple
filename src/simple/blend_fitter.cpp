@@ -302,4 +302,32 @@ bool exportSurfaceModelJson(const std::string& path,
     return true;
 }
 
+bool exportBlendSurfaceOBJ(const std::string& path,
+                           const GridResult& gr,
+                           const BlendConfig& cfg,
+                           int nU, int nV) {
+    if (gr.uEdges.empty() || gr.vEdges.empty()) return false;
+    double u0 = gr.uEdges.front(), u1 = gr.uEdges.back();
+    double v0 = gr.vEdges.front(), v1 = gr.vEdges.back();
+    nU = std::max(2, nU);
+    nV = std::max(2, nV);
+    Vec3Arr verts((nU + 1) * (nV + 1));
+    FaceArr faces;
+    for (int i = 0; i <= nU; ++i) {
+        double u = u0 + (u1 - u0) * i / nU;
+        for (int j = 0; j <= nV; ++j) {
+            double v = v0 + (v1 - v0) * j / nV;
+            verts[i * (nV + 1) + j] = evalBlend(gr, cfg, u, v);
+        }
+    }
+    for (int i = 0; i < nU; ++i) {
+        for (int j = 0; j < nV; ++j) {
+            int a = i * (nV + 1) + j;
+            faces.push_back({a, a + 1, a + nV + 1});
+            faces.push_back({a + 1, a + nV + 2, a + nV + 1});
+        }
+    }
+    return exportOBJ(path, verts, faces);
+}
+
 } // namespace simple

@@ -50,4 +50,10 @@ bool exportSurfaceModelJson(const std::string& path,
                             const GridResult& gr,
                             const BlendConfig& cfg);
 
+// 导出全局 C^k 曲面网格 OBJ（供 UI 可视化拟合结果）。
+bool exportBlendSurfaceOBJ(const std::string& path,
+                           const GridResult& gr,
+                           const BlendConfig& cfg,
+                           int nU = 160, int nV = 80);
+
 } // namespace simple

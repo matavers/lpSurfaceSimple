@@ -1003,7 +1003,9 @@ int main(int argc, char* argv[]) {
         exportTransitionBandVTK(outDir + "/blade2_transition_band.vtk", gr2, bcfg);
         exportSurfaceModelJson(outDir + "/blade1_surface_model.json", gr1, bcfg);
         exportSurfaceModelJson(outDir + "/blade2_surface_model.json", gr2, bcfg);
-        std::cout << "  wrote transition band VTKs + surface model JSONs "
+        exportBlendSurfaceOBJ(outDir + "/blade1_blend_surface.obj", gr1, bcfg);
+        exportBlendSurfaceOBJ(outDir + "/blade2_blend_surface.obj", gr2, bcfg);
+        std::cout << "  wrote transition band VTKs + surface model JSONs + surface OBJs "
                   << "(complete C^k surface, partition function + ruled B-splines)"
                   << std::endl;
     }

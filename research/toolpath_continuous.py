@@ -155,7 +155,8 @@ def _bspline_mx(u, P, knots, degree):
 
 # ── 刀轴场优化（CasADi） ─────────────────────────────────────
 def optimize_tool_axis_field(model_path, n_ctrl=24, w_smooth=0.5,
-                             n_quad=100, solver="ipopt", continuity=None):
+                             n_quad=100, solver="ipopt", continuity=None,
+                             tool_r=5.0):
     model = load_surface_model(model_path)
     surf = build_surface_eval(model)
     k = continuity if continuity is not None else model["partition"]["continuity"]
@@ -248,10 +249,24 @@ def optimize_tool_axis_field(model_path, n_ctrl=24, w_smooth=0.5,
         Ti = Ti / (np.linalg.norm(Ti) + 1e-12)
         conj_vals.append(float(np.dot(Ti, nSi)) ** 2)
 
+    # 刀位（CL）：刀心 A(u) = S(u,v_mid) + tool_r·nS；刀轴线段 A ± (L/2+tool_r)·T
+    S_grid = np.array([surf(ui, v_mid)[0] for ui in u_grid])
+    nS_dense = np.array([surf(ui, v_mid)[1] for ui in u_grid])
+    A_grid = S_grid + tool_r * nS_dense
+    # 母线长度（跨 v 两端距离的均值）
+    edge_lens = []
+    for ui in u_grid[::20]:
+        edge_lens.append(np.linalg.norm(surf(ui, model["vEdges"][-1])[0] - surf(ui, model["vEdges"][0])[0]))
+    L = float(np.mean(edge_lens)) if edge_lens else 0.0
+    half = L * 0.5 + tool_r
+    axis_segs = np.stack([A_grid - half * T_grid, A_grid + half * T_grid], axis=1)
+
     return {
         "u_grid": u_grid,
         "T_grid": T_grid,
         "Tp_grid": Tp_grid,
+        "A_grid": A_grid,
+        "axis_segs": axis_segs,
         "conjugate": {"mean": float(np.mean(conj_vals)), "rms": float(np.sqrt(np.mean(np.array(conj_vals) ** 2)))},
         "smoothness": {"mean": float(np.mean(np.linalg.norm(Tp_grid, axis=1))),
                        "max": float(np.max(np.linalg.norm(Tp_grid, axis=1)))},
@@ -261,18 +276,51 @@ def optimize_tool_axis_field(model_path, n_ctrl=24, w_smooth=0.5,
             "fitDir": model["fitDir"], "continuity": k,
             "bandWidth": model["partition"]["bandWidth"],
             "n_cells": len(model["cells"]),
+            "tool_r": tool_r,
         },
     }
 
 
+def write_continuous_toolpath_vtk(res, out_path):
+    """导出连续刀轨（进给折线 + 刀轴线段）到 VTK，供 UI 可视化。"""
+    feed = res["A_grid"]
+    axes = res["axis_segs"]
+    lines = [feed]
+    lines.extend([[seg[0], seg[1]] for seg in axes])
+    n_pts = sum(len(l) for l in lines)
+    n_segs = sum(len(l) - 1 for l in lines if len(l) >= 2)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("# vtk DataFile Version 3.0\ncontinuous toolpath\nASCII\nDATASET POLYDATA\n")
+        f.write(f"POINTS {n_pts} float\n")
+        for l in lines:
+            for p in l:
+                f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+        f.write(f"LINES {n_segs} {n_segs * 3}\n")
+        base = 0
+        for l in lines:
+            for i in range(len(l) - 1):
+                f.write(f"2 {base + i} {base + i + 1}\n")
+            base += len(l)
+
+
 if __name__ == "__main__":
     import sys
+    import os
     path = sys.argv[1] if len(sys.argv) > 1 else None
     if not path:
-        print("usage: python toolpath_continuous.py <surface_model.json>")
+        print("usage: python toolpath_continuous.py <surface_model.json> [--out <dir>]")
         sys.exit(1)
+    out_dir = None
+    if "--out" in sys.argv:
+        out_dir = sys.argv[sys.argv.index("--out") + 1]
     res = optimize_tool_axis_field(path)
     print(f"曲面: {res['meta']['n_cells']} 格, continuity=C{res['meta']['continuity']}, "
           f"bandWidth={res['meta']['bandWidth']}")
     print(f"共轭残差: mean={res['conjugate']['mean']:.6f} rms={res['conjugate']['rms']:.6f}")
     print(f"刀轴光顺度: mean={res['smoothness']['mean']:.6f} max={res['smoothness']['max']:.6f}")
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        stem = os.path.basename(path).replace("_surface_model.json", "")
+        vtk_path = os.path.join(out_dir, f"{stem}_toolpath_continuous.vtk")
+        write_continuous_toolpath_vtk(res, vtk_path)
+        print(f"已导出连续刀轨: {vtk_path}")

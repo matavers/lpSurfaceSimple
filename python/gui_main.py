@@ -446,6 +446,8 @@ class MainWindow(QMainWindow):
         self._surfaceMaxErr = [0.0, 0.0]
         self._surfaceRmsErr = [0.0, 0.0]
         self._bandCount = [0, 0]
+        self._blendSurfaceCount = [0, 0]
+        self._contToolpathCount = [0, 0]
         self._currentVersion = 0
         self._mode = "ruled"
         self._single_file_mode = False
@@ -1917,8 +1919,9 @@ class MainWindow(QMainWindow):
         self._surfaceMaxErr = [0.0, 0.0]
         self._surfaceRmsErr = [0.0, 0.0]
         self._bandCount = [0, 0]
-        if hasattr(self, '_mach_tol_item'):
-            self._set_tol_item_checked(False)
+        self._blendSurfaceCount = [0, 0]
+        self._contToolpathCount = [0, 0]
+        if hasattr(self, '_mach_tol_item'):            self._set_tol_item_checked(False)
         self._tol_actors = []
         self._clear_3d()
         self._console.clear()
@@ -2059,6 +2062,22 @@ class MainWindow(QMainWindow):
                 band_node.setData(2, Qt.UserRole, "band")
                 bnode.addChild(band_node)
 
+            if self._blendSurfaceCount[bi]:
+                surf_node = QTreeWidgetItem(["C^k 曲面 (拟合结果)"])
+                surf_node.setFlags(surf_node.flags() | Qt.ItemIsUserCheckable)
+                surf_node.setCheckState(0, Qt.Checked)
+                surf_node.setData(1, Qt.UserRole, f"blade{bi + 1}_blend_surface")
+                surf_node.setData(2, Qt.UserRole, "blend_surface")
+                bnode.addChild(surf_node)
+
+            if self._contToolpathCount[bi]:
+                tp_node = QTreeWidgetItem(["连续刀轨 (刀轨计算)"])
+                tp_node.setFlags(tp_node.flags() | Qt.ItemIsUserCheckable)
+                tp_node.setCheckState(0, Qt.Checked)
+                tp_node.setData(1, Qt.UserRole, f"blade{bi + 1}_cont_toolpath")
+                tp_node.setData(2, Qt.UserRole, "cont_toolpath")
+                bnode.addChild(tp_node)
+
     def _load_meta(self, meta_path):
         meta = None
         for attempt in range(5):
@@ -2110,12 +2129,18 @@ class MainWindow(QMainWindow):
         mesh_files = []
         grid_files = []
         self._bandCount = [0, 0]
+        self._blendSurfaceCount = [0, 0]
+        self._contToolpathCount = [0, 0]
 
         for fn in sorted(os.listdir(out_dir)):
             if fn.endswith('.obj'):
                 bi = 0 if "blade1" in fn else 1
                 if fn.endswith('_mesh.obj'):
                     mesh_files.append(fn)
+                elif fn.endswith('_blend_surface.obj'):
+                    self._blendSurfaceCount[bi] += 1
+                    files.append((os.path.normpath(os.path.join(out_dir, fn)),
+                                  fn.replace('.obj', ''), "blend_surface", bi))
                 else:
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
                                   fn.replace('.obj', ''), "ruled", bi))
@@ -2125,6 +2150,10 @@ class MainWindow(QMainWindow):
                     self._bandCount[bi] += 1
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
                                   fn.replace('.vtk', ''), "band", bi))
+                elif fn.endswith('_toolpath_continuous.vtk'):
+                    self._contToolpathCount[bi] += 1
+                    files.append((os.path.normpath(os.path.join(out_dir, fn)),
+                                  fn.replace('.vtk', ''), "cont_toolpath", bi))
                 else:
                     grid_files.append(fn)
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
@@ -2192,6 +2221,16 @@ class MainWindow(QMainWindow):
                         mesh, name=name, color=[0.95, 0.30, 0.20], line_width=3)
                 except TypeError:
                     self._plotter.add_mesh(mesh, name=name, color=[0.95, 0.30, 0.20])
+            elif tag == "blend_surface":
+                self._plotter.add_mesh(
+                    mesh, name=name, color=[0.45, 0.75, 0.55], opacity=0.6,
+                    show_edges=False)
+            elif tag == "cont_toolpath":
+                try:
+                    self._plotter.add_mesh(
+                        mesh, name=name, color=[0.60, 0.40, 0.95], line_width=3)
+                except TypeError:
+                    self._plotter.add_mesh(mesh, name=name, color=[0.60, 0.40, 0.95])
             self._log(f"  Loaded {tag}: {name}")
         except Exception as e:
             self._log(f"  Load error {name}: {e}")
