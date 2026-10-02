@@ -146,8 +146,8 @@ def _bspline_deriv_ctrl(P, knots, degree):
 # 完整版刀轴场优化（CasADi + IPOPT）
 # ════════════════════════════════════════════════════════════
 def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=30, tool_r=5.0,
-                             w_conj=1.0, w_smooth_T=0.5, continuity=None,
-                             max_iter=300):
+                             w_conj=1.0, w_ruling=1.0, w_smooth_T=0.5,
+                             continuity=None, max_iter=300):
     model = load_surface_model(model_path)
     k = continuity if continuity is not None else model["partition"]["continuity"]
     u_min, u_max = model["uEdges"][0], model["uEdges"][-1]
@@ -166,6 +166,10 @@ def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=30, tool_r=5.0,
     S_hi = np.array([surf(ui, v_max)[0] for ui in us])
     # 刀心固定：母线中点沿法向偏置 R（避免刀心沿刀轴漂移）
     A_fix = S_mid + tool_r * nS_mid
+    # 母线方向（= 直纹方向，刀轴应沿此方向）Sv = ∂S/∂v，数值差分求
+    eps = 1e-4 * (v_max - v_min)
+    Sv = np.array([(surf(ui, v_mid + eps)[0] - surf(ui, v_mid - eps)[0]) / (2 * eps) for ui in us])
+    Sv_norm = Sv / (np.linalg.norm(Sv, axis=1, keepdims=True) + 1e-12)
 
     # 刀轴 B 样条（degree = k+1，C^k 连续）
     degree = k + 1
@@ -196,18 +200,19 @@ def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=30, tool_r=5.0,
             proj = ca.dot(d, Tn)
             rho = ca.norm_2(d - Tn * proj)
             obj += wi * (rho - tool_r) ** 2
-        # 共轭 + 光顺 + 单位约束
+        # 共轭 + 直纹方向对齐 + 光顺 + 单位约束
         obj += wi * (w_conj * (ca.dot(nSi, Tn)) ** 2
+                     + w_ruling * (1.0 - (ca.dot(Tn, ca.DM(Sv_norm[i]))) ** 2)
                      + w_smooth_T * ca.dot(ca.substitute(Tp_raw, u, ui), ca.substitute(Tp_raw, u, ui))
                      + 1.0 * (ca.dot(Ti, Ti) - 1.0) ** 2)
 
-    # 初值：法矢协方差最小特征向量（⊥ 平均法矢）
+    # 初值：法矢协方差最小特征向量（≈ 母线方向），符号对齐平均母线方向
     C = np.zeros((3, 3))
     for ni in nS_mid:
         C += np.outer(ni, ni)
     _, V = np.linalg.eigh(C)
     T_init = V[:, 0]
-    if np.dot(T_init, nS_mid.mean(axis=0)) > 0:
+    if np.dot(T_init, Sv_norm.mean(axis=0)) < 0:
         T_init = -T_init
     x0 = np.tile(T_init, n_ctrl).astype(float)          # 列主序展平
 
