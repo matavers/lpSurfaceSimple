@@ -268,6 +268,7 @@ def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=30, tool_r=5.0,
 def write_continuous_toolpath_vtk(res, out_path):
     feed = res["A_grid"]
     axes = res["axis_segs"]
+    # 进给折线 + 刀轴线段合并写入（供拟合树可视化）
     lines = [feed]
     lines.extend([[seg[0], seg[1]] for seg in axes])
     n_pts = sum(len(l) for l in lines)
@@ -284,6 +285,22 @@ def write_continuous_toolpath_vtk(res, out_path):
             for i in range(len(l) - 1):
                 f.write(f"2 {base + i} {base + i + 1}\n")
             base += len(l)
+    # 分开写进给轨迹与刀轴线段（供加工工作台可视化控制）
+    for suffix, seg_list in (("_feed", [feed]), ("_axis", [[s[0], s[1]] for s in axes])):
+        with open(out_path.replace(".vtk", suffix + ".vtk"), "w", encoding="utf-8") as f:
+            n_pts = sum(len(l) for l in seg_list)
+            n_segs = sum(len(l) - 1 for l in seg_list if len(l) >= 2)
+            f.write("# vtk DataFile Version 3.0\ntoolpath\nASCII\nDATASET POLYDATA\n")
+            f.write(f"POINTS {n_pts} float\n")
+            for l in seg_list:
+                for p in l:
+                    f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+            f.write(f"LINES {n_segs} {n_segs * 3}\n")
+            base = 0
+            for l in seg_list:
+                for i in range(len(l) - 1):
+                    f.write(f"2 {base + i} {base + i + 1}\n")
+                base += len(l)
 
 
 if __name__ == "__main__":

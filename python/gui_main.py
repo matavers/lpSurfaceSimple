@@ -1014,11 +1014,35 @@ class MainWindow(QMainWindow):
     def _on_tool_computed_continuous(self, out_dir):
         self._btn_tool.setEnabled(True)
         self._log("[Machining] 连续刀轨计算完成。")
+        self._render_toolpath_continuous()
         self._load_all_objs()
         self._build_tree()
         self._apply_visibility()
-        if HAS_PYVISTA:
-            self._plotter.render()
+
+    def _render_toolpath_continuous(self):
+        """渲染连续刀轨：进给轨迹(orange) + 刀轴线段(red)，受加工工作台开关控制。"""
+        if not HAS_PYVISTA:
+            return
+        import pyvista as pv
+        self._remove_tool_actors()
+        show_feed = (not hasattr(self, '_mach_flank_item')
+                     or self._mach_flank_item.checkState(0) == Qt.Checked)
+        show_axis = (not hasattr(self, '_mach_axis_item')
+                     or self._mach_axis_item.checkState(0) == Qt.Checked)
+        out_dir = self._out_dir
+        for fn in sorted(os.listdir(out_dir)):
+            path = os.path.join(out_dir, fn)
+            if fn.endswith('_toolpath_continuous_feed.vtk'):
+                pd = pv.read(path)
+                a = self._plotter.add_mesh(pd, color='#e66101', line_width=4, name='flank_feed')
+                a.SetVisibility(show_feed)
+                self._tool_actors.append(a)
+            elif fn.endswith('_toolpath_continuous_axis.vtk'):
+                pd = pv.read(path)
+                a = self._plotter.add_mesh(pd, color='#d62728', line_width=2, name='flank_axis')
+                a.SetVisibility(show_axis)
+                self._tool_actors.append(a)
+        self._plotter.render()
 
     def _on_tool_failed(self, msg):
         self._btn_tool.setEnabled(True)
