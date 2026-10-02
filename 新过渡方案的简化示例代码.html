@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>单位分解硬连续曲面 · 简易演示</title>
+<style>
+  body { margin:0; overflow:hidden; background:#0b0e18; font-family:system-ui,sans-serif; }
+  #info {
+    position:absolute; top:12px; left:12px; color:#e8eefc;
+    background:rgba(10,14,26,.72); padding:12px 16px; border-radius:10px;
+    font-size:13px; line-height:1.7; max-width:330px; backdrop-filter:blur(6px);
+    border:1px solid rgba(120,160,255,.25);
+  }
+  #info b { color:#7cc4ff; }
+  #controls {
+    position:absolute; bottom:22px; left:22px; color:#e8eefc;
+    background:rgba(10,14,26,.72); padding:14px 18px; border-radius:10px;
+    border:1px solid rgba(120,160,255,.25); font-size:13px;
+  }
+  input[type=range]{ width:220px; accent-color:#5aa9ff; }
+  .val { color:#7cc4ff; font-weight:600; }
+</style>
+</head>
+<body>
+<div id="info">
+  <b>单位分解硬连续曲面</b><br>
+  2×2 格胞，每格一个双曲抛物面（直纹面）。<br>
+  过渡带内用 \(C^2\) 单位分解混合，全局曲面 \(S\in C^2\)，这是构造保证的硬连续，不是优化软约束。<br>
+  <span style="color:#ffaa55">橙色半透明</span>为原始四片直纹面，<span style="color:#66ccff">蓝色</span>为混合结果。
+</div>
+<div id="controls">
+  <label>过渡带宽度 t = <span class="val" id="tval">0.15</span></label><br>
+  <input type="range" id="tw" min="0.02" max="0.45" step="0.01" value="0.15">
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ========== 场景 ==========
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0e18);
+scene.fog = new THREE.Fog(0x0b0e18, 6, 14);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.01, 100);
+camera.position.set(2.6, 2.2, 2.8);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const dl1 = new THREE.DirectionalLight(0xffffff, 1.4); dl1.position.set(4,6,3); scene.add(dl1);
+const dl2 = new THREE.DirectionalLight(0x88aaff, 0.7); dl2.position.set(-4,2,-3); scene.add(dl2);
+const dl3 = new THREE.DirectionalLight(0xffaa66, 0.4); dl3.position.set(0,-3,-4); scene.add(dl3);
+
+// 地面网格（参考）
+const grid = new THREE.GridHelper(6, 12, 0x223055, 0x1a2440);
+grid.position.y = -1.2;
+scene.add(grid);
+
+// ========== 数学构造 ==========
+
+// C² smootherstep
+function smootherstep(t){
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  return t*t*t*(t*(t*6 - 15) + 10);
+}
+
+// 一维基函数 χ(u; uL,uR,a,b)
+function chi(u, uL, uR, a, b){
+  if (u <= uL - a || u >= uR + b) return 0;
+  if (u < uL) return smootherstep((u - (uL - a)) / a);
+  if (u <= uR) return 1;
+  return 1 - smootherstep((u - uR) / b);
+}
+
+// 网格：2×2
+const nu = 2, nv = 2;
+const uNodes = [], vNodes = [];
+for (let i = 0; i <= nu; i++) uNodes.push(i / nu);
+for (let j = 0; j <= nv; j++) vNodes.push(j / nv);
+
+// 每格的“直纹面”参数：高度 + 扭曲强度
+const heights = [[0.00, 0.90],[0.55, -0.35]];
+const twist   = [[0.55, -0.45],[-0.50, 0.60]];
+
+// 第 (i,j) 格的直纹面 R_ij(u,v) 的高度
+function Rz(u, v, i, j){
+  const uc = (i + 0.5) / nu;
+  const vc = (j + 0.5) / nv;
+  return heights[j][i] + twist[j][i] * (u - uc) * (v - vc);
+}
+
+// 过渡带宽度
+let gA = 0.15, gB = 0.15;
+
+// 全局混合曲面 S 的高度
+function Sz(u, v){
+  let sumPhi = 0, z = 0;
+  for (let j = 0; j < nv; j++){
+    for (let i = 0; i < nu; i++){
+      const phi = chi(u, uNodes[i], uNodes[i+1], gA, gB)
+                * chi(v, vNodes[j], vNodes[j+1], gA, gB);
+      sumPhi += phi;
+      z += phi * Rz(u, v, i, j);
+    }
+  }
+  return sumPhi > 1e-12 ? z / sumPhi : 0;
+}
+
+// ========== 几何构建 ==========
+
+const SCALE_XY = 2.2;   // 参数域 -> 空间范围
+const SCALE_Z  = 1.4;   // 高度放大
+
+function buildSurfaceGeometry(N = 140){
+  const pos = [], idx = [];
+  for (let iv = 0; iv <= N; iv++){
+    for (let iu = 0; iu <= N; iu++){
+      const u = iu / N, v = iv / N;
+      const z = Sz(u, v);
+      pos.push((u - 0.5) * SCALE_XY, z * SCALE_Z, (v - 0.5) * SCALE_XY);
+    }
+  }
+  for (let iv = 0; iv < N; iv++){
+    for (let iu = 0; iu < N; iu++){
+      const a = iv*(N+1)+iu, b = a+1, c = a+(N+1), d = c+1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+function buildPatchGeometry(i, j, N = 30){
+  const uL = uNodes[i], uR = uNodes[i+1];
+  const vL = vNodes[j], vR = vNodes[j+1];
+  const pos = [], idx = [];
+  for (let iv = 0; iv <= N; iv++){
+    for (let iu = 0; iu <= N; iu++){
+      const u = uL + (uR-uL)*iu/N;
+      const v = vL + (vR-vL)*iv/N;
+      const z = Rz(u, v, i, j);
+      pos.push((u - 0.5)*SCALE_XY, z*SCALE_Z, (v - 0.5)*SCALE_XY);
+    }
+  }
+  for (let iv = 0; iv < N; iv++){
+    for (let iu = 0; iu < N; iu++){
+      const a = iv*(N+1)+iu, b = a+1, c = a+(N+1), d = c+1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+// ========== 材质与对象 ==========
+
+const surfMat = new THREE.MeshPhysicalMaterial({
+  color: 0x4fb3ff,
+  metalness: 0.25,
+  roughness: 0.28,
+  clearcoat: 0.7,
+  clearcoatRoughness: 0.15,
+  side: THREE.DoubleSide,
+  flatShading: false
+});
+
+const patchMat = new THREE.MeshBasicMaterial({
+  color: 0xffaa55,
+  transparent: true,
+  opacity: 0.16,
+  side: THREE.DoubleSide,
+  depthWrite: false
+});
+
+let surfMesh = null;
+let patchMeshes = [];
+
+function rebuild(){
+  // 移除旧的
+  if (surfMesh){ scene.remove(surfMesh); surfMesh.geometry.dispose(); }
+  patchMeshes.forEach(m => { scene.remove(m); m.geometry.dispose(); });
+  patchMeshes = [];
+
+  // 混合曲面
+  surfMesh = new THREE.Mesh(buildSurfaceGeometry(140), surfMat);
+  scene.add(surfMesh);
+
+  // 原始直纹面片（半透明参考）
+  for (let j = 0; j < nv; j++){
+    for (let i = 0; i < nu; i++){
+      const m = new THREE.Mesh(buildPatchGeometry(i, j, 30), patchMat);
+      scene.add(m);
+      patchMeshes.push(m);
+    }
+  }
+}
+
+rebuild();
+
+// ========== UI ==========
+const tw = document.getElementById('tw');
+const tval = document.getElementById('tval');
+tw.addEventListener('input', () => {
+  gA = gB = parseFloat(tw.value);
+  tval.textContent = gA.toFixed(2);
+  rebuild();
+});
+
+// ========== 渲染循环 ==========
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>

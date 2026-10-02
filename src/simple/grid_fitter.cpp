@@ -1,0 +1,548 @@
+#include "simple/grid_fitter.hpp"
+
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <queue>
+#include <limits>
+#include <cmath>
+#include <algorithm>
+
+namespace simple {
+
+namespace {
+
+// 拟合单个格子（指定方向 dir）。
+GridCell fitOneCell(const SurfaceWrapper& surf, int r, int c,
+                    double u0, double u1, double v0, double v1,
+                    const GridConfig& cfg, bool planar, ParamDir dir)
+{
+    GridCell cell;
+    cell.row = r;
+    cell.col = c;
+    cell.u0 = u0; cell.u1 = u1; cell.v0 = v0; cell.v1 = v1;
+    if (planar) {
+        cell.plane = fitCellPlane(surf, u0, u1, v0, v1, cfg.nUSamples, cfg.nVSamples);
+        cell.fitDir = ParamDir::U;
+        cell.maxError = cell.plane.maxError;
+        cell.rmsError = cell.plane.rmsError;
+    } else {
+        cell.ruled = fitCellRuled(surf, u0, u1, v0, v1, dir,
+                                  cfg.nUSamples, cfg.nVSamples,
+                                  cfg.nRibs, cfg.lambda);
+        cell.fitDir = dir;
+        cell.maxError = cell.ruled.maxError;
+        cell.rmsError = cell.ruled.rmsError;
+        cell.maxOvercut = cell.ruled.maxOvercut;
+        cell.maxUndercut = cell.ruled.maxUndercut;
+        cell.meanSigned = cell.ruled.meanSigned;
+        cell.twist = cell.ruled.twist;
+    }
+    return cell;
+}
+
+// 全局方向试算：对当前网格所有格子分别按 U、V 方向拟合，取误差总和更小者。
+ParamDir determineDir(const SurfaceWrapper& surf,
+                      const std::vector<double>& uEdges,
+                      const std::vector<double>& vEdges,
+                      int nRows, int nCols,
+                      const GridConfig& cfg)
+{
+    double sumU = 0.0, sumV = 0.0;
+    for (int r = 0; r < nRows; ++r) {
+        for (int c = 0; c < nCols; ++c) {
+            double u0 = uEdges[c], u1 = uEdges[c + 1];
+            double v0 = vEdges[r], v1 = vEdges[r + 1];
+            RuledCellFit fu = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::U,
+                                           cfg.nUSamples, cfg.nVSamples,
+                                           cfg.nRibs, cfg.lambda);
+            RuledCellFit fv = fitCellRuled(surf, u0, u1, v0, v1, ParamDir::V,
+                                           cfg.nUSamples, cfg.nVSamples,
+                                           cfg.nRibs, cfg.lambda);
+            sumU += fu.maxError;
+            sumV += fv.maxError;
+        }
+    }
+    return (sumV <= sumU) ? ParamDir::V : ParamDir::U;
+}
+
+// 用指定方向重新拟合网格所有格子。
+void fitAllCells(GridResult& g, const SurfaceWrapper& surf,
+                 const GridConfig& cfg, bool planar, ParamDir dir)
+{
+    for (int r = 0; r < g.nRows; ++r)
+        for (int c = 0; c < g.nCols; ++c)
+            g.cells[r * g.nCols + c] = fitOneCell(surf, r, c,
+                g.uEdges[c], g.uEdges[c + 1], g.vEdges[r], g.vEdges[r + 1],
+                cfg, planar, dir);
+}
+
+// 单格直纹面在 (u,v) 处求值（准线方向截断、母线方向线性延拓）。
+static Vec3 evalRuledCellSurface(const GridCell& cell, double u, double v) {
+    const Vec3Arr& c0 = cell.ruled.curveC0Samples;
+    const Vec3Arr& c1 = cell.ruled.curveC1Samples;
+    int n = static_cast<int>(c0.size());
+    if (n < 2 || static_cast<int>(c1.size()) != n) return Vec3(0, 0, 0);
+    if (cell.fitDir == ParamDir::V) {
+        double uN = clamp((u - cell.u0) / (cell.u1 - cell.u0), 0.0, 1.0);
+        double idx = uN * (n - 1);
+        int i0 = static_cast<int>(std::floor(idx));
+        int i1 = std::min(i0 + 1, n - 1);
+        double fr = idx - i0;
+        Vec3 C0 = c0[i0] + (c0[i1] - c0[i0]) * fr;
+        Vec3 C1 = c1[i0] + (c1[i1] - c1[i0]) * fr;
+        double t = (v - cell.v0) / (cell.v1 - cell.v0);
+        return C0 + (C1 - C0) * t;
+    } else {
+        double vN = clamp((v - cell.v0) / (cell.v1 - cell.v0), 0.0, 1.0);
+        double idx = vN * (n - 1);
+        int i0 = static_cast<int>(std::floor(idx));
+        int i1 = std::min(i0 + 1, n - 1);
+        double fr = idx - i0;
+        Vec3 C0 = c0[i0] + (c0[i1] - c0[i0]) * fr;
+        Vec3 C1 = c1[i0] + (c1[i1] - c1[i0]) * fr;
+        double s = (u - cell.u0) / (cell.u1 - cell.u0);
+        return C0 + (C1 - C0) * s;
+    }
+}
+
+// 相邻格胞在接缝处的最大缝隙（关闭过渡面/连续化步骤时的缝隙量）。
+static double computeMaxSeamGap(const GridResult& g, int nSamples) {
+    if (g.cells.empty()) return 0.0;
+    double maxGap = 0.0;
+    // 竖直接缝（列边界）：左右两格
+    for (int r = 0; r < g.nRows; ++r) {
+        for (int c = 0; c < g.nCols - 1; ++c) {
+            const GridCell& L = g.cells[r * g.nCols + c];
+            const GridCell& R = g.cells[r * g.nCols + c + 1];
+            for (int j = 0; j < nSamples; ++j) {
+                double v = L.v0 + (L.v1 - L.v0) * j / (nSamples - 1.0);
+                maxGap = std::max(maxGap,
+                    (evalRuledCellSurface(L, L.u1, v) - evalRuledCellSurface(R, R.u0, v)).norm());
+            }
+        }
+    }
+    // 水平接缝（行边界）：上下两格
+    for (int c = 0; c < g.nCols; ++c) {
+        for (int r = 0; r < g.nRows - 1; ++r) {
+            const GridCell& B = g.cells[r * g.nCols + c];
+            const GridCell& T = g.cells[(r + 1) * g.nCols + c];
+            for (int i = 0; i < nSamples; ++i) {
+                double u = B.u0 + (B.u1 - B.u0) * i / (nSamples - 1.0);
+                maxGap = std::max(maxGap,
+                    (evalRuledCellSurface(B, u, B.v1) - evalRuledCellSurface(T, u, T.v0)).norm());
+            }
+        }
+    }
+    return maxGap;
+}
+
+// 整列切分（在第 c 列插入竖直分割线）：拟合该列所有行的两个子格。
+double buildColumnSplit(const SurfaceWrapper& surf, const GridResult& g, int c,
+                        const GridConfig& cfg, bool planar, ParamDir dir,
+                        std::vector<GridCell>& out)
+{
+    double um = (g.uEdges[c] + g.uEdges[c + 1]) * 0.5;
+    out.clear();
+    out.reserve(2 * g.nRows);
+    double metric = 0.0;
+    for (int r = 0; r < g.nRows; ++r) {
+        double v0 = g.vEdges[r], v1 = g.vEdges[r + 1];
+        GridCell a = fitOneCell(surf, r, c,     g.uEdges[c], um, v0, v1, cfg, planar, dir);
+        GridCell b = fitOneCell(surf, r, c + 1, um, g.uEdges[c + 1], v0, v1, cfg, planar, dir);
+        metric = std::max(metric, std::max(a.maxError, b.maxError));
+        out.push_back(a);
+        out.push_back(b);
+    }
+    return metric;
+}
+
+// 整行切分（在第 r 行插入水平分割线）：拟合该行所有列的两个子格。
+double buildRowSplit(const SurfaceWrapper& surf, const GridResult& g, int r,
+                     const GridConfig& cfg, bool planar, ParamDir dir,
+                     std::vector<GridCell>& out)
+{
+    double vm = (g.vEdges[r] + g.vEdges[r + 1]) * 0.5;
+    out.clear();
+    out.reserve(2 * g.nCols);
+    double metric = 0.0;
+    for (int c = 0; c < g.nCols; ++c) {
+        double u0 = g.uEdges[c], u1 = g.uEdges[c + 1];
+        GridCell a = fitOneCell(surf, r,     c, u0, u1, g.vEdges[r], vm, cfg, planar, dir);
+        GridCell b = fitOneCell(surf, r + 1, c, u0, u1, vm, g.vEdges[r + 1], cfg, planar, dir);
+        metric = std::max(metric, std::max(a.maxError, b.maxError));
+        out.push_back(a);
+        out.push_back(b);
+    }
+    return metric;
+}
+
+void applyColumnSplit(GridResult& g, int c, const std::vector<GridCell>& newCells)
+{
+    std::vector<double> nu = g.uEdges;
+    nu.insert(nu.begin() + c + 1, (g.uEdges[c] + g.uEdges[c + 1]) * 0.5);
+    int newCols = g.nCols + 1;
+    std::vector<GridCell> nc(g.nRows * newCols);
+    for (int r = 0; r < g.nRows; ++r) {
+        for (int cc = 0; cc < g.nCols; ++cc) {
+            if (cc < c) {
+                nc[r * newCols + cc] = g.cells[r * g.nCols + cc];
+            } else if (cc == c) {
+                nc[r * newCols + c]     = newCells[r * 2 + 0];
+                nc[r * newCols + c + 1] = newCells[r * 2 + 1];
+            } else {
+                nc[r * newCols + cc + 1] = g.cells[r * g.nCols + cc];
+                nc[r * newCols + cc + 1].col = cc + 1;
+            }
+        }
+    }
+    g.uEdges = std::move(nu);
+    g.nCols = newCols;
+    g.cells = std::move(nc);
+}
+
+void applyRowSplit(GridResult& g, int r, const std::vector<GridCell>& newCells)
+{
+    std::vector<double> nv = g.vEdges;
+    nv.insert(nv.begin() + r + 1, (g.vEdges[r] + g.vEdges[r + 1]) * 0.5);
+    int newRows = g.nRows + 1;
+    std::vector<GridCell> nc(newRows * g.nCols);
+    for (int rr = 0; rr < g.nRows; ++rr) {
+        for (int c = 0; c < g.nCols; ++c) {
+            if (rr < r) {
+                nc[rr * g.nCols + c] = g.cells[rr * g.nCols + c];
+            } else if (rr == r) {
+                nc[r * g.nCols + c]         = newCells[c * 2 + 0];
+                nc[(r + 1) * g.nCols + c]   = newCells[c * 2 + 1];
+            } else {
+                nc[(rr + 1) * g.nCols + c] = g.cells[rr * g.nCols + c];
+                nc[(rr + 1) * g.nCols + c].row = rr + 1;
+            }
+        }
+    }
+    g.vEdges = std::move(nv);
+    g.nRows = newRows;
+    g.cells = std::move(nc);
+}
+
+// 固定分片下迭代移动分割线，使误差均衡（误差大的格更窄）。
+// 原理：按列/行累计误差，把分割线放在累计误差的等分点上。
+static void balanceEdges(GridResult& g, const SurfaceWrapper& surf,
+                         const GridConfig& cfg, ParamDir dir)
+{
+    const int maxIter = 20;
+    for (int iter = 0; iter < maxIter; ++iter) {
+        fitAllCells(g, surf, cfg, false, dir);
+
+        // U 方向（列）误差均衡
+        if (g.nCols > 1) {
+            std::vector<double> e(g.nCols, 0.0);
+            for (int r = 0; r < g.nRows; ++r)
+                for (int c = 0; c < g.nCols; ++c)
+                    e[c] = std::max(e[c], g.cells[r * g.nCols + c].maxError);
+            std::vector<double> cum(g.nCols + 1, 0.0);
+            for (int c = 0; c < g.nCols; ++c) cum[c + 1] = cum[c] + std::max(e[c], 1e-9);
+            double total = cum[g.nCols];
+            if (total > 1e-12) {
+                std::vector<double> nu(g.nCols + 1);
+                nu[0] = g.uEdges.front();
+                nu[g.nCols] = g.uEdges.back();
+                for (int c = 1; c < g.nCols; ++c) {
+                    double target = total * c / g.nCols;
+                    int ci = 0;
+                    while (ci + 1 < g.nCols && cum[ci + 1] < target) ++ci;
+                    double seg = cum[ci + 1] - cum[ci];
+                    double t = seg > 1e-12 ? (target - cum[ci]) / seg : 0.0;
+                    nu[c] = g.uEdges[ci] + (g.uEdges[ci + 1] - g.uEdges[ci]) * t;
+                }
+                g.uEdges = nu;
+            }
+        }
+
+        // V 方向（行）误差均衡
+        if (g.nRows > 1) {
+            std::vector<double> e(g.nRows, 0.0);
+            for (int r = 0; r < g.nRows; ++r)
+                for (int c = 0; c < g.nCols; ++c)
+                    e[r] = std::max(e[r], g.cells[r * g.nCols + c].maxError);
+            std::vector<double> cum(g.nRows + 1, 0.0);
+            for (int r = 0; r < g.nRows; ++r) cum[r + 1] = cum[r] + std::max(e[r], 1e-9);
+            double total = cum[g.nRows];
+            if (total > 1e-12) {
+                std::vector<double> nv(g.nRows + 1);
+                nv[0] = g.vEdges.front();
+                nv[g.nRows] = g.vEdges.back();
+                for (int r = 1; r < g.nRows; ++r) {
+                    double target = total * r / g.nRows;
+                    int ri = 0;
+                    while (ri + 1 < g.nRows && cum[ri + 1] < target) ++ri;
+                    double seg = cum[ri + 1] - cum[ri];
+                    double t = seg > 1e-12 ? (target - cum[ri]) / seg : 0.0;
+                    nv[r] = g.vEdges[ri] + (g.vEdges[ri + 1] - g.vEdges[ri]) * t;
+                }
+                g.vEdges = nv;
+            }
+        }
+
+        // 更新格子边界
+        for (int r = 0; r < g.nRows; ++r)
+            for (int c = 0; c < g.nCols; ++c) {
+                GridCell& cell = g.cells[r * g.nCols + c];
+                cell.u0 = g.uEdges[c]; cell.u1 = g.uEdges[c + 1];
+                cell.v0 = g.vEdges[r]; cell.v1 = g.vEdges[r + 1];
+            }
+    }
+    fitAllCells(g, surf, cfg, false, dir);
+}
+
+GridResult fitGridImpl(const SurfaceWrapper& surf, const GridConfig& cfg,
+                       const std::string& name, bool planar)
+{
+    GridResult g;
+    g.name = name;
+
+    auto [u0, u1] = surf.paramDomainU();
+    auto [v0, v1] = surf.paramDomainV();
+
+    int nCols = std::max(1, cfg.nSplitU);
+    int nRows = std::max(1, cfg.nSplitV);
+    g.nCols = nCols;
+    g.nRows = nRows;
+    g.uEdges.resize(nCols + 1);
+    g.vEdges.resize(nRows + 1);
+    for (int c = 0; c <= nCols; ++c) g.uEdges[c] = u0 + (u1 - u0) * c / nCols;
+    for (int r = 0; r <= nRows; ++r) g.vEdges[r] = v0 + (v1 - v0) * r / nRows;
+
+    // 初始方向：直纹面由全局试算决定，平面恒为 U
+    ParamDir gDir = planar ? ParamDir::U
+                           : determineDir(surf, g.uEdges, g.vEdges, nRows, nCols, cfg);
+    g.fitDir = gDir;
+    g.cells.resize(nRows * nCols);
+    if (cfg.balanceEdges && cfg.noRefine && !planar) {
+        balanceEdges(g, surf, cfg, gDir);
+    } else {
+        fitAllCells(g, surf, cfg, planar, gDir);
+    }
+
+    double minULen = (u1 - u0) * 1e-3;
+    double minVLen = (v1 - v0) * 1e-3;
+
+    if (!cfg.noRefine) {
+        struct Entry { double err; int r, c; bool operator<(const Entry& o) const { return err < o.err; } };
+
+        auto rebuild = [&](std::priority_queue<Entry>& pq) {
+            pq = std::priority_queue<Entry>();
+            for (int r = 0; r < g.nRows; ++r)
+                for (int c = 0; c < g.nCols; ++c) {
+                    double e = g.cells[r * g.nCols + c].maxError;
+                    if (e > cfg.tolerance) pq.push({e, r, c});
+                }
+        };
+
+        std::priority_queue<Entry> pq;
+        rebuild(pq);
+
+        int steps = 0;
+        while (!pq.empty() && steps < cfg.maxDepth && (int)g.cells.size() < cfg.maxCells) {
+            ++steps;
+            Entry top = pq.top();
+            pq.pop();
+            int r = top.r, c = top.c;
+
+            GridCell& cur = g.cells[r * g.nCols + c];
+            if (cur.maxError <= cfg.tolerance) continue;
+
+            double du = g.uEdges[c + 1] - g.uEdges[c];
+            double dv = g.vEdges[r + 1] - g.vEdges[r];
+            bool canU = du > minULen;
+            bool canV = dv > minVLen;
+            if (!canU && !canV) continue;
+
+            std::vector<GridCell> candU, candV;
+            double mU = std::numeric_limits<double>::infinity();
+            double mV = std::numeric_limits<double>::infinity();
+            if (canU) mU = buildColumnSplit(surf, g, c, cfg, planar, gDir, candU);
+            if (canV) mV = buildRowSplit(surf, g, r, cfg, planar, gDir, candV);
+
+            if (mU <= mV) applyColumnSplit(g, c, candU);
+            else          applyRowSplit(g, r, candV);
+
+            rebuild(pq);
+        }
+    }
+
+    g.maxError = 0.0;
+    g.maxTwist = 0.0;
+    g.maxOvercut = 0.0;
+    g.maxUndercut = 0.0;
+    double sumSigned = 0.0;
+    double sumRmsSq = 0.0;
+    g.developableCount = 0;
+    for (auto& cell : g.cells) {
+        g.maxError = std::max(g.maxError, cell.maxError);
+        g.maxTwist = std::max(g.maxTwist, cell.twist);
+        g.maxOvercut = std::max(g.maxOvercut, cell.maxOvercut);
+        g.maxUndercut = std::max(g.maxUndercut, cell.maxUndercut);
+        sumSigned += cell.meanSigned;
+        sumRmsSq += cell.rmsError * cell.rmsError;
+    }
+    g.meanSigned = g.cells.empty() ? 0.0 : sumSigned / (double)g.cells.size();
+    g.rmsError = g.cells.empty() ? 0.0 : std::sqrt(sumRmsSq / (double)g.cells.size());
+    g.developableCount = (int)g.cells.size();
+    g.toleranceMet = (g.maxError <= cfg.tolerance);
+    if (!planar) g.maxSeamGap = computeMaxSeamGap(g, 20);
+
+    return g;
+}
+
+std::string jsonSafeStr(std::string s) {
+    for (char& ch : s) { if (ch == '\\') ch = '/'; if (ch == '"') ch = '\''; }
+    return s;
+}
+
+} // anon
+
+GridResult fitGridRuled(const SurfaceWrapper& surf, const GridConfig& cfg,
+                        const std::string& name)
+{
+    return fitGridImpl(surf, cfg, name, false);
+}
+
+GridResult fitGridPlanar(const SurfaceWrapper& surf, const GridConfig& cfg,
+                         const std::string& name)
+{
+    return fitGridImpl(surf, cfg, name, true);
+}
+
+bool exportGridOBJs(const std::string& outDir, const std::string& prefix,
+                    const GridResult& gr, bool planar)
+{
+    for (const auto& cell : gr.cells) {
+        int idx = cell.row * gr.nCols + cell.col;
+        if (planar) {
+            std::string op = outDir + "/" + prefix + "_cell" + std::to_string(idx) + ".obj";
+            exportOBJ(op, cell.plane.meshVerts, cell.plane.meshFaces);
+            std::string dp = outDir + "/" + prefix + "_cell" + std::to_string(idx) + "_desc.txt";
+            std::ofstream o(dp);
+            if (o) {
+                o << std::fixed << std::setprecision(6);
+                o << "centroid = " << cell.plane.centroid.x() << " " << cell.plane.centroid.y()
+                  << " " << cell.plane.centroid.z() << "\n";
+                o << "normal = " << cell.plane.normal.x() << " " << cell.plane.normal.y()
+                  << " " << cell.plane.normal.z() << "\n";
+            }
+        } else {
+            std::string op = outDir + "/" + prefix + "_cell" + std::to_string(idx) + ".obj";
+            exportOBJ(op, cell.ruled.ruledMeshVerts, cell.ruled.ruledMeshFaces);
+            std::string cp = outDir + "/" + prefix + "_cell" + std::to_string(idx) + "_params.txt";
+            exportDirectrixTXT(cp, cell.ruled.curveC0Samples, cell.ruled.curveC1Samples);
+        }
+    }
+    return true;
+}
+
+bool exportGridLinesVTK(const std::string& path,
+                        const SurfaceWrapper& surf,
+                        const GridResult& gr,
+                        int nSamplesPerLine)
+{
+    std::ofstream out(path);
+    if (!out) return false;
+    if (nSamplesPerLine < 2) nSamplesPerLine = 2;
+
+    auto [uMin, uMax] = surf.paramDomainU();
+    auto [vMin, vMax] = surf.paramDomainV();
+
+    struct Line { std::vector<Vec3> pts; };
+    std::vector<Line> lines;
+
+    for (double vk : gr.vEdges) {
+        Line L;
+        for (int i = 0; i < nSamplesPerLine; ++i) {
+            double u = uMin + (uMax - uMin) * i / (nSamplesPerLine - 1.0);
+            L.pts.push_back(surf.evaluate(u, vk));
+        }
+        lines.push_back(std::move(L));
+    }
+    for (double uk : gr.uEdges) {
+        Line L;
+        for (int j = 0; j < nSamplesPerLine; ++j) {
+            double v = vMin + (vMax - vMin) * j / (nSamplesPerLine - 1.0);
+            L.pts.push_back(surf.evaluate(uk, v));
+        }
+        lines.push_back(std::move(L));
+    }
+
+    int nPts = 0, nCells = 0, cellSize = 0;
+    for (const auto& L : lines) {
+        nPts += (int)L.pts.size();
+        int segs = (int)L.pts.size() - 1;
+        nCells += segs;
+        cellSize += segs * 3;
+    }
+
+    out << "# vtk DataFile Version 3.0\n";
+    out << "grid split lines\n";
+    out << "ASCII\n";
+    out << "DATASET POLYDATA\n";
+    out << "POINTS " << nPts << " float\n";
+    out << std::fixed << std::setprecision(6);
+    for (const auto& L : lines)
+        for (const auto& p : L.pts)
+            out << p.x() << " " << p.y() << " " << p.z() << "\n";
+    out << "LINES " << nCells << " " << cellSize << "\n";
+    int base = 0;
+    for (const auto& L : lines) {
+        for (int i = 0; i < (int)L.pts.size() - 1; ++i)
+            out << "2 " << (base + i) << " " << (base + i + 1) << "\n";
+        base += (int)L.pts.size();
+    }
+    return true;
+}
+
+std::string buildGridMetaJson(const std::vector<GridResult>& results,
+                              const std::string& mode,
+                              const std::string& file1,
+                              const std::string& file2)
+{
+    std::ostringstream o;
+    o << "{\"mode\":\"" << mode << "\",\"files\":[\"" << jsonSafeStr(file1)
+      << "\",\"" << jsonSafeStr(file2) << "\"],\"surfaces\":[";
+    for (size_t s = 0; s < results.size(); ++s) {
+        if (s) o << ",";
+        const auto& gr = results[s];
+        o << "{\"name\":\"" << gr.name << "\",\"nRows\":" << gr.nRows
+          << ",\"nCols\":" << gr.nCols
+          << ",\"fitDir\":\"" << (gr.fitDir == ParamDir::U ? "U" : "V") << "\""
+          << ",\"maxError\":" << gr.maxError
+          << ",\"rmsError\":" << gr.rmsError
+          << ",\"maxOvercut\":" << gr.maxOvercut
+          << ",\"maxUndercut\":" << gr.maxUndercut
+          << ",\"meanSigned\":" << gr.meanSigned
+          << ",\"maxSeamGap\":" << gr.maxSeamGap
+          << ",\"maxTwist\":" << gr.maxTwist
+          << ",\"developableCount\":" << gr.developableCount
+          << ",\"toleranceMet\":" << (gr.toleranceMet ? "true" : "false")
+          << ",\"cells\":[";
+        for (size_t i = 0; i < gr.cells.size(); ++i) {
+            if (i) o << ",";
+            const auto& c = gr.cells[i];
+            o << "{\"index\":" << (c.row * gr.nCols + c.col)
+              << ",\"row\":" << c.row << ",\"col\":" << c.col
+              << ",\"u0\":" << c.u0 << ",\"u1\":" << c.u1
+              << ",\"v0\":" << c.v0 << ",\"v1\":" << c.v1
+              << ",\"fitDir\":\"" << (c.fitDir == ParamDir::U ? "U" : "V") << "\""
+              << ",\"maxErr\":" << c.maxError
+              << ",\"rmsErr\":" << c.rmsError
+              << ",\"maxOvercut\":" << c.maxOvercut
+              << ",\"maxUndercut\":" << c.maxUndercut
+              << ",\"meanSigned\":" << c.meanSigned
+              << ",\"twist\":" << c.twist << "}";
+        }
+        o << "]}";
+    }
+    o << "]}";
+    return o.str();
+}
+
+} // namespace simple
