@@ -12,6 +12,7 @@
 #include <vector>
 #include <array>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <tuple>
 #include <functional>
@@ -582,6 +583,7 @@ struct Patch {
     double meanRuling = 0.0;
     double area = 0.0;
     double twist = 0.0;
+    bool developable = true;
     double flankTime = 0.0;
     double pointTime = 0.0;
     double stepover = 0.0;
@@ -591,14 +593,18 @@ struct Patch {
 };
 
 // 跨格刀轴光顺（符号对齐的拉普拉斯，迭代 iterations 次）
+// 可展格（developable=true，刀轴=母线=精确解）固定不动，仅非可展格参与光顺。
 static void smoothToolAxes(std::vector<Patch>& patches, int iterations) {
     auto key = [](int blade, int row, int col) { return (blade * 1000000) + row * 10000 + col; };
     std::unordered_map<int, Patch*> byKey;
     for (auto& p : patches)
         if (p.row >= 0 && p.col >= 0 && p.hasToolAxis) byKey[key(p.blade, p.row, p.col)] = &p;
+    std::unordered_set<int> fixed;
+    for (auto& kv : byKey) if (kv.second->developable) fixed.insert(kv.first);
     for (int it = 0; it < iterations; ++it) {
         std::unordered_map<int, Vec3> acc;
         for (auto& kv : byKey) {
+            if (fixed.count(kv.first)) continue;
             Patch* p = kv.second;
             Vec3 sum = p->toolAxis;
             int cnt = 1;
@@ -613,7 +619,7 @@ static void smoothToolAxes(std::vector<Patch>& patches, int iterations) {
             }
             acc[kv.first] = normalized(sum);
         }
-        for (auto& kv : byKey) kv.second->toolAxis = acc[kv.first];
+        for (auto& kv : acc) byKey[kv.first]->toolAxis = kv.second;
     }
 }
 
@@ -889,6 +895,7 @@ MachiningSummary computeToolpath(const std::string& inputDir,
         p.meanRuling = meanRulingLength(p.C0, p.C1);
         p.area = surfaceArea(p.C0, p.C1);
         p.twist = twistAngleDeg(p.C0, p.C1);
+        p.developable = p.twist <= cfg.twist_limit;
         p.flankTime = flankCutTime(p.C0, cfg.feed);
         p.stepover = pointStepover(cfg.ball_r, cfg.scallop);
         p.pointTime = pointCutTime(p.C0, p.C1, cfg.feed, cfg.ball_r, cfg.scallop);
@@ -981,10 +988,12 @@ MachiningSummary computeToolpath(const std::string& inputDir,
     // 点铣质量统计（常规球头刀行切）
     int pointNumRows = 0;
     double pointClLen = 0.0;
+    int developableCount = 0;
     for (const auto& p : patches) {
         int nAcross = stepover > 0 ? std::max(1, (int)std::lround(p.meanRuling / stepover)) : 1;
         pointNumRows += nAcross + 1;
         pointClLen += (nAcross + 1) * p.directrixLen;
+        if (p.developable) ++developableCount;
     }
     {
         std::ofstream o(outputDir + "/summary.json");
@@ -998,6 +1007,7 @@ MachiningSummary computeToolpath(const std::string& inputDir,
               << ",\"overhead\":" << cfg.overhead
               << ",\"point_overhead\":" << cfg.point_overhead << "},"
               << "\"num_patches\":" << patches.size()
+              << ",\"developable_count\":" << developableCount
               << ",\"flank_regions\":" << flankRegions
               << ",\"total_area\":" << totalArea
               << ",\"original_area\":" << (originalArea > 0.0 ? originalArea : 0.0)

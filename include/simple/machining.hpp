@@ -10,6 +10,7 @@ struct MachiningConfig {
     double tool_r = 5.0;          /* 侧铣锥度刀半径 mm */
     double ball_r = 5.0;          /* 球头刀半径 mm */
     double scallop = 0.1;         /* 点铣残留高度 mm */
+    double twist_limit = 2.0;     /* 可展判定阈值（法向扭转角 deg） */
     double overhead = 4.0;        /* 侧铣每区域进退刀时间 s */
     double point_overhead = 10.0; /* 点铣整体进退刀时间 s */
 };

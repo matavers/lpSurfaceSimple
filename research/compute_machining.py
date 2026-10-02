@@ -195,12 +195,13 @@ def surface_area(C0, C1):
 def flank_milling(C0, C1, feed, twist_limit):
     """
     侧铣（锥度立铣刀）：刀具轴线沿母线、沿准线进给。
-    C++ 已按曲率把卷曲区切去，能进 *_params.txt 的格子都是可展区，一律侧铣一次。
-    twist 仅作报告统计。返回 (切削时间 s, 刀轨长 mm, 刀数, 是否可展, 扭转角 deg)
+    可展性由法向扭转角判定：twist ≤ twist_limit 视为可展（刀轴=母线，精确侧铣），
+    否则非可展（刀轴由弱共轭最优方向确定，见 flank_cl_rigorous）。
+    返回 (切削时间 s, 刀轨长 mm, 刀数, 是否可展, 扭转角 deg)
     """
     L = curve_length(C0)
     twist = twist_angle_deg(C0, C1)
-    developable = True
+    developable = twist <= twist_limit
     path_len = L
     passes = 1.0
     cut_time = path_len / feed * 60.0
@@ -361,14 +362,19 @@ def flank_cl_rigorous(C0, C1, tool_r, flip=1.0, n_along=50, axis_extend=None, T=
 
 def smooth_tool_axes(patches, iterations=2):
     """对相邻格胞的弱共轭刀轴做符号对齐的拉普拉斯光顺，得到跨格连续的刀轴场
-    （实现单位分解方案的“连续性传递”）。只作用于有 row/col 网格信息的格胞。"""
+    （实现单位分解方案的“连续性传递”）。只作用于有 row/col 网格信息的格胞。
+    可展格（developable=True，刀轴=母线=精确解）固定不动，仅非可展格参与光顺，
+    从而在可展区保持误差局部化（零误差），仅过渡/非可展区做连续性修补。"""
     by_key = {(p.blade, p.row, p.col): p
               for p in patches if p.row >= 0 and p.col >= 0 and p.tool_axis is not None}
     if not by_key:
         return
+    fixed = {k for k, p in by_key.items() if p.developable}
     for _ in range(iterations):
         new = {}
         for (blade, row, col), p in by_key.items():
+            if (blade, row, col) in fixed:
+                continue
             acc = list(p.tool_axis)
             cnt = 1
             for dr, dc in ((0, 1), (0, -1), (1, 0), (-1, 0)):
@@ -381,8 +387,8 @@ def smooth_tool_axes(patches, iterations=2):
                 acc = _add(acc, t)
                 cnt += 1
             new[(blade, row, col)] = _normalize(acc)
-        for (blade, row, col), p in by_key.items():
-            p.tool_axis = new[(blade, row, col)]
+        for key, T in new.items():
+            by_key[key].tool_axis = T
 
 def tool_axis_discontinuity_deg(patches):
     """相邻格胞刀轴的最大夹角（度），用于衡量刀轴场连续性。"""
@@ -881,6 +887,7 @@ def summarize(patches, args):
     flank_err = max((p.flank_err for p in patches), default=0.0)
     quality = flank_quality_stats(patches, getattr(args, 'tool_r', args.ball_r))
     point_quality = point_quality_stats(patches, args.scallop, args.ball_r)
+    developable_count = sum(1 for p in patches if p.developable)
     return {
         "num_patches": len(patches),
         "flank_regions": n_flank_regions,
@@ -889,6 +896,7 @@ def summarize(patches, args):
         "flank_err": flank_err,
         "quality": quality,
         "point_quality": point_quality,
+        "developable_count": developable_count,
         "tool_axis_disc_before": round(getattr(args, 'tool_axis_disc_before', 0.0), 3),
         "tool_axis_disc_after": round(getattr(args, 'tool_axis_disc_after', 0.0), 3),
         "flank": {
@@ -931,7 +939,8 @@ def print_report(patches, args, summary):
         print(f"A 相对 B 提速: {p['total'] / f['total']:.1f}x")
     print(f"严谨侧铣点轴最大残差: {summary.get('flank_err', 0.0):.4f} mm  "
           f"刀轴相邻最大夹角: 光顺前 {summary.get('tool_axis_disc_before', 0.0):.2f}° "
-          f"→ 光顺后 {summary.get('tool_axis_disc_after', 0.0):.2f}°")
+          f"→ 光顺后 {summary.get('tool_axis_disc_after', 0.0):.2f}°  "
+          f"(可展固定格 {summary.get('developable_count', 0)}/{summary.get('num_patches', 0)})")
     q = summary.get("quality", {})
     if q:
         def fmt(d, unit=""):
