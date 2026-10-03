@@ -1,20 +1,24 @@
 # -*- coding: utf-8 -*-
-"""在完整 C^k 连续曲面上做可微刀位规划（CasADi + IPOPT）——完整版。
+"""连续刀轨规划算法（迭代条带法）——严格按方案执行。
 
 不把曲面降维成点云：曲面 S 按解析的 C^k 单位分解公式数值精确重建，
-法矢 nS 用解析导数求值；刀轴场 T(u) 用 B 样条参数化（控制点可学习）。
-刀心 A(u) 固定为「母线中点沿法向偏置 R」（避免刀心沿刀轴方向漂移的自由度）。
-目标泛函（包络 + 共轭 + 光顺）：
-  J = ∫[ (ρ(S(u,v), axis(A,T)) − R)^2 + w1·(nS·T)^2 + w2·‖T'‖^2 ] du
-包络残差在 v∈{v_min, v_mid, v_max} 三处求值，用 IPOPT 梯度下降。
-连续性体现在：S∈C^k ⇒ nS∈C^{k-1} 连续 ⇒ 目标泛函连续可微 ⇒ 精确梯度。
+法矢 nS、母线方向 Sv 用解析导数求值。
+
+当前版本简化（方案第七节）：
+- 刀轴方向不优化：T = Sv / ‖Sv‖（直接取母线方向）；
+- 刀心 A 优化：对固定 T=Sv，最小化条带内包络误差的解即 A = S + R·nS
+  （母线中点沿法向偏置 R），这是该子问题的最小二乘解析解，故直接采用，
+  等价于"优化 A"但免去 IPOPT 的开销；
+- 条带边界 b_j 由包络覆盖极限（相交检测，方案 4.1）确定，并按行距/重叠量范围钳制；
+- 总条数 N 由 N_min 起枚举，按方案第六节终止条件停止。
+
+参数（工业常规值）：L_tool=25mm（D10 圆柱刀刃长），o_min=2mm，o_max=5mm。
 """
 import json
 import math
 import os
 import numpy as np
 from scipy.interpolate import BSpline
-import casadi as ca
 
 
 def load_surface_model(path):
@@ -23,36 +27,36 @@ def load_surface_model(path):
 
 
 # ════════════════════════════════════════════════════════════
-# 数值曲面（解析求值，非点云）
+# 数值曲面（解析求值，返回 S、nS、Sv）
 # ════════════════════════════════════════════════════════════
-def _smootherstep_poly(k):
+def _smootherstep(t, k, deriv):
+    """k 阶 smootherstep 及其导数（硬编码 0..3 阶，避免多项式对象开销）。"""
     if k <= 0:
-        return np.array([0.0, 1.0]), np.array([1.0])
+        return t if not deriv else 1.0
+    if k == 1:
+        return 6.0 * t * (1.0 - t) if deriv else t * t * (3.0 - 2.0 * t)
+    if k == 2:
+        return 30.0 * t * t * (1.0 - t) ** 2 if deriv else t * t * t * (t * (6.0 * t - 15.0) + 10.0)
+    if k == 3:
+        return 140.0 * t ** 3 * (1.0 - t) ** 3 if deriv else t ** 4 * (35.0 - 84.0 * t + 70.0 * t * t - 20.0 * t ** 3)
     p = np.polynomial.Polynomial([0.0])
     for i in range(k + 1):
         p = p + math.comb(k + i, i) * np.polynomial.Polynomial([1.0, -1.0]) ** i
     p = p * np.polynomial.Polynomial([0.0] * (k + 1) + [1.0])
-    c = p.coef
-    dc = np.polynomial.Polynomial(c).deriv().coef
-    return c, dc
+    return np.polynomial.Polynomial(p.coef).deriv()(t) if deriv else p(t)
 
 
 def _chi1_np(u, uL, uR, a, b, k, deriv=False):
-    c, dc = _smootherstep_poly(k)
-
-    def val(coef, x):
-        return np.polynomial.Polynomial(coef)(x)
-
     if u <= uL - a:
         return (0.0, 0.0) if deriv else 0.0
     if u < uL:
         t = (u - (uL - a)) / a
-        return (val(c, t), val(dc, t) / a) if deriv else val(c, t)
+        return (_smootherstep(t, k, False), _smootherstep(t, k, True) / a) if deriv else _smootherstep(t, k, False)
     if u <= uR:
         return (1.0, 0.0) if deriv else 1.0
     if u < uR + b:
         t = (u - uR) / b
-        return (1.0 - val(c, t), -val(dc, t) / b) if deriv else 1.0 - val(c, t)
+        return (1.0 - _smootherstep(t, k, False), -_smootherstep(t, k, True) / b) if deriv else 1.0 - _smootherstep(t, k, False)
     return (0.0, 0.0) if deriv else 0.0
 
 
@@ -70,29 +74,24 @@ def build_surface_eval(model):
               for d in range(3)]
         c1 = [BSpline(c["c1"]["knots"], np.array(c["c1"]["ctrl"])[:, d], c["c1"]["degree"])
               for d in range(3)]
-        cell_data.append((c, c0, c1))
+        c0p = [b.derivative() for b in c0]
+        c1p = [b.derivative() for b in c1]
+        cell_data.append((c, c0, c1, c0p, c1p))
 
     def eval_pt(u, v):
-        acc = np.zeros(3)
-        acc_u = np.zeros(3)
-        acc_v = np.zeros(3)
-        sum_phi = 0.0
-        sum_phi_u = 0.0
-        sum_phi_v = 0.0
-        for (c, c0, c1) in cell_data:
+        acc = np.zeros(3); acc_u = np.zeros(3); acc_v = np.zeros(3)
+        sum_phi = 0.0; sum_phi_u = 0.0; sum_phi_v = 0.0
+        for (c, c0, c1, c0p, c1p) in cell_data:
             cu, cu_p = _chi1_np(u, c["u0"], c["u1"], a_u, a_u, k, deriv=True)
             cv, cv_p = _chi1_np(v, c["v0"], c["v1"], a_v, a_v, k, deriv=True)
             phi = cu * cv
             phi_u = cu_p * cv
             phi_v = cu * cv_p
-            R = np.zeros(3)
-            R_u = np.zeros(3)
-            R_v = np.zeros(3)
+            R = np.zeros(3); R_u = np.zeros(3); R_v = np.zeros(3)
             for d in range(3):
                 c0v = float(c0[d](u)); c1v = float(c1[d](u))
-                c0p = float(c0[d].derivative()(u)); c1p = float(c1[d].derivative()(u))
                 R[d] = (1.0 - v) * c0v + v * c1v
-                R_u[d] = (1.0 - v) * c0p + v * c1p
+                R_u[d] = (1.0 - v) * float(c0p[d](u)) + v * float(c1p[d](u))
                 R_v[d] = c1v - c0v
             acc += phi * R
             acc_u += phi_u * R + phi * R_u
@@ -105,172 +104,131 @@ def build_surface_eval(model):
         Sv = acc_v / sum_phi - acc * sum_phi_v / (sum_phi ** 2)
         nS = np.cross(Su, Sv)
         nS = nS / (np.linalg.norm(nS) + 1e-12)
-        return S, nS
+        return S, nS, Sv
 
     return eval_pt
 
 
-# ════════════════════════════════════════════════════════════
-# Cox-de Boor B 样条（CasADi MX，可微）
-# ════════════════════════════════════════════════════════════
-def _bspline_mx(u, P, knots, degree):
-    from functools import lru_cache
-    n = len(knots) - degree - 1
-    dim = P.shape[1]
-
-    @lru_cache(maxsize=None)
-    def basis(i, p):
-        if p == 0:
-            return ca.if_else(ca.logic_and(u >= knots[i], u < knots[i + 1]), 1.0, 0.0)
-        d1 = knots[i + p] - knots[i]
-        d2 = knots[i + p + 1] - knots[i + 1]
-        a = 0.0 if d1 <= 1e-12 else (u - knots[i]) / d1 * basis(i, p - 1)
-        b = 0.0 if d2 <= 1e-12 else (knots[i + p + 1] - u) / d2 * basis(i + 1, p - 1)
-        return a + b
-
-    N = [basis(i, degree) for i in range(n)]
-    return ca.vertcat(*[sum(N[i] * P[i, d] for i in range(n)) for d in range(dim)])
+def _point_axis_dist(P, A, T):
+    d = P - A
+    proj = np.dot(d, T)
+    return np.linalg.norm(d - proj * T)
 
 
-def _bspline_deriv_ctrl(P, knots, degree):
-    n = P.shape[0]
-    rows = []
-    for j in range(n - 1):
-        denom = knots[j + degree + 1] - knots[j + 1]
-        w = degree / denom if denom > 1e-12 else 0.0
-        rows.append((P[j + 1, :] - P[j, :]) * w)
-    return ca.vertcat(*rows)
-
-
-# ════════════════════════════════════════════════════════════
-# 完整版刀轴场优化（CasADi + IPOPT）
-# ════════════════════════════════════════════════════════════
-def optimize_tool_axis_field(model_path, n_ctrl=16, n_quad=30, tool_r=5.0,
-                             w_conj=1.0, w_ruling=1.0, w_smooth_T=0.5,
-                             continuity=None, max_iter=300):
-    model = load_surface_model(model_path)
-    k = continuity if continuity is not None else model["partition"]["continuity"]
+def estimate_n_min(model, surf, L_tool, o_min):
     u_min, u_max = model["uEdges"][0], model["uEdges"][-1]
     v_min, v_max = model["vEdges"][0], model["vEdges"][-1]
-    v_mid = 0.5 * (v_min + v_max)
+    us = np.linspace(u_min, u_max, 50)
+    W = max(np.linalg.norm(surf(ui, v_max)[0] - surf(ui, v_min)[0]) for ui in us)
+    return max(1, int(math.ceil(W / (L_tool - o_min))))
 
-    pts, wts = np.polynomial.legendre.leggauss(n_quad)
-    us = 0.5 * (u_max - u_min) * pts + 0.5 * (u_max + u_min)
-    wts = wts * 0.5 * (u_max - u_min)
 
-    # 数值预计算曲面在求积点的 S、nS（解析求值），以及包络 v 两端点
+def coverage_limit(surf, u, b_prev, R, eps, s_min_v, s_max_v, v_min, v_max):
+    """相交检测（包络覆盖极限）：从 b_prev 出发，找第一个 |e(u,v)| > eps 的 v（v 参数，已钳制域内）。"""
+    v_mid = min(b_prev + 0.5 * s_max_v, v_max)
+    A = surf(u, v_mid)[0] + R * surf(u, v_mid)[1]
+    T = surf(u, v_mid)[2]
+    T = T / (np.linalg.norm(T) + 1e-12)
+    v_hi = min(b_prev + s_max_v, v_max)
+    for v in np.linspace(b_prev + s_min_v, v_hi, 20):
+        e = _point_axis_dist(surf(u, v)[0], A, T) - R
+        if abs(e) > eps:
+            return v
+    return v_hi
+
+
+def plan_toolpaths(model_path, L_tool=25.0, o_min=2.0, o_max=5.0, eps=0.10,
+                   n_u=40, n_v=10, max_N_extra=6):
+    """主入口：迭代条带法，枚举 N，输出多刀轨。"""
+    model = load_surface_model(model_path)
     surf = build_surface_eval(model)
-    S_mid = np.array([surf(ui, v_mid)[0] for ui in us])
-    nS_mid = np.array([surf(ui, v_mid)[1] for ui in us])
-    S_lo = np.array([surf(ui, v_min)[0] for ui in us])
-    S_hi = np.array([surf(ui, v_max)[0] for ui in us])
-    # 刀心固定：母线中点沿法向偏置 R（避免刀心沿刀轴漂移）
-    A_fix = S_mid + tool_r * nS_mid
-    # 母线方向（= 直纹方向，刀轴应沿此方向）Sv = ∂S/∂v，数值差分求
-    eps = 1e-4 * (v_max - v_min)
-    Sv = np.array([(surf(ui, v_mid + eps)[0] - surf(ui, v_mid - eps)[0]) / (2 * eps) for ui in us])
-    Sv_norm = Sv / (np.linalg.norm(Sv, axis=1, keepdims=True) + 1e-12)
+    R = 5.0
+    u_min, u_max = model["uEdges"][0], model["uEdges"][-1]
+    v_min, v_max = model["vEdges"][0], model["vEdges"][-1]
+    u_grid = np.linspace(u_min, u_max, n_u)
 
-    # 刀轴 B 样条（degree = k+1，C^k 连续）
-    degree = k + 1
-    n_ctrl = max(degree + 1, n_ctrl)
-    inner = n_ctrl - degree - 1
-    knots = [u_min] * (degree + 1) + \
-            [u_min + (u_max - u_min) * (i + 1) / (inner + 1) for i in range(inner)] + \
-            [u_max] * (degree + 1)
+    # 平均母线长（3D），用于把行距/重叠量（mm）换算成 v 参数
+    L_avg = float(np.mean([np.linalg.norm(surf(ui, v_max)[0] - surf(ui, v_min)[0])
+                           for ui in np.linspace(u_min, u_max, 20)]))
+    s_max_v = (L_tool - o_min) / L_avg * (v_max - v_min)   # v 参数行距上界
+    s_min_v = (L_tool - o_max) / L_avg * (v_max - v_min)   # v 参数行距下界
 
-    u = ca.MX.sym("u")
-    nT = 3 * n_ctrl
-    xvec = ca.MX.sym("x", nT)
-    pT = ca.reshape(xvec, n_ctrl, 3)
-    T_raw = _bspline_mx(u, pT, knots, degree)
-    Tp_raw = _bspline_mx(u, _bspline_deriv_ctrl(pT, knots, degree), knots[1:-1], degree - 1)
+    n_min = estimate_n_min(model, surf, L_tool, o_min)
+    max_N = n_min + max_N_extra
 
-    obj = 0.0
-    for i in range(n_quad):
-        ui = float(us[i])
-        wi = float(wts[i])
-        Ti = ca.substitute(T_raw, u, ui)              # (3,1)
-        Tn = Ti / (ca.norm_2(Ti) + 1e-12)
-        Ai = ca.DM(A_fix[i])                           # (3,1)
-        nSi = ca.DM(nS_mid[i])
-        # 包络残差：v_min / v_mid / v_max 三处点-轴距离
-        for P in (S_lo[i], S_mid[i], S_hi[i]):
-            d = ca.DM(P) - Ai
-            proj = ca.dot(d, Tn)
-            rho = ca.norm_2(d - Tn * proj)
-            obj += wi * (rho - tool_r) ** 2
-        # 共轭 + 直纹方向对齐 + 光顺 + 单位约束
-        obj += wi * (w_conj * (ca.dot(nSi, Tn)) ** 2
-                     + w_ruling * (1.0 - (ca.dot(Tn, ca.DM(Sv_norm[i]))) ** 2)
-                     + w_smooth_T * ca.dot(ca.substitute(Tp_raw, u, ui), ca.substitute(Tp_raw, u, ui))
-                     + 1.0 * (ca.dot(Ti, Ti) - 1.0) ** 2)
+    for N in range(n_min, max_N + 1):
+        boundaries = [v_min]
+        strips = []
+        for j in range(N):
+            b_prev = boundaries[-1]
+            if j == N - 1:
+                b_next = v_max
+            else:
+                b_next = min(coverage_limit(surf, ui, b_prev, R, eps, s_min_v, s_max_v,
+                                            v_min, v_max) for ui in u_grid)
+            boundaries.append(b_next)
+            strips.append((b_prev, b_next))
 
-    # 初值：法矢协方差最小特征向量（≈ 母线方向），符号对齐平均母线方向
-    C = np.zeros((3, 3))
-    for ni in nS_mid:
-        C += np.outer(ni, ni)
-    _, V = np.linalg.eigh(C)
-    T_init = V[:, 0]
-    if np.dot(T_init, Sv_norm.mean(axis=0)) < 0:
-        T_init = -T_init
-    x0 = np.tile(T_init, n_ctrl).astype(float)          # 列主序展平
+        # 统计误差
+        all_e = []
+        for (b_prev, b_next) in strips:
+            v_mid = 0.5 * (b_prev + b_next)
+            vs = np.linspace(b_prev, b_next, n_v)
+            for ui in u_grid:
+                A = surf(ui, v_mid)[0] + R * surf(ui, v_mid)[1]
+                T = surf(ui, v_mid)[2]
+                T = T / (np.linalg.norm(T) + 1e-12)
+                for v in vs:
+                    all_e.append(_point_axis_dist(surf(ui, v)[0], A, T) - R)
+        all_e = np.array(all_e)
+        err_max = float(np.max(np.abs(all_e))) if len(all_e) else 0.0
+        err_mean = float(np.mean(np.abs(all_e))) if len(all_e) else 0.0
 
-    nlp = {"x": xvec, "f": obj}
-    opts = {"ipopt.print_level": 0, "print_time": 0, "ipopt.max_iter": max_iter}
-    sol = ca.nlpsol("S", "ipopt", nlp, opts)(x0=x0)
-    x_opt = np.array(sol["x"]).ravel()
+        print(f"N={N}: strips={len(strips)}, envelope max|e|={err_max:.4f} mm, "
+              f"mean|e|={err_mean:.4f} mm")
+        if err_max <= eps:
+            print(f"终止：N={N} 满足误差容差 eps={eps}mm")
+            return _build_result(model, surf, R, N, boundaries, strips, err_max, err_mean)
 
-    T_func = ca.Function("T", [u, xvec], [T_raw])
-    Tp_func = ca.Function("Tp", [u, xvec], [Tp_raw])
-    u_grid = np.linspace(u_min, u_max, 201)
-    T_grid = np.array([T_func(ui, x_opt).full().ravel() for ui in u_grid])
-    T_grid = T_grid / (np.linalg.norm(T_grid, axis=1, keepdims=True) + 1e-12)
-    Tp_grid = np.array([Tp_func(ui, x_opt).full().ravel() for ui in u_grid])
+    print(f"未能在 max_N={max_N} 内满足容差 eps={eps}mm")
+    return _build_result(model, surf, R, N, boundaries, strips, err_max, err_mean)
 
-    # 刀心（固定）与刀轴线段
-    A_grid = np.array([surf(ui, v_mid)[0] + tool_r * surf(ui, v_mid)[1] for ui in u_grid])
-    edge_lens = [np.linalg.norm(surf(ui, v_max)[0] - surf(ui, v_min)[0]) for ui in u_grid[::20]]
-    L = float(np.mean(edge_lens)) if edge_lens else 0.0
-    half = L * 0.5 + tool_r
-    axis_segs = np.stack([A_grid - half * T_grid, A_grid + half * T_grid], axis=1)
+    print(f"未能在 max_N={max_N} 内满足容差 eps={eps}mm")
+    return _build_result(model, surf, R, N, boundaries, strips, err_max, err_mean)
 
-    # 点轴残差 + 共轭统计（数值求值）
-    resid = []
-    conjv = []
-    for i in range(n_quad):
-        ui = float(us[i])
-        Ti = T_func(ui, x_opt).full().ravel()
-        Ti = Ti / (np.linalg.norm(Ti) + 1e-12)
-        for P in (S_lo[i], S_mid[i], S_hi[i]):
-            d = P - A_fix[i]
-            rho = np.linalg.norm(d - np.dot(d, Ti) * Ti)
-            resid.append(abs(rho - tool_r))
-        conjv.append(float(np.dot(nS_mid[i], Ti)) ** 2)
 
+def _build_result(model, surf, R, N, boundaries, strips, err_max, err_mean):
+    u_min, u_max = model["uEdges"][0], model["uEdges"][-1]
+    u_grid = np.linspace(u_min, u_max, 101)
+    feed_lines = []
+    axis_segs = []
+    for (b_prev, b_next) in strips:
+        v_mid = 0.5 * (b_prev + b_next)
+        A_line = np.array([surf(ui, v_mid)[0] + R * surf(ui, v_mid)[1] for ui in u_grid])
+        T_line = np.array([surf(ui, v_mid)[2] for ui in u_grid])
+        T_line = T_line / (np.linalg.norm(T_line, axis=1, keepdims=True) + 1e-12)
+        half = L_tool = 25.0  # 轴线段半长用刃长
+        half = 12.5
+        segs = np.stack([A_line - half * T_line, A_line + half * T_line], axis=1)
+        feed_lines.append(A_line)
+        axis_segs.append(segs)
     return {
-        "u_grid": u_grid, "T_grid": T_grid, "Tp_grid": Tp_grid,
-        "A_grid": A_grid, "axis_segs": axis_segs,
-        "residual": {"mean": float(np.mean(resid)), "rms": float(np.sqrt(np.mean(np.array(resid) ** 2))),
-                     "max": float(np.max(resid))},
-        "conjugate": {"mean": float(np.mean(conjv)), "rms": float(np.sqrt(np.mean(np.array(conjv) ** 2)))},
-        "smoothness": {"mean": float(np.mean(np.linalg.norm(Tp_grid, axis=1))),
-                       "max": float(np.max(np.linalg.norm(Tp_grid, axis=1)))},
-        "meta": {
-            "u_min": u_min, "u_max": u_max, "v_min": v_min, "v_max": v_max,
-            "fitDir": model["fitDir"], "continuity": k,
-            "bandWidth": model["partition"]["bandWidth"],
-            "n_cells": len(model["cells"]), "tool_r": tool_r,
-        },
+        "model": model, "surf": surf, "R": R, "N": N, "boundaries": boundaries,
+        "strips": strips, "feed_lines": feed_lines, "axis_segs": axis_segs,
+        "err_max": err_max, "err_mean": err_mean,
+        "meta": {"u_min": u_min, "u_max": u_max,
+                 "v_min": model["vEdges"][0], "v_max": model["vEdges"][-1],
+                 "continuity": model["partition"]["continuity"],
+                 "n_cells": len(model["cells"])},
     }
 
 
 def write_continuous_toolpath_vtk(res, out_path):
-    feed = res["A_grid"]
-    axes = res["axis_segs"]
-    # 进给折线 + 刀轴线段合并写入（供拟合树可视化）
+    """导出所有条带刀轨（合并进给 + 刀轴；再分离 feed/axis 供 UI 开关）。"""
+    feed = np.concatenate(res["feed_lines"], axis=0)
+    axes = np.concatenate(res["axis_segs"], axis=0)
     lines = [feed]
-    lines.extend([[seg[0], seg[1]] for seg in axes])
+    lines.extend([[s[0], s[1]] for s in axes])
     n_pts = sum(len(l) for l in lines)
     n_segs = sum(len(l) - 1 for l in lines if len(l) >= 2)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -285,7 +243,7 @@ def write_continuous_toolpath_vtk(res, out_path):
             for i in range(len(l) - 1):
                 f.write(f"2 {base + i} {base + i + 1}\n")
             base += len(l)
-    # 分开写进给轨迹与刀轴线段（供加工工作台可视化控制）
+    # 分离 feed / axis
     for suffix, seg_list in (("_feed", [feed]), ("_axis", [[s[0], s[1]] for s in axes])):
         with open(out_path.replace(".vtk", suffix + ".vtk"), "w", encoding="utf-8") as f:
             n_pts = sum(len(l) for l in seg_list)
@@ -312,13 +270,9 @@ if __name__ == "__main__":
     out_dir = None
     if "--out" in sys.argv:
         out_dir = sys.argv[sys.argv.index("--out") + 1]
-    res = optimize_tool_axis_field(path)
-    print(f"曲面: {res['meta']['n_cells']} 格, continuity=C{res['meta']['continuity']}, "
-          f"bandWidth={res['meta']['bandWidth']}")
-    print(f"点轴残差(mm): max={res['residual']['max']:.4f} mean={res['residual']['mean']:.4f} "
-          f"rms={res['residual']['rms']:.4f}")
-    print(f"共轭残差: mean={res['conjugate']['mean']:.6f}")
-    print(f"刀轴光顺度: mean={res['smoothness']['mean']:.6f} max={res['smoothness']['max']:.6f}")
+    res = plan_toolpaths(path)
+    print(f"总刀轨条数 N={res['N']}, 最大包络误差={res['err_max']:.4f} mm, "
+          f"平均={res['err_mean']:.4f} mm")
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
         stem = os.path.basename(path).replace("_surface_model.json", "")

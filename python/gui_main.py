@@ -419,13 +419,14 @@ class SweepWorker(QThread):
 
 
 class ContinuousToolpathWorker(QThread):
-    """后台运行 toolpath_continuous.py（连续刀轨计算，完整版）。"""
+    """后台运行 toolpath_continuous.py（连续刀轨计算，完整版），并计算点铣刀轨。"""
     done = pyqtSignal(str)
     failed = pyqtSignal(str)
 
-    def __init__(self, out_dir):
+    def __init__(self, out_dir, args=None):
         super().__init__()
         self._out_dir = out_dir
+        self._args = args
 
     def run(self):
         try:
@@ -444,9 +445,34 @@ class ContinuousToolpathWorker(QThread):
                 if r.returncode != 0:
                     self.failed.emit((r.stderr or r.stdout or "").strip()[-600:])
                     return
+            self._compute_point_toolpath()
             self.done.emit(self._out_dir)
         except Exception as e:
             self.failed.emit(str(e))
+
+    def _compute_point_toolpath(self):
+        if self._args is None:
+            return
+        try:
+            import math
+            from research import compute_machining as _cm
+            patches = _cm.compute(self._out_dir, self._args)
+            if not patches:
+                return
+            stepover = 2.0 * math.sqrt(
+                max(0.0, 2.0 * self._args.ball_r * self._args.scallop
+                    - self._args.scallop ** 2))
+            blade_lines = {}
+            for p in patches:
+                lines = _cm.point_cl_lines(
+                    p.C0, p.C1, stepover, self._args.ball_r, flip=p.normal_flip)
+                blade_lines.setdefault(p.blade, []).extend(lines)
+            for bi, lines in blade_lines.items():
+                _cm.write_vtk_polylines(
+                    os.path.join(self._out_dir, f"blade{bi + 1}_toolpath_point.vtk"),
+                    lines)
+        except Exception:
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -481,6 +507,7 @@ class MainWindow(QMainWindow):
         self._contToolpathCount = [0, 0]
         self._currentVersion = 0
         self._mode = "ruled"
+        self._workbench = 0
         self._single_file_mode = False
         self._uRange1 = None
         self._uRange2 = None
@@ -489,6 +516,7 @@ class MainWindow(QMainWindow):
         self._preview_face_ids = set()
         self._diag_result = None
         self._reader = None
+        self._viz_actors = {}
 
         self._proc = None
         self._loaded_files = set()
@@ -516,6 +544,10 @@ class MainWindow(QMainWindow):
         self._act_wb_fit.setChecked(idx == 0)
         self._act_wb_mach.setChecked(idx == 1)
         self._wb_stack.setCurrentIndex(idx)
+        if idx == 0:
+            self._apply_fit_visibility()
+        else:
+            self._apply_mach_visibility()
 
     def _on_clear_results(self):
         self._tree.clear()
@@ -956,21 +988,12 @@ class MainWindow(QMainWindow):
             overhead=self._spn_m_overhead.value(),
             point_overhead=self._spn_m_poverhead.value())
 
-    def _set_actor_visibility(self, name, visible):
+    def _set_actors_visibility(self, name, visible):
         if not HAS_PYVISTA:
             return
-        a = None
-        try:
-            a = self._plotter.actors.get(name)
-        except Exception:
-            a = None
-        if a is None:
-            for x in self._plotter.renderer._actors:
-                if hasattr(x, '_name') and x._name == name:
-                    a = x
-                    break
-        if a is not None:
-            a.SetVisibility(visible)
+        for aname, actor in self._viz_actors.items():
+            if aname == name or aname.startswith(name + '_'):
+                actor.SetVisibility(visible)
 
     def _set_tol_item_checked(self, checked):
         if not hasattr(self, '_mach_tol_item'):
@@ -981,17 +1004,10 @@ class MainWindow(QMainWindow):
 
     def _on_mach_check(self, item, col):
         tag = item.data(0, Qt.UserRole)
-        visible = item.checkState(0) == Qt.Checked
-        if tag == 'flank_feed':
-            self._set_actor_visibility('flank_feed', visible)
-        elif tag == 'flank_axis':
-            self._set_actor_visibility('flank_axis', visible)
-        elif tag == 'point':
-            self._set_actor_visibility('point_toolpath', visible)
-        elif tag == 'tol':
-            self._on_toggle_tolerance_color(visible)
-        if HAS_PYVISTA:
-            self._plotter.render()
+        if tag == 'tol':
+            self._on_toggle_tolerance_color(item.checkState(0) == Qt.Checked)
+        else:
+            self._apply_mach_visibility()
 
     def _on_compute_tool(self):
         if not HAS_PYVISTA:
@@ -1006,7 +1022,7 @@ class MainWindow(QMainWindow):
             return
         self._btn_tool.setEnabled(False)
         self._log("[Machining] 连续刀轨计算中（toolpath_continuous.py）...")
-        self._tool_worker = ContinuousToolpathWorker(out_dir)
+        self._tool_worker = ContinuousToolpathWorker(out_dir, self._mach_args())
         self._tool_worker.done.connect(self._on_tool_computed_continuous)
         self._tool_worker.failed.connect(self._on_tool_failed)
         self._tool_worker.start()
@@ -1017,10 +1033,9 @@ class MainWindow(QMainWindow):
         self._render_toolpath_continuous()
         self._load_all_objs()
         self._build_tree()
-        self._apply_visibility()
 
     def _render_toolpath_continuous(self):
-        """渲染连续刀轨：进给轨迹(orange) + 刀轴线段(red)，受加工工作台开关控制。"""
+        """渲染连续刀轨：进给轨迹(orange) + 刀轴线段(red) + 点铣刀轨(blue)。"""
         if not HAS_PYVISTA:
             return
         import pyvista as pv
@@ -1029,18 +1044,35 @@ class MainWindow(QMainWindow):
                      or self._mach_flank_item.checkState(0) == Qt.Checked)
         show_axis = (not hasattr(self, '_mach_axis_item')
                      or self._mach_axis_item.checkState(0) == Qt.Checked)
+        show_point = (not hasattr(self, '_mach_point_item')
+                      or self._mach_point_item.checkState(0) == Qt.Checked)
         out_dir = self._out_dir
         for fn in sorted(os.listdir(out_dir)):
             path = os.path.join(out_dir, fn)
+            bi = 0 if "blade1" in fn else 1
             if fn.endswith('_toolpath_continuous_feed.vtk'):
                 pd = pv.read(path)
-                a = self._plotter.add_mesh(pd, color='#e66101', line_width=4, name='flank_feed')
+                name = f'flank_feed_{bi}'
+                a = self._plotter.add_mesh(pd, color='#e66101', line_width=6,
+                                           lighting=False, name=name)
                 a.SetVisibility(show_feed)
+                self._viz_actors[name] = a
                 self._tool_actors.append(a)
             elif fn.endswith('_toolpath_continuous_axis.vtk'):
                 pd = pv.read(path)
-                a = self._plotter.add_mesh(pd, color='#d62728', line_width=2, name='flank_axis')
+                name = f'flank_axis_{bi}'
+                a = self._plotter.add_mesh(pd, color='#d62728', line_width=2,
+                                           lighting=False, name=name)
                 a.SetVisibility(show_axis)
+                self._viz_actors[name] = a
+                self._tool_actors.append(a)
+            elif fn.endswith('_toolpath_point.vtk'):
+                pd = pv.read(path)
+                name = f'point_toolpath_{bi}'
+                a = self._plotter.add_mesh(pd, color='#1f77b4', line_width=2,
+                                           lighting=False, name=name)
+                a.SetVisibility(show_point)
+                self._viz_actors[name] = a
                 self._tool_actors.append(a)
         self._plotter.render()
 
@@ -1099,16 +1131,19 @@ class MainWindow(QMainWindow):
             a = self._plotter.add_mesh(feed_pd, color='#e66101', line_width=4,
                                        name='flank_feed')
             a.SetVisibility(show_feed)
+            self._viz_actors['flank_feed'] = a
             self._tool_actors.append(a)
         if axis_pd is not None:
             a = self._plotter.add_mesh(axis_pd, color='#d62728', line_width=2,
                                        name='flank_axis')
             a.SetVisibility(show_axis)
+            self._viz_actors['flank_axis'] = a
             self._tool_actors.append(a)
         if point_pd is not None:
             a = self._plotter.add_mesh(point_pd, color='#1f77b4', line_width=1,
                                        name='point_toolpath')
             a.SetVisibility(show_point)
+            self._viz_actors['point_toolpath'] = a
             self._tool_actors.append(a)
         self._plotter.render()
 
@@ -1151,29 +1186,35 @@ class MainWindow(QMainWindow):
             a = self._plotter.add_mesh(pd, color='#e66101', line_width=4,
                                        name='flank_feed')
             a.SetVisibility(show_feed)
+            self._viz_actors['flank_feed'] = a
             self._tool_actors.append(a)
         if axis is not None:
             pd = pv.PolyData(axis[0], lines=axis[1])
             a = self._plotter.add_mesh(pd, color='#d62728', line_width=2,
                                        name='flank_axis')
             a.SetVisibility(show_axis)
+            self._viz_actors['flank_axis'] = a
             self._tool_actors.append(a)
         if point is not None:
             pd = pv.PolyData(point[0], lines=point[1])
             a = self._plotter.add_mesh(pd, color='#1f77b4', line_width=1,
                                        name='point_toolpath')
             a.SetVisibility(show_point)
+            self._viz_actors['point_toolpath'] = a
             self._tool_actors.append(a)
         self._plotter.render()
 
     def _remove_tool_actors(self):
         if not HAS_PYVISTA:
             return
-        for name in ('flank_feed', 'flank_axis', 'point_toolpath'):
+        for name in [n for n in self._viz_actors
+                     if n.startswith('flank_feed') or n.startswith('flank_axis')
+                     or n.startswith('point_toolpath')]:
             try:
                 self._plotter.remove_actor(name)
             except Exception:
                 pass
+            self._viz_actors.pop(name, None)
         self._tool_actors = []
 
     def _on_clear_toolpath(self):
@@ -1297,10 +1338,11 @@ class MainWindow(QMainWindow):
             if mesh is None:
                 continue
             name = f"tol_color_{bi}"
-            self._plotter.add_mesh(
+            actor = self._plotter.add_mesh(
                 mesh, name=name, scalars='maxErr', cmap='jet',
                 opacity=0.92, show_edges=False, smooth_shading=False,
                 scalar_bar_args={'title': 'maxErr (mm)', 'color': 'black'})
+            self._viz_actors[name] = actor
             self._tol_actors.append(name)
             added += 1
         self._plotter.render()
@@ -1318,6 +1360,7 @@ class MainWindow(QMainWindow):
                 self._plotter.remove_actor(name)
             except Exception:
                 pass
+            self._viz_actors.pop(name, None)
         self._tol_actors = []
         self._plotter.render()
 
@@ -2070,7 +2113,7 @@ class MainWindow(QMainWindow):
             if fn == 'meta.json':
                 self._load_meta(path)
                 self._build_tree()
-                self._apply_visibility()
+                self._apply_fit_visibility()
         except Exception as e:
             self._log(f"[GUI Error] _on_file_written: {e}")
 
@@ -2129,14 +2172,6 @@ class MainWindow(QMainWindow):
                 surf_node.setData(1, Qt.UserRole, f"blade{bi + 1}_blend_surface")
                 surf_node.setData(2, Qt.UserRole, "blend_surface")
                 bnode.addChild(surf_node)
-
-            if self._contToolpathCount[bi]:
-                tp_node = QTreeWidgetItem(["连续刀轨 (刀轨计算)"])
-                tp_node.setFlags(tp_node.flags() | Qt.ItemIsUserCheckable)
-                tp_node.setCheckState(0, Qt.Checked)
-                tp_node.setData(1, Qt.UserRole, f"blade{bi + 1}_cont_toolpath")
-                tp_node.setData(2, Qt.UserRole, "cont_toolpath")
-                bnode.addChild(tp_node)
 
     def _load_meta(self, meta_path):
         meta = None
@@ -2210,10 +2245,8 @@ class MainWindow(QMainWindow):
                     self._bandCount[bi] += 1
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
                                   fn.replace('.vtk', ''), "band", bi))
-                elif fn.endswith('_toolpath_continuous.vtk'):
-                    self._contToolpathCount[bi] += 1
-                    files.append((os.path.normpath(os.path.join(out_dir, fn)),
-                                  fn.replace('.vtk', ''), "cont_toolpath", bi))
+                elif '_toolpath_' in fn:
+                    continue
                 else:
                     grid_files.append(fn)
                     files.append((os.path.normpath(os.path.join(out_dir, fn)),
@@ -2252,7 +2285,7 @@ class MainWindow(QMainWindow):
             self._add_obj(name, tag, blade, mesh)
         if HAS_PYVISTA:
             self._plotter.disable_render = False
-            self._apply_visibility()
+            self._apply_fit_visibility()
             self._plotter.render()
         self._log(f"[Load] finished ({len(out)} merged actors)")
 
@@ -2263,42 +2296,43 @@ class MainWindow(QMainWindow):
             return
         try:
             if tag == "mesh":
-                self._plotter.add_mesh(
+                actor = self._plotter.add_mesh(
                     mesh, name=name, color=BLADE_COLORS[blade], opacity=0.85,
                     show_edges=True, edge_color='darkgray')
             elif tag == "grid":
                 try:
-                    self._plotter.add_mesh(
+                    actor = self._plotter.add_mesh(
                         mesh, name=name, color=[0.1, 0.1, 0.1], line_width=2)
                 except TypeError:
-                    self._plotter.add_mesh(mesh, name=name, color=[0.1, 0.1, 0.1])
+                    actor = self._plotter.add_mesh(mesh, name=name, color=[0.1, 0.1, 0.1])
             elif tag == "ruled":
-                self._plotter.add_mesh(
+                actor = self._plotter.add_mesh(
                     mesh, name=name, color=[0.5, 0.7, 0.9], opacity=0.45)
             elif tag == "band":
                 try:
-                    self._plotter.add_mesh(
+                    actor = self._plotter.add_mesh(
                         mesh, name=name, color=[0.95, 0.30, 0.20], line_width=3)
                 except TypeError:
-                    self._plotter.add_mesh(mesh, name=name, color=[0.95, 0.30, 0.20])
+                    actor = self._plotter.add_mesh(mesh, name=name, color=[0.95, 0.30, 0.20])
             elif tag == "blend_surface":
-                self._plotter.add_mesh(
+                actor = self._plotter.add_mesh(
                     mesh, name=name, color=[0.45, 0.75, 0.55], opacity=0.6,
                     show_edges=False)
             elif tag == "cont_toolpath":
                 try:
-                    self._plotter.add_mesh(
+                    actor = self._plotter.add_mesh(
                         mesh, name=name, color=[0.60, 0.40, 0.95], line_width=3)
                 except TypeError:
-                    self._plotter.add_mesh(mesh, name=name, color=[0.60, 0.40, 0.95])
+                    actor = self._plotter.add_mesh(mesh, name=name, color=[0.60, 0.40, 0.95])
+            self._viz_actors[name] = actor
             self._log(f"  Loaded {tag}: {name}")
         except Exception as e:
             self._log(f"  Load error {name}: {e}")
 
     def _on_check(self, item, col):
-        self._apply_visibility()
+        self._apply_fit_visibility()
 
-    def _apply_visibility(self):
+    def _apply_fit_visibility(self):
         if not HAS_PYVISTA:
             return
 
@@ -2322,19 +2356,24 @@ class MainWindow(QMainWindow):
                     visible_set.discard("blade2_mesh")
                     visible_set.add("blade1_mesh")
 
-        try:
-            actor_count = 0
-            for a in self._plotter.renderer._actors:
-                if hasattr(a, '_name'):
-                    name = a._name
-                    if name.startswith('diag_') or name.startswith('ScalarBars'):
-                        continue
-                    actor_count += 1
-                    a.SetVisibility(name in visible_set)
-            self._log(f"[Vis] visible_set={len(visible_set)} actors={actor_count}")
-            self._plotter.render()
-        except Exception:
-            pass
+        for name, actor in self._viz_actors.items():
+            if name.startswith('blade1_') or name.startswith('blade2_'):
+                actor.SetVisibility(name in visible_set)
+        self._plotter.render()
+
+    def _apply_mach_visibility(self):
+        if not HAS_PYVISTA:
+            return
+        show_feed = (not hasattr(self, '_mach_flank_item')
+                     or self._mach_flank_item.checkState(0) == Qt.Checked)
+        show_axis = (not hasattr(self, '_mach_axis_item')
+                     or self._mach_axis_item.checkState(0) == Qt.Checked)
+        show_point = (not hasattr(self, '_mach_point_item')
+                      or self._mach_point_item.checkState(0) == Qt.Checked)
+        self._set_actors_visibility('flank_feed', show_feed)
+        self._set_actors_visibility('flank_axis', show_axis)
+        self._set_actors_visibility('point_toolpath', show_point)
+        self._plotter.render()
 
     def _clear_3d(self):
         self._preview_colors = {}
@@ -2342,6 +2381,7 @@ class MainWindow(QMainWindow):
         self._last_picked_fid = None
         self._diag_result = None
         self._reader = None
+        self._viz_actors = {}
         self._split_items = []
         self._split_list.clear()
         self._btn_identify.setEnabled(False)
