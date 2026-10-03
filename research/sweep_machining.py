@@ -25,6 +25,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).parent))
 import compute_machining as cm
@@ -183,6 +184,23 @@ def collect(outdir, args, fit_sec=0.0):
         "fit_time_s": round(fit_sec, 4),
         "toolpath_time_s": round(toolpath_sec, 4),
     } | read_error_stats(outdir)
+
+
+def _run_combo(task):
+    """并行 worker：对单个 (nu,nv) 组合跑拟合 + 刀轨计算。返回 (nu, nv, rec 或 None)。"""
+    file, workdir_base, total, nu, nv, tol, ps_ranges, face_idx, mach_args = task
+    outdir = os.path.join(workdir_base, f"t{total}_u{nu}_v{nv}")
+    if os.path.isdir(outdir):
+        shutil.rmtree(outdir, ignore_errors=True)
+    os.makedirs(outdir, exist_ok=True)
+    try:
+        rc, fit_sec = run_fitting(file, file, outdir, tol, nu, nv, ps_ranges, face_idx)
+    except Exception:
+        return (nu, nv, None)
+    if rc != 0:
+        return (nu, nv, None)
+    rec = collect(outdir, mach_args, fit_sec)
+    return (nu, nv, rec)
 
 
 def write_xlsx(rows, out_path):
@@ -375,6 +393,7 @@ def main():
     ap.add_argument("--total-min", type=int, default=4, help="总分片数下限（含）")
     ap.add_argument("--total-max", type=int, default=100, help="总分片数上限（含）")
     ap.add_argument("--workdir", default=None, help="临时工作目录（默认系统临时目录）")
+    ap.add_argument("--workers", type=int, default=None, help="并行进程数（默认 CPU 核数）")
     args = ap.parse_args()
 
     # 关键：把叶片文件转成绝对路径。子进程 simple.exe 以 PROJECT_DIR 为 cwd 运行，
@@ -500,25 +519,14 @@ def main():
         combos = enumerate_splits(total)
         log(f"[{i}/{len(totals)}] total={total} → {len(combos)} 组合 {combos}")
         combo_rows = []
-        for (nu, nv) in combos:
-            outdir = os.path.join(workdir_base, f"t{total}_u{nu}_v{nv}")
-            if os.path.isdir(outdir):
-                shutil.rmtree(outdir, ignore_errors=True)
-            os.makedirs(outdir, exist_ok=True)
-            try:
-                rc, fit_sec = run_fitting(args.file, args.file, outdir, args.tolerance, nu, nv,
-                                          ps_ranges, split_face_idx)
-            except Exception as e:
-                log(f"    [{nu}x{nv}] 拟合执行异常: {e}")
-                continue
-            if rc != 0:
-                log(f"    [{nu}x{nv}] 拟合失败 rc={rc}")
-                continue
-            rec = collect(outdir, mach_args, fit_sec)
-            if rec is None:
-                log(f"    [{nu}x{nv}] 未解析到准线文件")
-                continue
-            combo_rows.append(rec)
+        tasks = [(args.file, workdir_base, total, nu, nv, args.tolerance,
+                  ps_ranges, split_face_idx, mach_args) for (nu, nv) in combos]
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            for (nu, nv, rec) in ex.map(_run_combo, tasks):
+                if rec is None:
+                    log(f"    [{nu}x{nv}] 拟合失败/未解析")
+                    continue
+                combo_rows.append(rec)
         if not combo_rows:
             log(f"  total={total} 所有组合失败，跳过")
             continue

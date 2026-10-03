@@ -99,9 +99,9 @@ def build_surface_eval(model):
             sum_phi += phi
             sum_phi_u += phi_u
             sum_phi_v += phi_v
-        S = acc / sum_phi
-        Su = acc_u / sum_phi - acc * sum_phi_u / (sum_phi ** 2)
-        Sv = acc_v / sum_phi - acc * sum_phi_v / (sum_phi ** 2)
+        S = acc / (sum_phi + 1e-12)
+        Su = acc_u / (sum_phi + 1e-12) - acc * sum_phi_u / (sum_phi ** 2 + 1e-24)
+        Sv = acc_v / (sum_phi + 1e-12) - acc * sum_phi_v / (sum_phi ** 2 + 1e-24)
         nS = np.cross(Su, Sv)
         nS = nS / (np.linalg.norm(nS) + 1e-12)
         return S, nS, Sv
