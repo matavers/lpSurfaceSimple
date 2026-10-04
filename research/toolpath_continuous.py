@@ -266,9 +266,10 @@ def _build_result(model, R, N, boundaries, strips, feed_lines, axis_segs, err_me
 
 
 def write_continuous_toolpath_vtk(res, out_path):
-    feed = np.concatenate(res["feed_lines"], axis=0)
-    axes = np.concatenate(res["axis_segs"], axis=0)
-    lines = [feed] + [[s[0], s[1]] for s in axes]
+    # 每条带进给线独立 polyline（不串联），刀轴线段独立 2 点线，消除条带间斜向跳变
+    feed_lines = [np.asarray(fl) for fl in res["feed_lines"]]
+    axis_lines = [np.asarray([s[0], s[1]]) for segs in res["axis_segs"] for s in segs]
+    lines = feed_lines + axis_lines
     n_pts = sum(len(l) for l in lines)
     n_segs = sum(len(l) - 1 for l in lines if len(l) >= 2)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -283,7 +284,7 @@ def write_continuous_toolpath_vtk(res, out_path):
             for i in range(len(l) - 1):
                 f.write(f"2 {base + i} {base + i + 1}\n")
             base += len(l)
-    for suffix, seg_list in (("_feed", [feed]), ("_axis", [[s[0], s[1]] for s in axes])):
+    for suffix, seg_list in (("_feed", feed_lines), ("_axis", axis_lines)):
         with open(out_path.replace(".vtk", suffix + ".vtk"), "w", encoding="utf-8") as f:
             n_pts = sum(len(l) for l in seg_list)
             n_segs = sum(len(l) - 1 for l in seg_list if len(l) >= 2)
