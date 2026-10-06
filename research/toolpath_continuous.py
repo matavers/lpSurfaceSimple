@@ -49,23 +49,26 @@ def _scan_worker(payload):
         def surf_r(feed, rule):
             S, nS, _Su, _Sv = surf(rule, feed)
             return S, nS, rd(rule, feed)
+        def surf_Sn(feed, rule):
+            S, nS, _Su, _Sv = surf(rule, feed)
+            return S, nS
     else:
         def surf_r(feed, rule):
             S, nS, _Su, _Sv = surf(feed, rule)
             return S, nS, rd(feed, rule)
-    return _strip_error(surf_r, b_prev, w, R, feed_grid, n_rule, n_v)
+        def surf_Sn(feed, rule):
+            S, nS, _Su, _Sv = surf(feed, rule)
+            return S, nS
+    return _strip_error(surf_r, surf_Sn, b_prev, w, R, feed_grid, n_rule, n_v)
 
 
 def _area_worker(args):
     """并行 worker：计算一行（固定 u，遍历 v）的面积微元。args=(v_min, n, u, du, dv)。"""
     global _G_SURF
     v_min, n, u, du, dv = args
-    area = 0.0
-    for j in range(n):
-        v = v_min + dv * (j + 0.5)
-        _S, _nS, Su, Sv = _G_SURF(u, v)
-        area += float(np.linalg.norm(np.cross(Su, Sv))) * du * dv
-    return area
+    vs = v_min + dv * (np.arange(n) + 0.5)
+    _S, _nS, Su, Sv = _G_SURF(np.full(n, u), vs)
+    return float(np.sum(np.linalg.norm(np.cross(Su, Sv), axis=1)) * du * dv)
 
 
 def _pose_worker(args):
@@ -123,6 +126,29 @@ def _chi1_np(u, uL, uR, a, b, k, deriv=False):
     return (0.0, 0.0) if deriv else 0.0
 
 
+def _chi1_np_vec(u, uL, uR, a, b, k):
+    """向量化版 _chi1_np（数组输入），返回 (chi, chi') 数组。"""
+    u = np.asarray(u, dtype=float)
+    chi = np.zeros_like(u)
+    chi_p = np.zeros_like(u)
+    # 上升过渡带 [uL-a, uL)
+    m = (u > uL - a) & (u < uL)
+    if np.any(m):
+        t = (u[m] - (uL - a)) / a
+        chi[m] = _smootherstep(t, k, False)
+        chi_p[m] = (_smootherstep(t, k, True) if k > 0 else np.ones_like(t)) / a
+    # 平台 [uL, uR]
+    m = (u >= uL) & (u <= uR)
+    chi[m] = 1.0
+    # 下降过渡带 (uR, uR+b)
+    m = (u > uR) & (u < uR + b)
+    if np.any(m):
+        t = (u[m] - uR) / b
+        chi[m] = 1.0 - _smootherstep(t, k, False)
+        chi_p[m] = -(_smootherstep(t, k, True) if k > 0 else np.ones_like(t)) / b
+    return chi, chi_p
+
+
 def build_surface_eval(model):
     k = model["partition"]["continuity"]
     band_w = model["partition"]["bandWidth"]
@@ -141,44 +167,52 @@ def build_surface_eval(model):
         cell_data.append((c, c0, c1, c0p, c1p))
 
     def eval_pt(u, v):
-        acc = np.zeros(3); acc_u = np.zeros(3); acc_v = np.zeros(3)
-        sum_phi = 0.0; sum_phi_u = 0.0; sum_phi_v = 0.0
+        """混合曲面解析求值。u/v 可为标量（返回 (S,nS,Su,Sv) 各为 3 向量）
+        或等长数组（返回各为 (N,3) 数组），后者用于批量加速。"""
+        u = np.atleast_1d(np.asarray(u, dtype=float)).ravel()
+        v = np.atleast_1d(np.asarray(v, dtype=float)).ravel()
+        N = u.size
+        acc = np.zeros((N, 3)); acc_u = np.zeros((N, 3)); acc_v = np.zeros((N, 3))
+        sum_phi = np.zeros(N); sum_phi_u = np.zeros(N); sum_phi_v = np.zeros(N)
         for (c, c0, c1, c0p, c1p) in cell_data:
-            cu, cu_p = _chi1_np(u, c["u0"], c["u1"], a_u, a_u, k, deriv=True)
-            cv, cv_p = _chi1_np(v, c["v0"], c["v1"], a_v, a_v, k, deriv=True)
+            cu, cu_p = _chi1_np_vec(u, c["u0"], c["u1"], a_u, a_u, k)
+            cv, cv_p = _chi1_np_vec(v, c["v0"], c["v1"], a_v, a_v, k)
             phi = cu * cv
             phi_u = cu_p * cv
             phi_v = cu * cv_p
-            R = np.zeros(3); R_u = np.zeros(3); R_v = np.zeros(3)
+            R = np.zeros((N, 3)); R_u = np.zeros((N, 3)); R_v = np.zeros((N, 3))
             du = c["u1"] - c["u0"]; dv = c["v1"] - c["v0"]
             for d in range(3):
                 if fitDir == "U":
-                    # 母线沿 u：R = (1-s)·c0(v) + s·c1(v)，s=(u-u0)/(u1-u0) 为格内局部参数
-                    c0v = float(c0[d](v)); c1v = float(c1[d](v))
-                    c0p_v = float(c0p[d](v)); c1p_v = float(c1p[d](v))
+                    # 母线沿 u：R = (1-s)·c0(v) + s·c1(v)
+                    c0v = c0[d](v); c1v = c1[d](v)
+                    c0p_v = c0p[d](v); c1p_v = c1p[d](v)
                     s = (u - c["u0"]) / du
-                    R[d] = (1.0 - s) * c0v + s * c1v
-                    R_u[d] = (c1v - c0v) / du
-                    R_v[d] = (1.0 - s) * c0p_v + s * c1p_v
+                    R[:, d] = (1.0 - s) * c0v + s * c1v
+                    R_u[:, d] = (c1v - c0v) / du
+                    R_v[:, d] = (1.0 - s) * c0p_v + s * c1p_v
                 else:
-                    # 母线沿 v：R = (1-s)·c0(u) + s·c1(u)，s=(v-v0)/(v1-v0) 为格内局部参数
-                    c0v = float(c0[d](u)); c1v = float(c1[d](u))
-                    c0p_v = float(c0p[d](u)); c1p_v = float(c1p[d](u))
+                    # 母线沿 v：R = (1-s)·c0(u) + s·c1(u)
+                    c0v = c0[d](u); c1v = c1[d](u)
+                    c0p_v = c0p[d](u); c1p_v = c1p[d](u)
                     s = (v - c["v0"]) / dv
-                    R[d] = (1.0 - s) * c0v + s * c1v
-                    R_u[d] = (1.0 - s) * c0p_v + s * c1p_v
-                    R_v[d] = (c1v - c0v) / dv
-            acc += phi * R
-            acc_u += phi_u * R + phi * R_u
-            acc_v += phi_v * R + phi * R_v
+                    R[:, d] = (1.0 - s) * c0v + s * c1v
+                    R_u[:, d] = (1.0 - s) * c0p_v + s * c1p_v
+                    R_v[:, d] = (c1v - c0v) / dv
+            acc += phi[:, None] * R
+            acc_u += phi_u[:, None] * R + phi[:, None] * R_u
+            acc_v += phi_v[:, None] * R + phi[:, None] * R_v
             sum_phi += phi
             sum_phi_u += phi_u
             sum_phi_v += phi_v
-        S = acc / (sum_phi + 1e-12)
-        Su = acc_u / (sum_phi + 1e-12) - acc * sum_phi_u / (sum_phi ** 2 + 1e-24)
-        Sv = acc_v / (sum_phi + 1e-12) - acc * sum_phi_v / (sum_phi ** 2 + 1e-24)
+        denom = sum_phi + 1e-12
+        S = acc / denom[:, None]
+        Su = acc_u / denom[:, None] - acc * sum_phi_u[:, None] / (denom[:, None] ** 2)
+        Sv = acc_v / denom[:, None] - acc * sum_phi_v[:, None] / (denom[:, None] ** 2)
         nS = np.cross(Su, Sv)
-        nS = nS / (np.linalg.norm(nS) + 1e-12)
+        nS = nS / (np.linalg.norm(nS, axis=1, keepdims=True) + 1e-12)
+        if N == 1:
+            return S[0], nS[0], Su[0], Sv[0]
         return S, nS, Su, Sv
 
     def ruling_dir(u, v):
@@ -279,21 +313,28 @@ def _optimize_strip_pose(surf_r, b_prev, b_next, R, feed_grid, n_rule, pool=None
     return A_smooth, T_smooth, L_strip
 
 
-def _strip_error(surf_r, b_prev, w, R, feed_grid, n_rule, n_v=8):
+def _strip_error(surf_r, surf_Sn, b_prev, w, R, feed_grid, n_rule, n_v=8):
     """给定切削长度 w（参数域），用解析刀心 A（稳定快速），返回 (mean|e|, max|e|)。
-    用全部进给位置 + 母线子采样，保证最大误差（过切/欠切极值）不被采样遗漏。"""
+    用全部进给位置 + 母线子采样，保证最大误差（过切/欠切极值）不被采样遗漏。
+    surf_Sn(feed, rule) 为批量求点接口（数组输入，返回 (S,nS) 各 (N,3)），用于向量化加速。"""
     b_next = b_prev + w
-    es = []
-    for f in feed_grid:
+    mid = 0.5 * (b_prev + b_next)
+    vs = np.linspace(b_prev, b_next, n_v)
+    FF, VV = np.meshgrid(feed_grid, vs, indexing="ij")
+    S_all, _ = surf_Sn(FF.ravel(), VV.ravel())            # (N,3) 全部采样点
+    S_mid, n_mid = surf_Sn(feed_grid, np.full_like(feed_grid, mid))  # (n_feed,3) 中点+法矢
+    es = np.empty(FF.size)
+    idx = 0
+    for i, f in enumerate(feed_grid):
         T = _ruling_direction(surf_r, f, b_prev, b_next)
-        A = _center_analytic(surf_r, f, b_prev, b_next, R)
-        for v in np.linspace(b_prev, b_next, n_v):
-            es.append(abs(_point_axis_dist(surf_r(f, v)[0], A, T) - R))
-    es = np.array(es)
+        A = S_mid[i] + R * n_mid[i]
+        for _v in vs:
+            es[idx] = abs(_point_axis_dist(S_all[idx], A, T) - R)
+            idx += 1
     return float(es.mean()), float(es.max())
 
 
-def _optimize_strip_width(surf_r, b_prev, R, eps, w_min, w_max, rule_hi, feed_grid,
+def _optimize_strip_width(surf_r, surf_Sn, b_prev, R, eps, w_min, w_max, rule_hi, feed_grid,
                           n_rule, n_v=8, n_scan=40, pool=None, w_hint=None):
     """求「最大误差≤eps 下的最大切削长度 w」（方案 B，目标用 max|e| 保证不过切）。
     误差对 w 非单调（曲面存在特征导致误差跳变），故用线性扫描从 w_max 向下找第一个满足 max|e|≤eps 的 w，
@@ -304,7 +345,7 @@ def _optimize_strip_width(surf_r, b_prev, R, eps, w_min, w_max, rule_hi, feed_gr
     w_max = min(w_max, rule_hi - b_prev)
     if w_max <= w_min:
         w = w_max
-        mean_e, max_e = _strip_error(surf_r, b_prev, w, R, feed_grid, n_rule, n_v)
+        mean_e, max_e = _strip_error(surf_r, surf_Sn, b_prev, w, R, feed_grid, n_rule, n_v)
         return w, mean_e, max_e
 
     def _scan(ws):
@@ -319,7 +360,7 @@ def _optimize_strip_width(surf_r, b_prev, R, eps, w_min, w_max, rule_hi, feed_gr
                         return (w, mean_e, max_e)
         else:
             for w in ws:
-                mean_e, max_e = _strip_error(surf_r, b_prev, w, R, feed_grid, n_rule, n_v)
+                mean_e, max_e = _strip_error(surf_r, surf_Sn, b_prev, w, R, feed_grid, n_rule, n_v)
                 if max_e <= eps:
                     return (w, mean_e, max_e)
         return None
@@ -345,7 +386,7 @@ def _optimize_strip_width(surf_r, b_prev, R, eps, w_min, w_max, rule_hi, feed_gr
 
     # 全部都不满足（eps 太紧），取最小宽度
     w = w_min
-    mean_e, max_e = _strip_error(surf_r, b_prev, w, R, feed_grid, n_rule, n_v)
+    mean_e, max_e = _strip_error(surf_r, surf_Sn, b_prev, w, R, feed_grid, n_rule, n_v)
     return w, mean_e, max_e
 
 
@@ -357,13 +398,11 @@ def _surface_area_mm2(surf, u_min, u_max, v_min, v_max, n=120, pool=None):
         tasks = [(v_min, n, u_min + du * (i + 0.5), du, dv) for i in range(n)]
         area = float(sum(pool.map(_area_worker, tasks)))
     else:
-        area = 0.0
-        for i in range(n):
-            u = u_min + du * (i + 0.5)
-            for j in range(n):
-                v = v_min + dv * (j + 0.5)
-                _S, _nS, Su, Sv = surf(u, v)
-                area += float(np.linalg.norm(np.cross(Su, Sv))) * du * dv
+        us = u_min + du * (np.arange(n) + 0.5)
+        vs = v_min + dv * (np.arange(n) + 0.5)
+        UU, VV = np.meshgrid(us, vs, indexing="ij")
+        _S, _nS, Su, Sv = surf(UU.ravel(), VV.ravel())
+        area = float(np.sum(np.linalg.norm(np.cross(Su, Sv), axis=1)) * du * dv)
     return area
 
 
@@ -390,6 +429,10 @@ def plan_toolpaths(model_path, L_tool=25.0, R=5.0, o_min=2.0, o_max=5.0,
         def surf_r(feed, rule):
             S, nS, _Su, _Sv = surf(rule, feed)
             return S, nS, ruling_dir(rule, feed)   # 母线方向 = 格内直纹面 ruling
+
+        def surf_Sn(feed, rule):
+            S, nS, _Su, _Sv = surf(rule, feed)
+            return S, nS
     else:  # V
         feed_lo, feed_hi = u_min, u_max
         rule_lo, rule_hi = v_min, v_max
@@ -397,6 +440,10 @@ def plan_toolpaths(model_path, L_tool=25.0, R=5.0, o_min=2.0, o_max=5.0,
         def surf_r(feed, rule):
             S, nS, _Su, _Sv = surf(feed, rule)
             return S, nS, ruling_dir(feed, rule)   # 母线方向 = 格内直纹面 ruling
+
+        def surf_Sn(feed, rule):
+            S, nS, _Su, _Sv = surf(feed, rule)
+            return S, nS
 
     # 按物理进给长度自适应采样数，使各面刀轴间距一致（避免短弦向进给时刀轴过密）。
     _fs = np.linspace(feed_lo, feed_hi, 40)
@@ -447,7 +494,7 @@ def plan_toolpaths(model_path, L_tool=25.0, R=5.0, o_min=2.0, o_max=5.0,
     w_prev = None  # 上一条刀轨的切削长度，用于宽度扫描的热启动
     while b_prev < rule_hi - 1e-9 and len(strips) < max_strips:
         w, mean_e, max_e = _optimize_strip_width(
-            surf_r, b_prev, R, eps, w_min, w_max, rule_hi, feed_grid, n_rule,
+            surf_r, surf_Sn, b_prev, R, eps, w_min, w_max, rule_hi, feed_grid, n_rule,
             pool=pool, w_hint=w_prev)
         if w <= 1e-9:
             print(f"梯度下降收敛到 w≈0（eps={eps} 下该处无法侧铣），停止于 {len(strips)} 条带", flush=True)
