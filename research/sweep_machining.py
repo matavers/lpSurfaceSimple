@@ -41,6 +41,8 @@ HEADERS = [
     "min_error_mm", "max_error_mm", "mean_error_mm", "rms_error_mm",
     "max_overcut_mm", "max_undercut_mm",
     "max_twist_deg", "flank_err_mm",
+    "flank_overcut_mm", "flank_overcut_mean_mm", "flank_overcut_std_mm",
+    "flank_undercut_mm", "flank_undercut_mean_mm", "flank_undercut_std_mm",
     "flank_total_s", "point_total_s", "speedup",
     "fit_time_s", "toolpath_time_s",
 ]
@@ -173,6 +175,12 @@ def collect(outdir, args, fit_sec=0.0):
     point_time = 0.0
     num_strips = 0
     err_mean = 0.0
+    err_overcut = 0.0
+    err_undercut = 0.0
+    err_overcut_mean = 0.0
+    err_overcut_std = 0.0
+    err_undercut_mean = 0.0
+    err_undercut_std = 0.0
     for mp in models:
         try:
             res = tc.plan_toolpaths(os.path.join(outdir, mp), eps=args.eps)
@@ -184,6 +192,12 @@ def collect(outdir, args, fit_sec=0.0):
         point_time += res["machining"]["point_time_s"]
         num_strips += res["N"]
         err_mean = max(err_mean, res["err_mean"])
+        err_overcut = max(err_overcut, res["machining"].get("err_overcut_mm", 0.0))
+        err_undercut = max(err_undercut, res["machining"].get("err_undercut_mm", 0.0))
+        err_overcut_mean = max(err_overcut_mean, res["machining"].get("err_overcut_mean_mm", 0.0))
+        err_overcut_std = max(err_overcut_std, res["machining"].get("err_overcut_std_mm", 0.0))
+        err_undercut_mean = max(err_undercut_mean, res["machining"].get("err_undercut_mean_mm", 0.0))
+        err_undercut_std = max(err_undercut_std, res["machining"].get("err_undercut_std_mm", 0.0))
     toolpath_sec = time.time() - t0
     speedup = point_time / flank_time if flank_time > 0 else 0.0
     # 拟合格数 + 最大扭转角（meta.json）
@@ -197,6 +211,12 @@ def collect(outdir, args, fit_sec=0.0):
         "point_total_s": round(point_time, 2),
         "speedup": round(speedup, 3),
         "flank_err_mm": round(err_mean, 4),
+        "flank_overcut_mm": round(err_overcut, 4),
+        "flank_undercut_mm": round(err_undercut, 4),
+        "flank_overcut_mean_mm": round(err_overcut_mean, 4),
+        "flank_overcut_std_mm": round(err_overcut_std, 4),
+        "flank_undercut_mean_mm": round(err_undercut_mean, 4),
+        "flank_undercut_std_mm": round(err_undercut_std, 4),
         "fit_time_s": round(fit_sec, 4),
         "toolpath_time_s": round(toolpath_sec, 4),
     }
@@ -392,6 +412,27 @@ def add_charts(out_path, eps=None):
     except (ValueError, IndexError):
         p5 = None
 
+    # 图6：加工过切/欠切 vs 总分片数（刀轨符号误差，随 eps 变化）
+    try:
+        foc_idx = headers.index("flank_overcut_mm")
+        fuc_idx = headers.index("flank_undercut_mm")
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
+        ax.plot(totals, [r[foc_idx] for r in data], linewidth=1.4,
+                color="#d62728", label="Machining Over-cut (加工过切)")
+        ax.plot(totals, [r[fuc_idx] for r in data], linewidth=1.4,
+                color="#2ca02c", label="Machining Under-cut (加工欠切)")
+        ax.set_xlabel("Total Patches")
+        ax.set_ylabel("Signed toolpath error (mm)")
+        ax.set_title("Machining Over-cut / Under-cut vs Total Patches")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        p6 = os.path.join(tmp, "machining_overcut_undercut.png")
+        fig.savefig(p6)
+        plt.close(fig)
+    except (ValueError, IndexError):
+        p6 = None
+
     if "charts" in wb.sheetnames:
         del wb["charts"]
     cs = wb.create_sheet("charts")
@@ -402,6 +443,8 @@ def add_charts(out_path, eps=None):
         cs.add_image(XLImage(p4), "A44")
     if p5:
         cs.add_image(XLImage(p5), "H22")
+    if p6:
+        cs.add_image(XLImage(p6), "A66")
     # 把 eps 写回 meta 表，保证下次 --charts-only 不带 --eps 也能读对
     if eps is not None:
         if "meta" not in wb.sheetnames:
@@ -579,6 +622,12 @@ def main():
             "max_undercut_mm": round(best["max_undercut_mm"], 4),
             "max_twist_deg": round(best["max_twist_deg"], 3),
             "flank_err_mm": round(best["flank_err_mm"], 4),
+            "flank_overcut_mm": round(best.get("flank_overcut_mm", 0.0), 4),
+            "flank_overcut_mean_mm": round(best.get("flank_overcut_mean_mm", 0.0), 4),
+            "flank_overcut_std_mm": round(best.get("flank_overcut_std_mm", 0.0), 4),
+            "flank_undercut_mm": round(best.get("flank_undercut_mm", 0.0), 4),
+            "flank_undercut_mean_mm": round(best.get("flank_undercut_mean_mm", 0.0), 4),
+            "flank_undercut_std_mm": round(best.get("flank_undercut_std_mm", 0.0), 4),
             "flank_total_s": best["flank_total_s"],
             "point_total_s": best["point_total_s"],
             "speedup": best["speedup"],

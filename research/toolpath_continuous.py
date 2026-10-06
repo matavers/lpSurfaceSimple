@@ -539,6 +539,15 @@ def plan_toolpaths(model_path, L_tool=25.0, R=5.0, o_min=2.0, o_max=5.0,
     all_e = np.array(all_e)
     err_mean = float(np.mean(np.abs(all_e)))
     err_std = float(np.std(all_e))
+    # 加工过切/欠切（符号误差）：e = ρ − R，e<0 过切（刀具切入），e>0 欠切（留余量）
+    e_over = -all_e[all_e < 0]   # 过切幅度（正值）
+    e_under = all_e[all_e > 0]   # 欠切幅度（正值）
+    err_overcut = float(e_over.max()) if e_over.size else 0.0
+    err_overcut_mean = float(e_over.mean()) if e_over.size else 0.0
+    err_overcut_std = float(e_over.std()) if e_over.size else 0.0
+    err_undercut = float(e_under.max()) if e_under.size else 0.0
+    err_undercut_mean = float(e_under.mean()) if e_under.size else 0.0
+    err_undercut_std = float(e_under.std()) if e_under.size else 0.0
     N = len(strips)
     if strips:
         avg_width_mm = float(np.mean([b1 - b0 for b0, b1 in strips]) * L_avg / rule_range)
@@ -570,6 +579,9 @@ def plan_toolpaths(model_path, L_tool=25.0, R=5.0, o_min=2.0, o_max=5.0,
         "flank": flank, "point": point, "speedup": speedup,
         "flank_time_s": flank["cut_time_s"], "point_time_s": point["cut_time_s"],
         "num_strips": N, "err_mean": err_mean, "err_std": err_std,
+        "err_overcut_mm": err_overcut, "err_undercut_mm": err_undercut,
+        "err_overcut_mean_mm": err_overcut_mean, "err_overcut_std_mm": err_overcut_std,
+        "err_undercut_mean_mm": err_undercut_mean, "err_undercut_std_mm": err_undercut_std,
         "path_length_mm": path_len_mm, "surface_area_mm2": area_mm2,
         "avg_cutting_length_mm": avg_width_mm,
         "config": {k: mcfg.get(k) for k in ("cutting_speed", "feed_per_tooth",
