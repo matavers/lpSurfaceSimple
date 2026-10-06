@@ -412,20 +412,47 @@ def add_charts(out_path, eps=None):
     except (ValueError, IndexError):
         p5 = None
 
-    # 图6：加工过切/欠切 vs 总分片数（刀轨符号误差，随 eps 变化）
+    # 图6：加工过切/欠切 vs 总分片数（最值 + 均值 + 均值±标准差带）
     try:
         foc_idx = headers.index("flank_overcut_mm")
+        focm_idx = headers.index("flank_overcut_mean_mm")
+        focs_idx = headers.index("flank_overcut_std_mm")
         fuc_idx = headers.index("flank_undercut_mm")
-        fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
-        ax.plot(totals, [r[foc_idx] for r in data], linewidth=1.4,
-                color="#d62728", label="Machining Over-cut (加工过切)")
-        ax.plot(totals, [r[fuc_idx] for r in data], linewidth=1.4,
-                color="#2ca02c", label="Machining Under-cut (加工欠切)")
-        ax.set_xlabel("Total Patches")
-        ax.set_ylabel("Signed toolpath error (mm)")
-        ax.set_title("Machining Over-cut / Under-cut vs Total Patches")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
+        fucm_idx = headers.index("flank_undercut_mean_mm")
+        fucs_idx = headers.index("flank_undercut_std_mm")
+        oc_max = [r[foc_idx] for r in data]
+        oc_mean = [r[focm_idx] for r in data]
+        oc_std = [r[focs_idx] for r in data]
+        uc_max = [r[fuc_idx] for r in data]
+        uc_mean = [r[fucm_idx] for r in data]
+        uc_std = [r[fucs_idx] for r in data]
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4), dpi=120)
+        # 过切
+        axes[0].plot(totals, oc_max, color="#d62728", linewidth=1.5, label="Max")
+        axes[0].plot(totals, oc_mean, color="#d62728", linewidth=1.2,
+                     linestyle="--", label="Mean")
+        axes[0].fill_between(totals,
+                             [m - s for m, s in zip(oc_mean, oc_std)],
+                             [m + s for m, s in zip(oc_mean, oc_std)],
+                             color="#d62728", alpha=0.15, label="Mean±std")
+        axes[0].set_xlabel("Total Patches")
+        axes[0].set_ylabel("Over-cut (mm)")
+        axes[0].set_title("Machining Over-cut (加工过切)")
+        axes[0].legend(fontsize=8)
+        axes[0].grid(True, alpha=0.3)
+        # 欠切
+        axes[1].plot(totals, uc_max, color="#2ca02c", linewidth=1.5, label="Max")
+        axes[1].plot(totals, uc_mean, color="#2ca02c", linewidth=1.2,
+                     linestyle="--", label="Mean")
+        axes[1].fill_between(totals,
+                             [m - s for m, s in zip(uc_mean, uc_std)],
+                             [m + s for m, s in zip(uc_mean, uc_std)],
+                             color="#2ca02c", alpha=0.15, label="Mean±std")
+        axes[1].set_xlabel("Total Patches")
+        axes[1].set_ylabel("Under-cut (mm)")
+        axes[1].set_title("Machining Under-cut (加工欠切)")
+        axes[1].legend(fontsize=8)
+        axes[1].grid(True, alpha=0.3)
         fig.tight_layout()
         p6 = os.path.join(tmp, "machining_overcut_undercut.png")
         fig.savefig(p6)
