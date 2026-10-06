@@ -29,6 +29,9 @@ from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).parent))
 import compute_machining as cm
+import toolpath_config as tcfg  # 连续刀轨参数配置（tool_len/tool_r/o_min/o_max/eps 等）
+import toolpath_continuous as tc  # 连续刀轨（迭代条带法）
+import machining_model as mm     # 加工参数/时间估计（工程公式）
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 BUILD_EXE = PROJECT_DIR / "build" / "Release" / "simple.exe"
@@ -55,7 +58,8 @@ def run_fitting(file1, file2, outdir, tol, nu, nv, ps_ranges=None, face_idx=0):
     cmd = [str(BUILD_EXE), file1, file2, "--mode", "ruled",
            "--outdir", outdir, "--tolerance", str(tol),
            "--nsplit-u", str(nu), "--nsplit-v", str(nv),
-           "--no-refine", "--balance-edges", "--max-cells", "200000"]
+           "--no-refine", "--balance-edges", "--max-cells", "200000",
+           "--blend", "--blend-width", "0.05", "--continuity", "3"]
     if ps_ranges:
         for k, (dir_, ranges) in enumerate(ps_ranges, start=1):
             if not ranges:
@@ -160,30 +164,62 @@ def read_error_stats(outdir):
 
 
 def collect(outdir, args, fit_sec=0.0):
+    """与 UI 一致：用连续刀轨（toolpath_continuous）计算侧铣/点铣加工时间。"""
     t0 = time.time()
-    patches = cm.compute(outdir, args)
-    toolpath_sec = time.time() - t0
-    if not patches:
+    models = sorted(fn for fn in os.listdir(outdir) if fn.endswith("_surface_model.json"))
+    if not models:
         return None
-    s = cm.summarize(patches, args)
-    max_twist = max((p.twist for p in patches), default=0.0)
-    speedup = None
-    if s["flank"]["total"] > 0:
-        speedup = round(s["point"]["total"] / s["flank"]["total"], 3)
-    return {
-        "num_patches": s["num_patches"],
-        "flank_regions": s["flank_regions"],
+    flank_time = 0.0
+    point_time = 0.0
+    num_strips = 0
+    err_mean = 0.0
+    for mp in models:
+        try:
+            res = tc.plan_toolpaths(os.path.join(outdir, mp), eps=args.eps)
+        except Exception:
+            res = None
+        if res is None or not res.get("machining"):
+            continue
+        flank_time += res["machining"]["flank_time_s"]
+        point_time += res["machining"]["point_time_s"]
+        num_strips += res["N"]
+        err_mean = max(err_mean, res["err_mean"])
+    toolpath_sec = time.time() - t0
+    speedup = point_time / flank_time if flank_time > 0 else 0.0
+    # 拟合格数 + 最大扭转角（meta.json）
+    num_patches, max_twist = _meta_stats(outdir)
+    rec = {
+        "num_patches": num_patches if num_patches else num_strips,
         "max_twist_deg": round(max_twist, 3),
-        "flank_err_mm": round(s.get("flank_err", 0.0), 4),
-        "flank_cut_s": round(s["flank"]["cut"], 2),
-        "flank_overhead_s": round(s["flank"]["overhead"], 2),
-        "flank_total_s": round(s["flank"]["total"], 2),
-        "point_cut_s": round(s["point"]["cut"], 2),
-        "point_total_s": round(s["point"]["total"], 2),
-        "speedup": speedup,
+        "flank_cut_s": round(flank_time, 2),
+        "flank_total_s": round(flank_time, 2),
+        "point_cut_s": round(point_time, 2),
+        "point_total_s": round(point_time, 2),
+        "speedup": round(speedup, 3),
+        "flank_err_mm": round(err_mean, 4),
         "fit_time_s": round(fit_sec, 4),
         "toolpath_time_s": round(toolpath_sec, 4),
-    } | read_error_stats(outdir)
+    }
+    rec.update(read_error_stats(outdir))
+    return rec
+
+
+def _meta_stats(outdir):
+    """从 meta.json 统计拟合直纹面格数（nRows×nCols 求和）与最大扭转角。"""
+    meta_path = os.path.join(outdir, "meta.json")
+    if not os.path.exists(meta_path):
+        return 0, 0.0
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        return 0, 0.0
+    total = 0
+    max_twist = 0.0
+    for s in meta.get("surfaces", []):
+        total += int(s.get("nRows", 0)) * int(s.get("nCols", 0))
+        max_twist = max(max_twist, float(s.get("maxTwist", 0.0)))
+    return total, max_twist
 
 
 def _run_combo(task):
@@ -203,7 +239,7 @@ def _run_combo(task):
     return (nu, nv, rec)
 
 
-def write_xlsx(rows, out_path):
+def write_xlsx(rows, out_path, eps=None):
     import openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -211,10 +247,14 @@ def write_xlsx(rows, out_path):
     ws.append(HEADERS)
     for r in rows:
         ws.append([r.get(h) for h in HEADERS])
+    if eps is not None:
+        meta = wb.create_sheet("meta")
+        meta["A1"] = "eps"
+        meta["B1"] = float(eps)
     wb.save(out_path)
 
 
-def add_charts(out_path):
+def add_charts(out_path, eps=None):
     """用 matplotlib 生成 PNG 图表并嵌入 xlsx（样式完全可控，无图例重叠问题）。"""
     import matplotlib
     matplotlib.use("Agg")
@@ -232,9 +272,19 @@ def add_charts(out_path):
         wb = openpyxl.load_workbook(out_path)
     except Exception:
         return
-    ws = wb.active
+    # 用数据表 machining_sweep（不能用 wb.active，因为 charts/meta 表可能被设为 active）
+    ws = wb["machining_sweep"]
     if ws.max_row < 2:
         return
+
+    # 点铣基线误差：优先用传入的 eps，否则从 xlsx 的 meta 表读，再回退到 config.scallop
+    if eps is None:
+        try:
+            eps = float(wb["meta"]["B1"].value)
+        except Exception:
+            mcfg = cm.load_config()
+            eps = mcfg.get("scallop", 0.1)
+    eps = float(eps)
 
     headers = [c.value for c in ws[1]]
     rows = [list(r) for r in ws.iter_rows(min_row=2, values_only=True)]
@@ -242,7 +292,7 @@ def add_charts(out_path):
         x_idx = headers.index("total")
         speedup_idx = headers.index("speedup")
         err_cols = [headers.index(x) for x in
-                    ("min_error_mm", "max_error_mm", "mean_error_mm", "rms_error_mm")]
+                    ("min_error_mm", "mean_error_mm", "rms_error_mm")]
     except ValueError:
         return
 
@@ -266,14 +316,15 @@ def add_charts(out_path):
     fig.savefig(p1)
     plt.close(fig)
 
-    # 图2：误差 vs 总分片数（4 条误差曲线，带图例）
+    # 图2：误差 vs 总分片数（统一取最优组合的误差：最大/平均/RMS）
     fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
-    for ci in err_cols:
+    err_labels = ["max error (best)", "mean error (best)", "rms error (best)"]
+    for ci, lab in zip(err_cols, err_labels):
         ys = [r[ci] for r in data]
-        ax.plot(totals, ys, linewidth=1.3, label=headers[ci])
+        ax.plot(totals, ys, linewidth=1.3, label=lab)
     ax.set_xlabel("Total Patches")
     ax.set_ylabel("Error (mm)")
-    ax.set_title("Error vs Total Patches")
+    ax.set_title("Error vs Total Patches (best split per total)")
     ax.legend(fontsize=8, ncol=2)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -285,12 +336,10 @@ def add_charts(out_path):
     fig, ax = plt.subplots(figsize=(6, 4), dpi=120)
     mean_err = [r[headers.index("mean_error_mm")] for r in data]
     ax.scatter(mean_err, speedup, color="#1f77b4", s=18, label="侧铣(直纹面拟合)")
-    mcfg = cm.load_config()
-    scallop = mcfg.get("scallop", 0.1)
-    ax.scatter([scallop], [1.0], color="red", marker="*", s=200, zorder=5,
-               label=f"点铣基线(残留{scallop}mm, 提速1)")
+    ax.scatter([eps], [1.0], color="red", marker="*", s=200, zorder=5,
+               label=f"点铣基线(残留{eps}mm, 提速1)")
     ax.axhline(1.0, color="red", linestyle="--", linewidth=1, alpha=0.6)
-    ax.axvline(scallop, color="green", linestyle=":", linewidth=1, alpha=0.6)
+    ax.axvline(eps, color="green", linestyle=":", linewidth=1, alpha=0.6)
     ax.set_xlabel("Mean Error (mm)")
     ax.set_ylabel("Speedup")
     ax.set_title("Speedup vs Mean Error (flank vs point)")
@@ -353,6 +402,12 @@ def add_charts(out_path):
         cs.add_image(XLImage(p4), "A44")
     if p5:
         cs.add_image(XLImage(p5), "H22")
+    # 把 eps 写回 meta 表，保证下次 --charts-only 不带 --eps 也能读对
+    if eps is not None:
+        if "meta" not in wb.sheetnames:
+            wb.create_sheet("meta")
+        wb["meta"]["A1"] = "eps"
+        wb["meta"]["B1"] = float(eps)
     wb.save(out_path)
 
 
@@ -386,7 +441,7 @@ def main():
         except Exception:
             pass
     ap = argparse.ArgumentParser(description="单文件叶片：auto-identify→split-blade→拟合扫描(总分片数范围)，输出 xlsx")
-    ap.add_argument("file", help="叶片文件（单文件，如 blade.igs）")
+    ap.add_argument("file", nargs="?", help="叶片文件（单文件，如 blade.igs；--charts-only 时可不填）")
     ap.add_argument("--out", required=True, help="输出 xlsx 路径")
     ap.add_argument("--checkpoint", default=None, help="断点检查点 JSON 路径")
     ap.add_argument("--tolerance", type=float, default=0.1, help="拟合容差 mm")
@@ -394,7 +449,19 @@ def main():
     ap.add_argument("--total-max", type=int, default=100, help="总分片数上限（含）")
     ap.add_argument("--workdir", default=None, help="临时工作目录（默认系统临时目录）")
     ap.add_argument("--workers", type=int, default=None, help="并行进程数（默认 CPU 核数）")
+    ap.add_argument("--eps", type=float, default=None, help="侧铣可接受误差（默认取 toolpath_config 的 eps）")
+    ap.add_argument("--charts-only", action="store_true", help="仅从 --out 的 xlsx 重新生成图表（不重跑拟合）")
     args = ap.parse_args()
+
+    # 仅重新生成图表
+    if args.charts_only:
+        add_charts(args.out, args.eps)
+        log(f"已从 {args.out} 重新生成图表")
+        sys.exit(0)
+
+    if not args.file:
+        log("[ERROR] 需要叶片文件（或使用 --charts-only 仅重生成图表）")
+        sys.exit(1)
 
     # 关键：把叶片文件转成绝对路径。子进程 simple.exe 以 PROJECT_DIR 为 cwd 运行，
     # 相对路径若按 PROJECT_DIR 解析会失效（例如在 research 下用 "..\Blade.igs"）。
@@ -428,14 +495,17 @@ def main():
     else:
         log("  未识别到叶盆/叶背区间，将拟合整面")
 
+    tcfg_ = tcfg.load_config()
     mcfg = cm.load_config()
+    eps = args.eps if args.eps is not None else tcfg_.get("eps", 0.1)
     mach_args = argparse.Namespace(
         feed=mcfg.get("feed", 500.0), tool_r=mcfg.get("tool_r", 5.0),
         ball_r=mcfg.get("ball_r", 5.0), scallop=mcfg.get("scallop", 0.1),
         twist_limit=mcfg.get("twist_limit", 2.0),
         taper_angle=mcfg.get("taper_angle", 3.0),
         overhead=mcfg.get("overhead", 4.0),
-        point_overhead=mcfg.get("point_overhead", 10.0))
+        point_overhead=mcfg.get("point_overhead", 10.0),
+        eps=eps)
 
     # 断点重启：合并「已有 xlsx」+「checkpoint」，按 total 去重
     def key_of(r):
@@ -444,16 +514,19 @@ def main():
         return _key(r.get("total"))
 
     merged = {}
+    combo_ckpt = {}  # {(total, nu, nv): rec}，用于组合级断点恢复
     for r in load_xlsx_rows(args.out):
         r.setdefault("key", key_of(r))
         merged[r["key"]] = r
     if args.checkpoint and os.path.exists(args.checkpoint):
         try:
             with open(args.checkpoint, encoding="utf-8") as f:
-                ck = json.load(f).get("results", [])
-            for r in ck:
+                ck = json.load(f)
+            for r in ck.get("results", []):
                 r.setdefault("key", key_of(r))
                 merged[r["key"]] = r
+            for k, v in ck.get("combos", {}).items():
+                combo_ckpt[k] = v
         except Exception:
             pass
     results = list(merged.values())
@@ -474,40 +547,49 @@ def main():
                 combos.append((nu, total // nu))
         return combos
 
-    def save():
-        if args.checkpoint:
-            try:
-                with open(args.checkpoint, "w", encoding="utf-8") as f:
-                    json.dump({"results": results}, f, ensure_ascii=False, indent=1)
-            except Exception as e:
-                log(f"  [warn] 写 checkpoint 失败: {e}")
+    def save_checkpoint():
+        if not args.checkpoint:
+            return
         try:
-            write_xlsx(results, args.out)
+            with open(args.checkpoint, "w", encoding="utf-8") as f:
+                json.dump({"results": results, "combos": combo_ckpt}, f,
+                          ensure_ascii=False, indent=1)
+        except Exception as e:
+            log(f"  [warn] 写 checkpoint 失败: {e}")
+
+    def save_xlsx():
+        try:
+            write_xlsx(results, args.out, eps)
         except Exception as e:
             log(f"  [warn] 写 xlsx 失败: {e}")
 
     def aggregate_rows(combo_rows):
         if not combo_rows:
             return None
-        errs = [r["max_error_mm"] for r in combo_rows]
+        # 统一取「最优组合」（误差最小的切分）：误差/过切/欠切/扭转/侧铣误差/时间/提速
+        # 全部来自同一个组合，与提速比口径一致，避免把最差组合的误差和最优组合的提速混在一起。
         best = min(combo_rows, key=lambda r: r["max_error_mm"])
         return {
             "num_patches": best["num_patches"],
-            "min_error_mm": round(min(errs), 4),
-            "max_error_mm": round(max(errs), 4),
-            "mean_error_mm": round(sum(errs) / len(errs), 4),
-            "rms_error_mm": round(
-                (sum(r["rms_error_mm"] ** 2 for r in combo_rows) / len(combo_rows)) ** 0.5, 4),
-            "max_overcut_mm": round(max(r["max_overcut_mm"] for r in combo_rows), 4),
-            "max_undercut_mm": round(max(r["max_undercut_mm"] for r in combo_rows), 4),
+            "min_error_mm": round(best["max_error_mm"], 4),
+            "max_error_mm": round(best["max_error_mm"], 4),
+            "mean_error_mm": round(best["mean_error_mm"], 4),
+            "rms_error_mm": round(best["rms_error_mm"], 4),
+            "max_overcut_mm": round(best["max_overcut_mm"], 4),
+            "max_undercut_mm": round(best["max_undercut_mm"], 4),
             "max_twist_deg": round(best["max_twist_deg"], 3),
-            "flank_err_mm": round(max(r["flank_err_mm"] for r in combo_rows), 4),
+            "flank_err_mm": round(best["flank_err_mm"], 4),
             "flank_total_s": best["flank_total_s"],
             "point_total_s": best["point_total_s"],
             "speedup": best["speedup"],
-            "fit_time_s": round(sum(r["fit_time_s"] for r in combo_rows) / len(combo_rows), 4),
-            "toolpath_time_s": round(sum(r["toolpath_time_s"] for r in combo_rows) / len(combo_rows), 4),
+            "fit_time_s": round(best["fit_time_s"], 4),
+            "toolpath_time_s": round(best["toolpath_time_s"], 4),
         }
+
+    from concurrent.futures import as_completed
+
+    def _combo_key(total, nu, nv):
+        return f"{total}_{nu}_{nv}"
 
     i = 0
     for total in totals:
@@ -517,16 +599,30 @@ def main():
             log(f"[{i}/{len(totals)}] skip (已完成): total={total}")
             continue
         combos = enumerate_splits(total)
-        log(f"[{i}/{len(totals)}] total={total} → {len(combos)} 组合 {combos}")
+        # 断点恢复：已缓存的组合直接复用，其余进队列重跑
         combo_rows = []
-        tasks = [(args.file, workdir_base, total, nu, nv, args.tolerance,
-                  ps_ranges, split_face_idx, mach_args) for (nu, nv) in combos]
-        with ProcessPoolExecutor(max_workers=args.workers) as ex:
-            for (nu, nv, rec) in ex.map(_run_combo, tasks):
-                if rec is None:
-                    log(f"    [{nu}x{nv}] 拟合失败/未解析")
-                    continue
-                combo_rows.append(rec)
+        pending = []
+        for (nu, nv) in combos:
+            ck = _combo_key(total, nu, nv)
+            if ck in combo_ckpt:
+                combo_rows.append(combo_ckpt[ck])
+            else:
+                pending.append((nu, nv))
+        log(f"[{i}/{len(totals)}] total={total} → {len(combos)} 组合 "
+            f"(已缓存 {len(combo_rows)}，待跑 {len(pending)}) {combos}")
+        if pending:
+            tasks = [(args.file, workdir_base, total, nu, nv, args.tolerance,
+                      ps_ranges, split_face_idx, mach_args) for (nu, nv) in pending]
+            with ProcessPoolExecutor(max_workers=args.workers) as ex:
+                futures = [ex.submit(_run_combo, t) for t in tasks]
+                for fut in as_completed(futures):
+                    nu, nv, rec = fut.result()
+                    if rec is None:
+                        log(f"    [{nu}x{nv}] 拟合失败/未解析")
+                        continue
+                    combo_ckpt[_combo_key(total, nu, nv)] = rec
+                    combo_rows.append(rec)
+                    save_checkpoint()  # 每个组合完成即落盘，中断后可续跑
         if not combo_rows:
             log(f"  total={total} 所有组合失败，跳过")
             continue
@@ -538,9 +634,10 @@ def main():
         log(f"  → minErr={agg['min_error_mm']}mm maxErr={agg['max_error_mm']}mm "
             f"meanErr={agg['mean_error_mm']}mm rmsErr={agg['rms_error_mm']}mm "
             f"最优提速={agg['speedup']}x")
-        save()
+        save_xlsx()
+        save_checkpoint()
 
-    add_charts(args.out)
+    add_charts(args.out, eps)
     log(f"完成。共 {len(results)} 条结果 → {args.out}")
     if args.checkpoint:
         log(f"断点文件 → {args.checkpoint}")

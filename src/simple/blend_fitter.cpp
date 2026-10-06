@@ -3,6 +3,7 @@
 #include "simple/ruled_fitter.hpp"
 
 #include <Geom_BSplineCurve.hxx>
+#include <GeomAPI_PointsToBSpline.hxx>
 #include <TColgp_Array1OfPnt.hxx>
 #include <TColStd_Array1OfReal.hxx>
 #include <TColStd_Array1OfInteger.hxx>
@@ -269,6 +270,25 @@ std::string bsplineToJson(const Handle(Geom_BSplineCurve)& c) {
     return o.str();
 }
 
+// 由优化后的准线采样点重建 B 样条（参数范围 [p0,p1] 与格胞参数域一致），
+// 供 JSON 导出使用。这样导出的准线才是「拟合后」的准线，而非原始等参线，
+// 与 exportGridOBJs / exportBlendSurfaceOBJ 使用的优化准线保持一致。
+Handle(Geom_BSplineCurve) samplesToBSpline(const Vec3Arr& samples,
+                                           double p0, double p1,
+                                           int degree = 3) {
+    int n = static_cast<int>(samples.size());
+    if (n < 2) return Handle(Geom_BSplineCurve)();
+    TColgp_Array1OfPnt pts(1, n);
+    TColStd_Array1OfReal params(1, n);
+    for (int i = 0; i < n; ++i) {
+        pts.SetValue(i + 1, gp_Pnt(samples[i].x(), samples[i].y(), samples[i].z()));
+        params.SetValue(i + 1, p0 + (p1 - p0) * i / (n - 1.0));
+    }
+    GeomAPI_PointsToBSpline fit(pts, params, degree, degree, GeomAbs_C2, 1e-3);
+    if (!fit.IsDone()) return Handle(Geom_BSplineCurve)();
+    return fit.Curve();
+}
+
 } // namespace
 
 bool exportSurfaceModelJson(const std::string& path,
@@ -294,8 +314,16 @@ bool exportSurfaceModelJson(const std::string& path,
         o << "{\"row\":" << c.row << ",\"col\":" << c.col;
         o << ",\"u0\":" << c.u0 << ",\"u1\":" << c.u1;
         o << ",\"v0\":" << c.v0 << ",\"v1\":" << c.v1;
-        o << ",\"c0\":" << bsplineToJson(c.ruled.curveC0);
-        o << ",\"c1\":" << bsplineToJson(c.ruled.curveC1);
+        Handle(Geom_BSplineCurve) c0bs, c1bs;
+        if (gr.fitDir == ParamDir::U) {
+            c0bs = samplesToBSpline(c.ruled.curveC0Samples, c.v0, c.v1);
+            c1bs = samplesToBSpline(c.ruled.curveC1Samples, c.v0, c.v1);
+        } else {
+            c0bs = samplesToBSpline(c.ruled.curveC0Samples, c.u0, c.u1);
+            c1bs = samplesToBSpline(c.ruled.curveC1Samples, c.u0, c.u1);
+        }
+        o << ",\"c0\":" << bsplineToJson(c0bs.IsNull() ? c.ruled.curveC0 : c0bs);
+        o << ",\"c1\":" << bsplineToJson(c1bs.IsNull() ? c.ruled.curveC1 : c1bs);
         o << "}";
     }
     o << "]}";

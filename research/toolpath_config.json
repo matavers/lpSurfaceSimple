@@ -1,0 +1,10 @@
+{
+    "tool_len": 25.0,
+    "tool_r": 5.0,
+    "o_min": 2.0,
+    "o_max": 5.0,
+    "eps": 0.1,
+    "n_rule": 10,
+    "target_spacing": 1.5,
+    "n_jobs": -1
+}

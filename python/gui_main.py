@@ -47,6 +47,7 @@ sys.path.insert(0, str(PROJECT_DIR))
 try:
     from research import compute_machining as _cm
     from research import sweep as _sweep
+    from research import toolpath_config as _tcfg
     HAS_MACHINING = True
 except Exception:
     HAS_MACHINING = False
@@ -422,6 +423,7 @@ class ContinuousToolpathWorker(QThread):
     """后台运行 toolpath_continuous.py（连续刀轨计算，完整版），并计算点铣刀轨。"""
     done = pyqtSignal(str)
     failed = pyqtSignal(str)
+    log = pyqtSignal(str)
 
     def __init__(self, out_dir, args=None):
         super().__init__()
@@ -438,12 +440,21 @@ class ContinuousToolpathWorker(QThread):
                 self.failed.emit("未找到 *_surface_model.json（请先在拟合工作台开启过渡面并运行拟合）")
                 return
             for mp in models:
-                r = subprocess.run(
-                    [sys.executable, script, mp, "--out", self._out_dir],
-                    capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=1200)
-                if r.returncode != 0:
-                    self.failed.emit((r.stderr or r.stdout or "").strip()[-600:])
+                self.log.emit(f"== 刀轨计算: {os.path.basename(mp)} ==")
+                proc = subprocess.Popen(
+                    [sys.executable, "-u", script, mp, "--out", self._out_dir],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace")
+                assert proc.stdout is not None
+                tail = []
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if line:
+                        self.log.emit(line)
+                        tail.append(line)
+                ret = proc.wait(timeout=1200)
+                if ret != 0:
+                    self.failed.emit("\n".join(tail[-20:]) or f"exit code {ret}")
                     return
             self._compute_point_toolpath()
             self.done.emit(self._out_dir)
@@ -903,6 +914,46 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(form)
 
+        # ── 连续刀轨参数（toolpath_config.json，UI 可修改并写回） ──
+        layout.addWidget(QLabel("连续刀轨参数 (toolpath_config.json)"))
+        tp_cfg = _tcfg.load_config()
+        tp_form = QFormLayout()
+        tp_form.setSpacing(6)
+
+        self._spn_tp_tool_len = QDoubleSpinBox()
+        self._spn_tp_tool_len.setRange(1.0, 200.0)
+        self._spn_tp_tool_len.setValue(tp_cfg.get("tool_len", 25.0))
+        self._spn_tp_tool_len.setToolTip("刀具有效切削刃长，只是最大切削宽度上限，实际切削宽度由误差密度 |de/dl| 决定。")
+        tp_form.addRow("刀具刃长 L_tool (mm):", self._spn_tp_tool_len)
+
+        self._spn_tp_tool_r = QDoubleSpinBox()
+        self._spn_tp_tool_r.setRange(0.1, 100.0)
+        self._spn_tp_tool_r.setValue(tp_cfg.get("tool_r", 5.0))
+        tp_form.addRow("刀具半径 R (mm):", self._spn_tp_tool_r)
+
+        self._spn_tp_o_min = QDoubleSpinBox()
+        self._spn_tp_o_min.setRange(0.0, 50.0)
+        self._spn_tp_o_min.setValue(tp_cfg.get("o_min", 2.0))
+        tp_form.addRow("最小重叠 o_min (mm):", self._spn_tp_o_min)
+
+        self._spn_tp_o_max = QDoubleSpinBox()
+        self._spn_tp_o_max.setRange(0.0, 50.0)
+        self._spn_tp_o_max.setValue(tp_cfg.get("o_max", 5.0))
+        tp_form.addRow("最大重叠 o_max (mm):", self._spn_tp_o_max)
+
+        self._spn_tp_eps = QDoubleSpinBox()
+        self._spn_tp_eps.setRange(0.001, 5.0)
+        self._spn_tp_eps.setDecimals(3)
+        self._spn_tp_eps.setValue(tp_cfg.get("eps", 0.1))
+        self._spn_tp_eps.setToolTip("可接受误差 mean|e|（mm），梯度下降求误差≤eps 下的最大切削长度。")
+        tp_form.addRow("可接受误差 mean|e| (mm):", self._spn_tp_eps)
+
+        layout.addLayout(tp_form)
+
+        self._btn_save_tp = QPushButton("保存刀轨参数到配置")
+        self._btn_save_tp.clicked.connect(self._on_save_toolpath_config)
+        layout.addWidget(self._btn_save_tp)
+
         self._chk_use_cpp = QCheckBox("使用 C++ 计算刀轨 (simple.exe --mode machining)")
         self._chk_use_cpp.setChecked(False)
         self._chk_use_cpp.setToolTip(
@@ -953,6 +1004,12 @@ class MainWindow(QMainWindow):
         self._mach_point_item.setCheckState(0, Qt.Checked)
         self._mach_point_item.setData(0, Qt.UserRole, 'point')
         self._mach_tree.addTopLevelItem(self._mach_point_item)
+
+        self._mach_intersection_item = QTreeWidgetItem(["相交线 (覆盖带边界)"])
+        self._mach_intersection_item.setFlags(self._mach_intersection_item.flags() | Qt.ItemIsUserCheckable)
+        self._mach_intersection_item.setCheckState(0, Qt.Checked)
+        self._mach_intersection_item.setData(0, Qt.UserRole, 'intersections')
+        self._mach_tree.addTopLevelItem(self._mach_intersection_item)
 
         self._mach_tol_item = QTreeWidgetItem(["容差着色 (maxErr)"])
         self._mach_tol_item.setFlags(self._mach_tol_item.flags() | Qt.ItemIsUserCheckable)
@@ -1009,6 +1066,19 @@ class MainWindow(QMainWindow):
         else:
             self._apply_mach_visibility()
 
+    def _on_save_toolpath_config(self):
+        if not HAS_MACHINING:
+            return
+        cfg = {
+            "tool_len": self._spn_tp_tool_len.value(),
+            "tool_r": self._spn_tp_tool_r.value(),
+            "o_min": self._spn_tp_o_min.value(),
+            "o_max": self._spn_tp_o_max.value(),
+            "eps": self._spn_tp_eps.value(),
+        }
+        _tcfg.save_config(cfg)
+        self._log("[Machining] 刀轨参数已保存到 research/toolpath_config.json")
+
     def _on_compute_tool(self):
         if not HAS_PYVISTA:
             QMessageBox.warning(self, "Error", "pyvista 不可用。")
@@ -1020,11 +1090,13 @@ class MainWindow(QMainWindow):
         if not os.path.isdir(out_dir) or not list(Path(out_dir).glob("*_surface_model.json")):
             QMessageBox.warning(self, "Error", "请先在拟合工作台开启「过渡面」并运行拟合，生成 *_surface_model.json。")
             return
+        self._on_save_toolpath_config()
         self._btn_tool.setEnabled(False)
         self._log("[Machining] 连续刀轨计算中（toolpath_continuous.py）...")
         self._tool_worker = ContinuousToolpathWorker(out_dir, self._mach_args())
         self._tool_worker.done.connect(self._on_tool_computed_continuous)
         self._tool_worker.failed.connect(self._on_tool_failed)
+        self._tool_worker.log.connect(self._log)
         self._tool_worker.start()
 
     def _on_tool_computed_continuous(self, out_dir):
@@ -1033,6 +1105,42 @@ class MainWindow(QMainWindow):
         self._render_toolpath_continuous()
         self._load_all_objs()
         self._build_tree()
+        self._show_mach_summary_continuous(out_dir)
+
+    def _show_mach_summary_continuous(self, out_dir):
+        """读取 *_machining_summary.json，在时间窗口显示加工参数/刀轨统计/时间/提速比。"""
+        import json as _json
+        lines = []
+        for fn in sorted(os.listdir(out_dir)):
+            if not fn.endswith("_machining_summary.json"):
+                continue
+            try:
+                with open(os.path.join(out_dir, fn), encoding="utf-8") as fh:
+                    m = _json.load(fh)
+            except Exception:
+                continue
+            name = fn.replace("_machining_summary.json", "")
+            f = m.get("flank", {})
+            p = m.get("point", {})
+            cfg = m.get("config", {})
+            lines.append(f"== {name} ==")
+            lines.append(f"加工参数: Vc={cfg.get('cutting_speed')}m/min, "
+                         f"fz={cfg.get('feed_per_tooth')}mm/齿, z={cfg.get('num_teeth')}齿, "
+                         f"kc={cfg.get('specific_cutting_force')}N/mm², a_e={cfg.get('radial_depth')}mm")
+            lines.append(f"刀轨统计: {m.get('num_strips')}条带, mean|e|={m.get('err_mean'):.4f}mm, "
+                         f"刀轨总长={m.get('path_length_mm'):.0f}mm, 曲面面积={m.get('surface_area_mm2'):.0f}mm², "
+                         f"平均切削长度={m.get('avg_cutting_length_mm'):.2f}mm")
+            lines.append(f"侧铣: 转速={f.get('spindle_rpm'):.0f}rpm, "
+                         f"进给率={f.get('feed_rate_mm_min'):.0f}mm/min, 时间={f.get('cut_time_s'):.1f}s, "
+                         f"MRR={f.get('mrr_cm3_min'):.2f}cm³/min, 力={f.get('cutting_force_N'):.0f}N, "
+                         f"功率={f.get('cutting_power_kW'):.2f}kW, 扭矩={f.get('torque_Nm'):.1f}N·m")
+            lines.append(f"点铣(残留={p.get('scallop_mm')}mm): 时间={p.get('cut_time_s'):.1f}s, "
+                         f"行距={p.get('stepover_mm'):.2f}mm, 刀轨总长={p.get('total_path_mm'):.0f}mm")
+            lines.append(f"侧铣加工时间={m.get('flank_time_s'):.1f}s, 点铣加工时间={m.get('point_time_s'):.1f}s, "
+                         f"提速比={m.get('speedup'):.1f}x")
+            lines.append("")
+        if lines:
+            self._txt_mach.setPlainText("\n".join(lines))
 
     def _render_toolpath_continuous(self):
         """渲染连续刀轨：进给轨迹(orange) + 刀轴线段(red) + 点铣刀轨(blue)。"""
@@ -1046,6 +1154,8 @@ class MainWindow(QMainWindow):
                      or self._mach_axis_item.checkState(0) == Qt.Checked)
         show_point = (not hasattr(self, '_mach_point_item')
                       or self._mach_point_item.checkState(0) == Qt.Checked)
+        show_intersection = (not hasattr(self, '_mach_intersection_item')
+                             or self._mach_intersection_item.checkState(0) == Qt.Checked)
         out_dir = self._out_dir
         for fn in sorted(os.listdir(out_dir)):
             path = os.path.join(out_dir, fn)
@@ -1072,6 +1182,14 @@ class MainWindow(QMainWindow):
                 a = self._plotter.add_mesh(pd, color='#1f77b4', line_width=2,
                                            lighting=False, name=name)
                 a.SetVisibility(show_point)
+                self._viz_actors[name] = a
+                self._tool_actors.append(a)
+            elif fn.endswith('_toolpath_continuous_intersections.vtk'):
+                pd = pv.read(path)
+                name = f'intersections_{bi}'
+                a = self._plotter.add_mesh(pd, color='#2ca02c', line_width=4,
+                                           lighting=False, name=name)
+                a.SetVisibility(show_intersection)
                 self._viz_actors[name] = a
                 self._tool_actors.append(a)
         self._plotter.render()
@@ -1209,7 +1327,8 @@ class MainWindow(QMainWindow):
             return
         for name in [n for n in self._viz_actors
                      if n.startswith('flank_feed') or n.startswith('flank_axis')
-                     or n.startswith('point_toolpath')]:
+                     or n.startswith('point_toolpath')
+                     or n.startswith('intersections')]:
             try:
                 self._plotter.remove_actor(name)
             except Exception:
@@ -2370,9 +2489,12 @@ class MainWindow(QMainWindow):
                      or self._mach_axis_item.checkState(0) == Qt.Checked)
         show_point = (not hasattr(self, '_mach_point_item')
                       or self._mach_point_item.checkState(0) == Qt.Checked)
+        show_intersection = (not hasattr(self, '_mach_intersection_item')
+                             or self._mach_intersection_item.checkState(0) == Qt.Checked)
         self._set_actors_visibility('flank_feed', show_feed)
         self._set_actors_visibility('flank_axis', show_axis)
         self._set_actors_visibility('point_toolpath', show_point)
+        self._set_actors_visibility('intersections', show_intersection)
         self._plotter.render()
 
     def _clear_3d(self):
